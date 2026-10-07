@@ -5,6 +5,7 @@ Web3 工具库 monorepo（pnpm workspace），每个库独立发布到 npm。
 | 包 | 说明 |
 | --- | --- |
 | [@w3lib/evm-batch-call](packages/evm-batch-call) | 基于 Multicall3 的 EVM / Tron 批量只读请求与预执行，API 兼容 ethcall |
+| [@w3lib/solana-batch-call](packages/solana-batch-call) | Solana 批量读取：SOL / SPL / Token-2022 余额、代币详情、NFT，不依赖 Solana SDK |
 
 ## 目录结构
 
