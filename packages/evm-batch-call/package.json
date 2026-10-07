@@ -1,5 +1,5 @@
 {
-  "name": "evm-batch-call",
+  "name": "@web3-lib/evm-batch-call",
   "version": "0.1.0",
   "description": "Batched EVM/Tron contract reads via Multicall3 with deployless fallback, native balances, RPC failover, auto-batching and staticCall simulation. ethcall compatible.",
   "keywords": [
@@ -51,5 +51,14 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/web3-lib/libs.git",
+    "directory": "packages/evm-batch-call"
+  },
+  "homepage": "https://github.com/web3-lib/libs/tree/main/packages/evm-batch-call#readme",
+  "bugs": {
+    "url": "https://github.com/web3-lib/libs/issues"
   }
 }

@@ -1,15 +1,15 @@
-# evm-batch-call
+# @web3-lib/evm-batch-call
 
 基于 Multicall3 的 EVM / Tron 批量合约读取与交易预执行库，依赖 ethers v6，API 兼容 [ethcall](https://github.com/Destiner/ethcall)。
 
 ```bash
-pnpm add evm-batch-call ethers
+pnpm add @web3-lib/evm-batch-call ethers
 ```
 
 ## 快速上手
 
 ```ts
-import { Provider } from 'evm-batch-call'
+import { Provider } from '@web3-lib/evm-batch-call'
 
 const multi = new Provider(56) // 不传节点：使用内置公共节点（多节点自动故障切换）
 
@@ -77,7 +77,7 @@ ethers 会把 `eth_call` 的**任何** JSON-RPC 错误（限流、`header not fo
 ## 批量读取
 
 ```ts
-import { Contract, Provider } from 'evm-batch-call'
+import { Contract, Provider } from '@web3-lib/evm-batch-call'
 
 const usdt = new Contract(USDT, ERC20_ABI) // 未绑定的 Contract：方法返回 Call，与 ethcall 一致
 const multi = new Provider(56)
@@ -162,7 +162,7 @@ const tron = new Provider(TRON_CHAIN_ID.mainnet, window.tronWeb) // TronLink / O
 ## Tron
 
 ```ts
-import { Provider, TRON_CHAIN_ID, TronProvider, toTronAddress } from 'evm-batch-call'
+import { Provider, TRON_CHAIN_ID, TronProvider, toTronAddress } from '@web3-lib/evm-batch-call'
 
 const multi = new Provider(TRON_CHAIN_ID.mainnet) // 内置 4 个全节点，自动故障切换
 // 或自定义：new Provider(TRON_CHAIN_ID.mainnet, new TronProvider({ apiKey, minInterval: 200 }))
@@ -201,7 +201,7 @@ API 兼容，大多数情况下只需替换 import，现有调用（含 `tryAll<
 
 ```ts
 - import { Contract, Provider } from 'ethcall'
-+ import { Contract, Provider } from 'evm-batch-call'
++ import { Contract, Provider } from '@web3-lib/evm-batch-call'
 
   const multi = new Provider(chainId, ethersProvider)
   const token = new Contract(address, abi) // ABI 现在也可以直接用人类可读字符串
