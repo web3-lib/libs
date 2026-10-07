@@ -53,14 +53,14 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | `getAllowances(owner, spender, tokens, opts)` | `allowances` | 授权额度；`unlimited` 表示额度 ≥ uint96 最大值（覆盖 MaxUint256 及 UNI / COMP 这类截断为 uint96 的代币） |
 | `getNftCollections(contracts, opts)` | `nftCollections` | NFT 集合 standard / name / symbol / totalSupply，`fields` 可选 |
 | `getNftBalances(owner, contracts, opts)` | `nftBalances` | ERC721 持有数量 |
-| `getNftOwners(items, opts)` | `nftOwners` | ERC721 持有人，可混合多个集合；不存在的 tokenId 为 null |
+| `getNftOwners(items, opts)` | `nftOwners` | ERC721 持有人，可混合多个集合；不存在的 tokenId 为 null；Tron 链上返回 T 开头的地址 |
 | `getNftTokenUris(items, opts)` | `nftTokenUris` | 元数据地址：自动兼容 ERC721 `tokenURI` 与 ERC1155 `uri`（`{id}` 按规范替换），`ipfsGateway` 转换 `ipfs://`；首次查询顺带识别集合标准并缓存，之后只发对应的调用 |
 | `getErc1155Balances(owner, items, opts)` | `erc1155Balances` | ERC1155 余额 |
 
 共同的规则：
 
 - **主币**：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）和零地址按主币处理，不发合约调用；name / symbol / 精度来自内置链信息表（`NATIVE_CURRENCIES`），可用 `nativeTokens` / `nativeName` / `nativeSymbol` / `nativeDecimals` 配置
-- **缓存**：decimals / symbol / name / NFT 标准不会变，查过一次后按链缓存（各函数共用），之后只查会变的数据；余额已知精度可以直接传 `{ address, decimals }`
+- **缓存**：decimals / symbol / name / NFT 标准不会变，查过一次后按链缓存（各函数共用），之后只查会变的数据；已知精度可以直接传 `{ address, decimals }`（主币也适用，优先于内置配置）
 - **失败**：单项失败（非合约地址、非法地址、不存在的 tokenId 等）不影响其他项，该项 `success: false`；整个请求失败（节点不可用等）才会抛错
 - **数值**：原始数值是最小单位的十进制字符串，需要计算时用 `BigInt(x)`；`formatted` 保留全部有效小数位、不四舍五入，整数不带小数点（单独格式化可用 `formatAmount(value, decimals)`）
 - **老代币**：symbol / name 返回 bytes32 的代币（MKR 等）也能解析
@@ -81,8 +81,8 @@ await getBalances(user, tokens, { chainId: 56, blockTag: 'pending' })           
 
 - **chainId 自动识别**：EVM 节点 / 钱包用 `eth_chainId`，ethers Provider 用 `getNetwork()`，Tron 读创世区块哈希的最后 4 字节（与 TronGrid 的 `eth_chainId` 一致）；只传 URL 时先按 EVM 识别，失败再按 Tron 识别，所以 Tron 节点 URL 也不用传 chainId
 - **识别结果缓存**：同时发起的识别共用一个请求，失败或超时不缓存（下次重试）。URL 按地址缓存；tronWeb 按当前连接的节点地址缓存（TronLink 切网络后自动重新识别）；EIP-1193 钱包按对象缓存并监听 `chainChanged`，切链时失效，不支持事件监听的钱包不缓存。`clearChainIdCache()` 可手动清空
-- **链校验**：每个节点首次使用前会确认它所在的链与 chainId 一致（结果同样缓存，只多一次请求），不一致时报 `NETWORK_ERROR`，多节点时自动换下一个节点。所以 `[钱包, 公共节点]` 这类组合、或配错了节点 URL，都不会把另一条链的数据当成这条链的返回
-- **Provider 复用**：同一个 chainId + 节点多次调用会复用同一个 Provider（共享连接和合并队列）；只传钱包时每次按钱包当前的链创建，切链后自动按新链查询
+- **链校验**：传入的节点会确认它实际所在的链与 chainId 一致，不一致时报 `NETWORK_ERROR`，多节点时自动换下一个节点。所以 `[钱包, 公共节点]` 这类组合、配错了节点 URL、或用户自己创建的 `BrowserProvider` 在别的链上，都不会把另一条链的数据当成这条链的返回。校验通过已配置好的节点连接进行（带 Tron apiKey 等），与实际请求并行发出、不增加延迟，结果缓存，每个节点只多一次请求；内置公共节点不校验
+- **Provider 复用**：同一个 chainId + 配置 + 节点多次调用会复用同一个 Provider（共享连接和合并队列，最多缓存 32 组，超出淘汰最早的）；只传钱包时每次按钱包当前的链创建，切链后自动按新链查询。`chainId` 为 `null` / `''` 时视为未传
 - 其余 Provider 配置（`fallback`、`nativeSymbol` 等，见[配置](#配置)）也可以直接放进这个参数
 
 ### 合约调用

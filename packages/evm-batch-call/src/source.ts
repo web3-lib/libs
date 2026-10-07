@@ -1,7 +1,7 @@
 import { BrowserProvider, FetchRequest, JsonRpcProvider, makeError, type Eip1193Provider, type TransactionRequest } from 'ethers'
 
 import type { EthersLikeProvider } from './aggregate.js'
-import { canDetectChainId, detectChainId } from './detect.js'
+import { canDetectChainId, detectChainId, detectChainIdCached } from './detect.js'
 import { FallbackRpc, type FallbackOptions } from './fallback.js'
 import { DEFAULT_RPC_URLS, DEFAULT_TRON_HOSTS } from './rpcNodes.js'
 import { TRON_CHAIN_ID, TronProvider, type TronProviderOptions, type TronWebLike } from './tron.js'
@@ -52,17 +52,29 @@ export function resolveSource(
   // 多节点时 Tron 节点不在单节点内重试 429，直接切到下一个节点
   const multiple = list.length > 1
   const timeout = options.fallback?.timeout ?? 10_000
-  const nodes = list.map((item) => withChainCheck(chainId, item, toEthersLike(chainId, item, options, multiple), timeout))
+  const nodes = list.map((item) => {
+    const node = toEthersLike(chainId, item, options, multiple)
+    // 内置公共节点本来就是按 chainId 选出来的，不需要再校验
+    return source === undefined ? node : withChainCheck(chainId, item, node, timeout)
+  })
   return multiple ? new FallbackRpc(nodes, options.fallback) : (nodes[0] as EthersLikeProvider)
 }
+
+/** 识别失败后多久内不再重试识别（期间请求照常发出，不做校验） */
+const CHECK_RETRY_INTERVAL = 60_000
 
 /**
  * 校验节点所在的链与 Provider 的 chainId 一致，避免把另一条链的数据当成这条链的返回：
  * 比如 [钱包, 公共节点] 自动识别出钱包的链后，公共节点其实在另一条链上；或者配错了节点 URL。
- * 不一致时抛 NETWORK_ERROR（多节点时 FallbackRpc 会换下一个节点）。
- * 节点的 chainId 识别有缓存，每个节点只多一次请求；识别本身失败时不拦截（交给实际请求去报错）。
+ *
+ * - 不一致时抛 NETWORK_ERROR（多节点时 FallbackRpc 会换下一个节点）
+ * - 通过已配置好的节点连接识别（带 Tron apiKey / 限流等），结果按来源缓存，每个节点只多一次请求
+ * - 识别与实际请求并行发出，不增加延迟；不一致时丢弃请求结果
+ * - 识别本身失败时不拦截（交给实际请求去报错），并在一段时间内不再重试，避免每次请求都多一次识别
  */
 export class ChainCheckedProvider implements EthersLikeProvider {
+  #checkFailedAt = 0
+
   constructor(
     readonly inner: EthersLikeProvider,
     readonly chainId: number,
@@ -71,12 +83,17 @@ export class ChainCheckedProvider implements EthersLikeProvider {
   ) {}
 
   async #check(): Promise<void> {
-    let actual: number
-    try {
-      actual = await detectChainId(this.source, this.timeout)
-    } catch {
+    if (this.#checkFailedAt && Date.now() - this.#checkFailedAt < CHECK_RETRY_INTERVAL) {
       return
     }
+    let actual: number
+    try {
+      actual = await detectChainIdCached(this.source, () => detectViaNode(this.inner, this.source), this.timeout)
+    } catch {
+      this.#checkFailedAt = Date.now()
+      return
+    }
+    this.#checkFailedAt = 0
     if (actual !== this.chainId) {
       throw makeError(`chainId mismatch: expected ${this.chainId}, but the node is on ${actual}`, 'NETWORK_ERROR', {
         event: 'chainIdMismatch',
@@ -84,14 +101,23 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     }
   }
 
-  async call(tx: TransactionRequest): Promise<string> {
-    await this.#check()
-    return this.inner.call(tx)
+  async #run<T>(request: () => Promise<T>): Promise<T> {
+    const [checked, result] = await Promise.allSettled([this.#check(), request()])
+    if (checked.status === 'rejected') {
+      throw checked.reason
+    }
+    if (result.status === 'rejected') {
+      throw result.reason
+    }
+    return result.value
   }
 
-  async getBalance(...args: Parameters<EthersLikeProvider['getBalance']>): Promise<bigint> {
-    await this.#check()
-    return this.inner.getBalance(...args)
+  call(tx: TransactionRequest): Promise<string> {
+    return this.#run(() => this.inner.call(tx))
+  }
+
+  getBalance(...args: Parameters<EthersLikeProvider['getBalance']>): Promise<bigint> {
+    return this.#run(() => this.inner.getBalance(...args))
   }
 
   async getChainId(): Promise<number> {
@@ -99,13 +125,27 @@ export class ChainCheckedProvider implements EthersLikeProvider {
   }
 }
 
+/** 通过已创建的节点连接识别它实际所在的链 */
+function detectViaNode(node: EthersLikeProvider, source: ProviderSource): Promise<number> {
+  if (node instanceof TronProvider) {
+    return node.getChainId()
+  }
+  // JsonRpcProvider（staticNetwork）/ BrowserProvider（'any' 网络）的 getNetwork 不反映节点实际的链，直接问节点
+  if (node instanceof JsonRpcProvider) {
+    return node.send('eth_chainId', []).then(Number)
+  }
+  return detectChainId(source, Number.POSITIVE_INFINITY)
+}
+
 function withChainCheck(chainId: number, source: ProviderSource, node: EthersLikeProvider, timeout: number): EthersLikeProvider {
-  // EIP-1193 钱包已经用 BrowserProvider 固定在 chainId 上（每次请求都会校验），无法识别的对象跳过
-  if (!Number.isFinite(chainId) || node instanceof BrowserProvider || !canDetectChainId(source)) {
+  if (!Number.isFinite(chainId) || !canDetectChainId(source) || pinnedWallets.has(node)) {
     return node
   }
   return new ChainCheckedProvider(node, chainId, source, timeout)
 }
+
+/** 由 EIP-1193 钱包创建、已固定在 chainId 上的 BrowserProvider（每次请求 ethers 都会校验链），不需要再包一层 */
+const pinnedWallets = new WeakSet<EthersLikeProvider>()
 
 function toEthersLike(chainId: number, source: ProviderSource, options: SourceOptions, multiple: boolean): EthersLikeProvider {
   if (typeof source === 'string') {
@@ -133,7 +173,11 @@ function toEthersLike(chainId: number, source: ProviderSource, options: SourceOp
   if (typeof value.request === 'function') {
     // 传入 chainId：钱包当前所在的链与之不符时请求报 NETWORK_ERROR（network changed），
     // 而不是静默返回另一条链的数据；在多节点列表里会据此自动切到下一个节点
-    return new BrowserProvider(source as Eip1193Provider, Number.isFinite(chainId) ? chainId : undefined)
+    const wallet = new BrowserProvider(source as Eip1193Provider, Number.isFinite(chainId) ? chainId : undefined)
+    if (Number.isFinite(chainId)) {
+      pinnedWallets.add(wallet)
+    }
+    return wallet
   }
   throw new Error('Unsupported provider: expected an RPC URL, an ethers Provider, an EIP-1193 provider or a tronWeb instance')
 }

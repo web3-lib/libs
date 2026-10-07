@@ -1,4 +1,4 @@
-import { FetchRequest } from 'ethers'
+import { BrowserProvider, FetchRequest } from 'ethers'
 
 import type { EthersLikeProvider } from './aggregate.js'
 import type { ProviderSource } from './source.js'
@@ -12,7 +12,8 @@ type Eip1193Like = { request: (args: { method: string }) => Promise<unknown>; on
 // - URL：同一个地址的链不会变，按 URL 缓存
 // - tronWeb：TronLink 切网络时换的是 fullNode.host，按 host 缓存
 // - EIP-1193 钱包：有 on() 的监听 chainChanged，切链时清掉；没有 on() 的不缓存（无法感知切链）
-// - ethers Provider / TronProvider 等对象：按对象缓存
+// - ethers BrowserProvider：底下是钱包，可能切链，不缓存（getNetwork 只问本地钱包，开销很小）
+// - 其他 ethers Provider / TronProvider 等对象：按对象缓存
 const keyedCache = new Map<string, Promise<number>>()
 let objectCache = new WeakMap<object, Promise<number>>()
 const watched = new WeakSet<object>()
@@ -24,6 +25,9 @@ function cacheSlot(source: ProviderSource): CacheSlot {
     return { kind: 'key', key: `url:${source}` }
   }
   const value = source as Partial<EthersLikeProvider & Eip1193Like & TronWebLike> & { fullNode?: { host?: unknown } }
+  if (source instanceof BrowserProvider) {
+    return null
+  }
   if (typeof value.call === 'function') {
     return { kind: 'object', key: source }
   }
@@ -34,6 +38,14 @@ function cacheSlot(source: ProviderSource): CacheSlot {
     return watchChainChanged(source as Eip1193Like) ? { kind: 'object', key: source } : null
   }
   return null
+}
+
+/**
+ * 按来源缓存地执行一次识别（与 detectChainId 共用缓存）。
+ * 链校验用它通过已配置好的节点连接识别（带 apiKey / 限流等），而不是重新创建连接。
+ */
+export function detectChainIdCached(source: ProviderSource, detect: () => Promise<number>, timeout = 10_000): Promise<number> {
+  return cached(source, () => withTimeout(detect(), timeout))
 }
 
 function cached(source: ProviderSource, detect: () => Promise<number>): Promise<number> {
@@ -122,9 +134,18 @@ export function canDetectChainId(source: ProviderSource): boolean {
 
 /** 已创建的连接对象上识别 chainId */
 export async function detectChainIdOf(node: EthersLikeProvider): Promise<number> {
-  const value = node as { getChainId?: () => Promise<number>; getNetwork?: () => Promise<{ chainId: bigint }> }
+  const value = node as {
+    getChainId?: () => Promise<number>
+    send?: (method: string, params: unknown[]) => Promise<unknown>
+    getNetwork?: () => Promise<{ chainId: bigint }>
+  }
   if (typeof value.getChainId === 'function') {
     return Number(await value.getChainId())
+  }
+  // ethers JsonRpcProvider / BrowserProvider：直接问节点。getNetwork 在 staticNetwork 或 'any' 网络下
+  // 返回的是配置 / 首次识别的值，节点（钱包）切链后不会变
+  if (typeof value.send === 'function') {
+    return Number(await value.send('eth_chainId', []))
   }
   if (typeof value.getNetwork === 'function') {
     return Number((await value.getNetwork()).chainId)

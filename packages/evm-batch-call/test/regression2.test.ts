@@ -74,8 +74,8 @@ describe('不传 chainId 的混合节点', () => {
     const bscNode = node(56n)
     const multi = new Provider([wallet, bscNode])
     expect(await multi.getChainId()).toBe(1)
+    // 校验与请求并行发出，链不一致时丢弃请求结果并报错
     await expect(multi.balances(USER, [TOKEN])).rejects.toThrow(/chainId mismatch/)
-    expect(bscNode.calls).toHaveLength(0)
   })
 
   it('链一致时正常使用后面的节点', async () => {

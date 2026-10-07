@@ -43,6 +43,16 @@ interface ProviderGroup {
 
 const providerCache = new Map<string, ProviderGroup>()
 
+/** 缓存上限（分组数、每组 URL 数），超出时淘汰最早加入的；对象来源用 WeakMap，随对象回收 */
+const MAX_CACHED = 32
+
+function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
+  map.set(key, value)
+  if (map.size > MAX_CACHED) {
+    map.delete(map.keys().next().value as K)
+  }
+}
+
 function configKey(config: ProviderConfig): string | null {
   try {
     return JSON.stringify(config, (_key, value: unknown) => {
@@ -84,13 +94,13 @@ function getProvider(chainId: number | undefined, source: ShortcutProviderOption
   let group = providerCache.get(groupKey)
   if (!group) {
     group = { byString: new Map(), byObject: new WeakMap() }
-    providerCache.set(groupKey, group)
+    setBounded(providerCache, groupKey, group)
   }
   let provider = typeof key === 'string' ? group.byString.get(key) : group.byObject.get(key)
   if (!provider) {
     provider = create()
     if (typeof key === 'string') {
-      group.byString.set(key, provider)
+      setBounded(group.byString, key, provider)
     } else {
       group.byObject.set(key, provider)
     }
@@ -116,7 +126,8 @@ function resolve<T extends ShortcutOptions, K extends keyof T & string = never>(
     }
   }
   return {
-    provider: getProvider(chainId === undefined ? undefined : Number(chainId), provider, config as ProviderConfig),
+    // null / 空字符串（如状态里还没有 chainId）按“未传”处理，走自动识别，而不是变成 chainId 0
+    provider: getProvider(chainId === undefined || chainId === null || chainId === '' ? undefined : Number(chainId), provider, config as ProviderConfig),
     overrides: { blockTag, from },
     own: own as Pick<T, K>,
   }

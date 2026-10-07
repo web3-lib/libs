@@ -2,6 +2,8 @@ import type { CallOverrides } from './aggregate.js'
 import { asStringOrBytes32, type Call } from './call.js'
 import { getCachedTokenMeta, setCachedTokenMeta } from './erc20.js'
 import type { Provider } from './provider.js'
+import { isTronChain } from './source.js'
+import { toTronAddress } from './tron.js'
 
 export const ERC721_ABI = [
   'function name() view returns (string)',
@@ -35,7 +37,7 @@ export interface NftOwner {
   contract: string
   /** 十进制字符串 */
   tokenId: string
-  /** 持有人地址；不存在 / 已销毁 / 非 ERC721 时为 null */
+  /** 持有人地址（Tron 链上为 T 开头的地址）；不存在 / 已销毁 / 非 ERC721 时为 null */
   owner: string | null
   success: boolean
 }
@@ -117,12 +119,15 @@ function expandUri(uri: string, tokenId: bigint, gateway?: string): string {
 }
 
 export async function nftOwners(provider: Provider, items: readonly NftItem[], overrides?: CallOverrides): Promise<NftOwner[]> {
+  // Tron 上返回 T 开头的地址，方便与 tronWeb.defaultAddress.base58 等直接比较
+  const tron = isTronChain(await provider.getChainId())
   const ids = items.map((item) => parseTokenId(item.tokenId))
   const calls = items.flatMap((item, i) => (ids[i] === null ? [] : [provider.contract(item.contract, ERC721_ABI as unknown as string[]).ownerOf(ids[i])]))
   const results = calls.length ? await provider.tryAll<string>(calls, overrides) : []
   let j = 0
   return items.map((item, i) => {
-    const owner = ids[i] === null ? null : (results[j++] ?? null)
+    const raw = ids[i] === null ? null : (results[j++] ?? null)
+    const owner = raw !== null && tron ? toTronAddress(raw) : raw
     return { contract: item.contract, tokenId: ids[i] === null ? String(item.tokenId) : tokenIdString(item.tokenId), owner, success: owner !== null }
   })
 }

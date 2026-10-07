@@ -397,13 +397,12 @@ export class Provider implements ContractRunner {
     return asStringOrBytes32(this.erc20(address).symbol())
   }
 
-  /** 解析 balances / allowances 的代币参数：是否主币、已知的 decimals（传入的 > 缓存 > 主币配置） */
+  /** 解析 balances / allowances 的代币参数：是否主币、已知的 decimals（传入的 > 主币配置 / 缓存） */
   #resolveToken(chainId: number, token: BalanceToken, nativeDecimals: number): { address: string; native: boolean; decimals: number | undefined } {
     const address = typeof token === 'string' ? token : token.address
     const native = this.#nativeTokens.has(address.toLowerCase())
-    const decimals = native
-      ? nativeDecimals
-      : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedTokenMeta(chainId, address).decimals)
+    const passed = typeof token === 'string' ? undefined : token.decimals
+    const decimals = passed ?? (native ? nativeDecimals : getCachedTokenMeta(chainId, address).decimals)
     return { address, native, decimals }
   }
 

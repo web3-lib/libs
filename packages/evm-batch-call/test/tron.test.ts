@@ -84,7 +84,6 @@ describe('TronProvider', () => {
     const node = createTronNode('nile')
     const multi = new Provider(TRON_CHAIN_ID.mainnet, new TronProvider({ request: node.request }))
     await expect(multi.all([new Contract(USDT, erc20).symbol()])).rejects.toThrow(/chainId mismatch/)
-    expect(node.requests).toHaveLength(0)
   })
 
   it('Tron 主网走 Multicall3，T 地址可直接用于合约地址和参数', async () => {
