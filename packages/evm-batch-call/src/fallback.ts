@@ -1,7 +1,9 @@
 import { isError, type TransactionRequest } from 'ethers'
 
 import type { EthersLikeProvider } from './aggregate.js'
+import { detectChainIdOf } from './detect.js'
 import { isExecutionError } from './errors.js'
+import { withTimeout } from './util.js'
 
 export interface FallbackOptions {
   /** 单个节点单次请求超时（毫秒），超时视为该节点故障并换下一个。默认 10000；<= 0 表示不限制 */
@@ -45,6 +47,11 @@ export class FallbackRpc implements EthersLikeProvider {
     return this.#run((node) => node.getBalance(address, blockTag))
   }
 
+  /** 按节点顺序探测 chainId（节点需实现 getChainId，见 detect.ts） */
+  getChainId(): Promise<number> {
+    return this.#run((node) => detectChainIdOf(node))
+  }
+
   async #run<T>(fn: (node: EthersLikeProvider) => Promise<T>): Promise<T> {
     let lastError: unknown
     for (const index of this.#order()) {
@@ -82,24 +89,4 @@ function isDeterministic(err: unknown): boolean {
     isError(err, 'ACTION_REJECTED') ||
     isError(err, 'NUMERIC_FAULT')
   )
-}
-
-class TimeoutError extends Error {
-  constructor(ms: number) {
-    super(`RPC request timed out after ${ms}ms`)
-    this.name = 'TimeoutError'
-  }
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    return promise
-  }
-  let timer: ReturnType<typeof setTimeout>
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new TimeoutError(ms)), ms)
-    }),
-  ]).finally(() => clearTimeout(timer))
 }

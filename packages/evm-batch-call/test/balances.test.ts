@@ -139,14 +139,14 @@ describe('Provider.balances', () => {
 describe('getBalances', () => {
   it('指定节点', async () => {
     const { mock } = setup()
-    const res = await getBalances(56, USER, [NATIVE_TOKEN, TOKEN_B], { provider: mock })
+    const res = await getBalances(USER, [NATIVE_TOKEN, TOKEN_B], { chainId: 56, provider: mock })
     expect(res.map((r) => r.formatted)).toEqual(['1.5', '5'])
     expect(mock.calls).toHaveLength(1)
   })
 
   it('blockTag 透传', async () => {
     const { mock } = setup()
-    await getBalances(56, USER, [TOKEN_B], { provider: mock, blockTag: 'pending' })
+    await getBalances(USER, [TOKEN_B], { chainId: 56, provider: mock, blockTag: 'pending' })
     expect(mock.calls[0]?.blockTag).toBe('pending')
   })
 })
@@ -155,7 +155,7 @@ describe('getBalances 使用浏览器插件钱包', () => {
   it('EVM 钱包（window.ethereum）', async () => {
     const { mock } = setup()
     const ethereum = wallet(mock)
-    const res = await getBalances(56, USER, [NATIVE_TOKEN, TOKEN_B], { provider: ethereum })
+    const res = await getBalances(USER, [NATIVE_TOKEN, TOKEN_B], { chainId: 56, provider: ethereum })
     expect(res.map((r) => r.formatted)).toEqual(['1.5', '5'])
     expect(ethereum.methods).toContain('eth_call')
   })
@@ -163,17 +163,17 @@ describe('getBalances 使用浏览器插件钱包', () => {
   it('钱包不在这条链上时报错，不会返回别的链的数据', async () => {
     const { mock } = setup()
     const ethereum = wallet(mock, '0x1')
-    await expect(getBalances(56, USER, [TOKEN_B], { provider: ethereum })).rejects.toThrow(/network/i)
+    await expect(getBalances(USER, [TOKEN_B], { chainId: 56, provider: ethereum })).rejects.toThrow(/network/i)
   })
 
   it('钱包 + 公共节点：钱包切到别的链时自动改用后面的节点', async () => {
     const { mock } = setup()
     const backup = setup().mock
     const ethereum = wallet(mock)
-    expect((await getBalances(56, USER, [TOKEN_B], { provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
+    expect((await getBalances(USER, [TOKEN_B], { chainId: 56, provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
     expect(backup.calls).toHaveLength(0)
     ethereum.chainId = '0x1' // 用户在钱包里切了链
-    expect((await getBalances(56, USER, [TOKEN_B], { provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
+    expect((await getBalances(USER, [TOKEN_B], { chainId: 56, provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
     expect(backup.calls).toHaveLength(1)
   })
 
@@ -191,7 +191,63 @@ describe('getBalances 使用浏览器插件钱包', () => {
         },
       },
     }
-    const [trx] = await getBalances(TRON_CHAIN_ID.mainnet, 'TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G', [NATIVE_TOKEN], { provider: tronWeb })
+    const [trx] = await getBalances('TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G', [NATIVE_TOKEN], { chainId: TRON_CHAIN_ID.mainnet, provider: tronWeb })
     expect(trx).toMatchObject({ native: true, decimals: 6, formatted: '2.5', success: true })
+  })
+})
+
+describe('symbol 选项', () => {
+  it('返回代币 symbol 和主币 symbol（内置链信息表），不传时不返回该字段', async () => {
+    const { multi } = setup()
+    const res = await multi.balances(USER, [NATIVE_TOKEN, TOKEN_A], { symbol: true })
+    expect(res.map((r) => r.symbol)).toEqual(['BNB', 'AAA'])
+    const plain = await multi.balances(USER, [TOKEN_A])
+    expect('symbol' in (plain[0] as object)).toBe(false)
+  })
+
+  it('symbol 查过一次后缓存', async () => {
+    const { mock, multi } = setup()
+    await multi.balances(USER, [TOKEN_A], { symbol: true })
+    expect(subCalls(mock, 0)).toBe(3) // balanceOf + decimals + symbol
+    const res = await multi.balances(USER, [TOKEN_A], { symbol: true })
+    expect(subCalls(mock, 1)).toBe(1)
+    expect(res[0]?.symbol).toBe('AAA')
+  })
+
+  it('bytes32 symbol 的老代币（如 MKR）也能解析', async () => {
+    const MKR = '0x5000000000000000000000000000000000000005'
+    const bytes32Mkr = '0x4d4b520000000000000000000000000000000000000000000000000000000000'
+    const mock = createMockProvider({
+      contracts: {
+        [MKR]: (data) => {
+          if (data.startsWith('0x95d89b41')) return { success: true, returnData: bytes32Mkr } // symbol()
+          return fakeToken('x', 18, { [USER]: 1n })(data, {})
+        },
+      },
+      multicallAddresses: [MULTICALL3_ADDRESS],
+    })
+    const multi = new Provider(1, mock)
+    expect((await multi.balances(USER, [MKR], { symbol: true }))[0]?.symbol).toBe('MKR')
+    expect((await multi.tokenInfo([MKR]))[0]?.symbol).toBe('MKR')
+  })
+
+  it('symbol 读取失败为 null，不影响余额', async () => {
+    const { multi } = setup()
+    const res = await multi.balances(USER, [NO_CODE, TOKEN_B], { symbol: true })
+    expect(res[0]).toMatchObject({ symbol: null, success: false })
+    expect(res[1]).toMatchObject({ symbol: 'BBB', success: true })
+  })
+
+  it('不在内置表里的链主币 symbol 为 null，可用 nativeSymbol 指定', async () => {
+    const mock = createMockProvider({ multicallAddresses: [MULTICALL3_ADDRESS], balances: { [USER]: 1n } })
+    expect((await new Provider(999_999, mock).balances(USER, [NATIVE_TOKEN], { symbol: true }))[0]?.symbol).toBeNull()
+    const custom = new Provider(999_999, mock, { nativeSymbol: 'XYZ' })
+    expect((await custom.balances(USER, [NATIVE_TOKEN], { symbol: true }))[0]?.symbol).toBe('XYZ')
+  })
+
+  it('getBalances 透传 symbol', async () => {
+    const { mock } = setup()
+    const res = await getBalances(USER, [NATIVE_TOKEN, TOKEN_B], { chainId: 56, provider: mock, symbol: true })
+    expect(res.map((r) => r.symbol)).toEqual(['BNB', 'BBB'])
   })
 })

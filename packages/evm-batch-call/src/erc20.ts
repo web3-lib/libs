@@ -55,6 +55,8 @@ export interface TokenBalance {
   decimals: number
   /** 按 decimals 换算后的十进制字符串，如 "1234.5"；整数不带小数点 */
   formatted: string
+  /** 仅在 symbol: true 时返回；读取失败或主币 symbol 未知时为 null */
+  symbol?: string | null
   /** 余额和 decimals 都查到时为 true；失败时 balance、formatted 都为 "0" */
   success: boolean
 }
@@ -71,18 +73,24 @@ export function formatAmount(value: bigint, decimals: number): string {
   return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
 }
 
-// decimals 不会变，按 chainId + 地址缓存，轮询余额时只需要查 balanceOf
-const decimalsCache = new Map<string, number>()
-
-export function getCachedDecimals(chainId: number, token: string): number | undefined {
-  return decimalsCache.get(`${chainId}:${token.toLowerCase()}`)
+// decimals / symbol 不会变，按 chainId + 地址缓存，轮询余额时只需要查 balanceOf
+interface TokenMeta {
+  decimals?: number
+  symbol?: string
 }
 
-export function setCachedDecimals(chainId: number, token: string, decimals: number): void {
-  decimalsCache.set(`${chainId}:${token.toLowerCase()}`, decimals)
+const tokenMetaCache = new Map<string, TokenMeta>()
+
+export function getCachedTokenMeta(chainId: number, token: string): TokenMeta {
+  return tokenMetaCache.get(`${chainId}:${token.toLowerCase()}`) ?? {}
 }
 
-/** 测试用：清空 decimals 缓存 */
+export function setCachedTokenMeta(chainId: number, token: string, meta: TokenMeta): void {
+  const key = `${chainId}:${token.toLowerCase()}`
+  tokenMetaCache.set(key, { ...tokenMetaCache.get(key), ...meta })
+}
+
+/** 测试用：清空 decimals / symbol 缓存 */
 export function resetDecimalsCache(): void {
-  decimalsCache.clear()
+  tokenMetaCache.clear()
 }

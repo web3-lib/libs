@@ -50,12 +50,20 @@ live('BSC', () => {
   })
 
   it('getBalances：内置节点，主币 + 代币，带 decimals 换算', async () => {
-    const [bnb, usdt] = await getBalances(56, HOLDER, [NATIVE_TOKEN, USDT])
+    const [bnb, usdt] = await getBalances(HOLDER, [NATIVE_TOKEN, USDT], { chainId: 56 })
     expect(bnb).toMatchObject({ native: true, decimals: 18, success: true })
     expect(usdt).toMatchObject({ native: false, decimals: 18, success: true })
     expect(bnb?.balance).toBe((await rpc.getBalance(HOLDER)).toString())
     expect(Number(usdt?.formatted)).toBeCloseTo(Number(usdt?.balance) / 1e18)
     console.log('BSC balances:', bnb?.formatted, 'BNB,', usdt?.formatted, 'USDT')
+  })
+
+  it('不传 chainId：从节点 URL 识别；symbol 选项', async () => {
+    const res = await getBalances(HOLDER, [NATIVE_TOKEN, USDT], { provider: 'https://bsc-dataseed.bnbchain.org', symbol: true })
+    expect(res.map((r) => [r.symbol, r.decimals, r.success])).toEqual([
+      ['BNB', 18, true],
+      ['USDT', 18, true],
+    ])
   })
 
   it('简化写法：绑定合约直接 await + 对象形式', async () => {
@@ -150,10 +158,17 @@ live('Tron 主网', () => {
   })
 
   it('getBalances：TRX 6 位精度', async () => {
-    const [trx, usdt] = await getBalances(TRON_CHAIN_ID.mainnet, HOLDER, [NATIVE_TOKEN, USDT])
+    const [trx, usdt] = await getBalances(HOLDER, [NATIVE_TOKEN, USDT], { chainId: TRON_CHAIN_ID.mainnet })
     expect(trx).toMatchObject({ native: true, decimals: 6, success: true })
     expect(usdt).toMatchObject({ native: false, decimals: 6, success: true })
     console.log('Tron balances:', trx?.formatted, 'TRX,', usdt?.formatted, 'USDT')
+  })
+
+  it('不传 chainId：Tron 节点 URL 自动识别为 Tron', async () => {
+    const multi = new Provider('https://api.trongrid.io')
+    expect(await multi.getChainId()).toBe(TRON_CHAIN_ID.mainnet)
+    const [trx, usdt] = await multi.balances(HOLDER, [NATIVE_TOKEN, USDT], { symbol: true })
+    expect([trx?.symbol, trx?.decimals, usdt?.symbol, usdt?.decimals]).toEqual(['TRX', 6, 'USDT', 6])
   })
 
   it('不传节点用内置 Tron 节点', async () => {

@@ -1,5 +1,7 @@
 export { Contract, bindCall, type BoundMethod, type ContractAbi, type ContractRunner } from './contract.js'
 export { getBalances, type GetBalancesOptions } from './shortcuts.js'
+export { NATIVE_CURRENCIES, getNativeCurrency, type NativeCurrency } from './chains.js'
+export { clearChainIdCache, detectChainId } from './detect.js'
 export {
   DEFAULT_NATIVE_TOKENS,
   ERC20_ABI,

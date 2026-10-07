@@ -202,6 +202,16 @@ export class TronProvider implements EthersLikeProvider {
     return output
   }
 
+  /** chainId = 创世区块哈希的最后 4 字节（与 TronGrid /jsonrpc 的 eth_chainId 一致，主网 728126428） */
+  async getChainId(): Promise<number> {
+    const res = await this.#limit(() => this.#request('wallet/getblockbynum', { num: 0 }))
+    const blockId = String(res?.blockID ?? '')
+    if (!/^[0-9a-f]{64}$/i.test(blockId)) {
+      throw new Error('Unable to detect Tron chainId: unexpected genesis block response')
+    }
+    return Number.parseInt(blockId.slice(-8), 16)
+  }
+
   async getBalance(address: unknown, blockTag?: unknown): Promise<bigint> {
     assertLatest(blockTag)
     const res = await this.#limit(() => this.#request('wallet/getaccount', { address: toTronHex(String(address)) }))

@@ -1,4 +1,4 @@
-import { FunctionFragment, Interface, getAddress, toBeHex, zeroPadValue, type JsonFragmentType, type ParamType, type Result } from 'ethers'
+import { FunctionFragment, Interface, Utf8ErrorFuncs, getAddress, toBeHex, toUtf8String, zeroPadValue, type JsonFragmentType, type ParamType, type Result } from 'ethers'
 
 import { isTronAddress, toEvmAddress } from './tron.js'
 
@@ -29,8 +29,12 @@ export interface Call<T = any> {
     value?: bigint | string | number
     gasLimit?: bigint | string | number
   }
-  /** 内部标记：原生币余额查询（见 Provider.getEthBalance） */
-  kind?: 'ethBalance'
+  /**
+   * 内部标记：
+   * - ethBalance：原生币余额查询（见 Provider.getEthBalance）
+   * - stringOrBytes32：string 返回值，解码失败时按 bytes32 解析（MKR 等老代币的 symbol / name）
+   */
+  kind?: 'ethBalance' | 'stringOrBytes32'
   /** 仅用于类型推断 */
   readonly __result?: T
 }
@@ -133,10 +137,29 @@ function normalizeValue(type: ParamType, value: unknown): unknown {
 
 /** 单返回值直接返回该值，多返回值返回 ethers Result（可按下标或名字取） */
 export function decodeCall<T>(call: Call, returnData: string): T {
+  if (call.kind === 'stringOrBytes32') {
+    return decodeStringOrBytes32(call, returnData) as T
+  }
   const iface = getInterface(call)
   const fragment = iface.fragments[0] as FunctionFragment
   const result: Result = iface.decodeFunctionResult(fragment, returnData)
   return (call.outputs.length === 1 ? result[0] : result) as T
+}
+
+function decodeStringOrBytes32(call: Call, returnData: string): string {
+  try {
+    const iface = getInterface(call)
+    return iface.decodeFunctionResult(iface.fragments[0] as FunctionFragment, returnData)[0] as string
+  } catch (err) {
+    // bytes32：恰好 32 字节，按 UTF-8 解析并去掉末尾的 \0
+    if (/^0x[0-9a-fA-F]{64}$/.test(returnData)) {
+      const text = toUtf8String(returnData, Utf8ErrorFuncs.ignore).replace(/\0+$/, '')
+      if (text) {
+        return text
+      }
+    }
+    throw err
+  }
 }
 
 export function encodeUint256(value: bigint): string {

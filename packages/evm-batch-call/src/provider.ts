@@ -8,8 +8,8 @@ import {
   DEFAULT_NATIVE_TOKENS,
   ERC20_ABI,
   formatAmount,
-  getCachedDecimals,
-  setCachedDecimals,
+  getCachedTokenMeta,
+  setCachedTokenMeta,
   type BalanceToken,
   type Erc20Contract,
   type TokenBalance,
@@ -17,6 +17,8 @@ import {
 } from './erc20.js'
 import { CallFailedError, isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
+import { getNativeCurrency } from './chains.js'
+import { detectChainId } from './detect.js'
 import { isTronChain, resolveSource, type ProviderSource, type SourceOptions } from './source.js'
 
 export type { ProviderSource }
@@ -52,8 +54,24 @@ export interface ProviderConfig extends SourceOptions {
   batch?: BatchOptions
   /** `balances()` 里视为主币的地址，默认 0xeeee…eeee（NATIVE_TOKEN）和零地址 */
   nativeTokens?: readonly string[]
-  /** 主币精度，默认 EVM 链 18、Tron 6（TRX 以 sun 为单位） */
+  /** 主币精度，默认按内置链信息表（NATIVE_CURRENCIES），表里没有时 EVM 18、Tron 6 */
   nativeDecimals?: number
+  /** 主币 symbol（balances 的 symbol 选项用），默认按内置链信息表，表里没有时为 null */
+  nativeSymbol?: string
+}
+
+export interface BalancesOptions extends CallOverrides {
+  /** 同时返回 symbol（代币查一次后缓存；主币取 nativeSymbol / 内置链信息表）。默认 false */
+  symbol?: boolean
+}
+
+/** 构造参数第一个是 chainId 还是节点：数字、数字字符串、0x 十六进制视为 chainId，其余（URL、对象、数组）视为节点 */
+function isChainIdArg(value: unknown): value is number | bigint | string {
+  return (
+    typeof value === 'number' ||
+    typeof value === 'bigint' ||
+    (typeof value === 'string' && /^(\d+|0x[0-9a-fA-F]+)$/.test(value))
+  )
 }
 
 const ETH_BALANCE_INPUTS = [{ name: 'addr', type: 'address' }] as const
@@ -68,28 +86,88 @@ const ETH_BALANCE_OUTPUTS = [{ name: 'balance', type: 'uint256' }] as const
  * ```
  */
 export class Provider implements ContractRunner {
-  readonly #ctx: AggregateContext
+  /** 不传 chainId 时在识别完成前为 null */
+  #ctx: AggregateContext | null = null
+  readonly #ready: Promise<AggregateContext>
   readonly #batcher: Batcher
   readonly #nativeTokens: Set<string>
-  readonly #nativeDecimals: number
+  readonly #config: ProviderConfig
 
   /**
-   * @param chainId 链 ID（接受数字字符串）
-   * @param provider 节点：RPC URL、ethers Provider、钱包（window.ethereum / tronWeb）或它们的数组（主节点 + 备用节点）。
-   *   不传则使用内置的公共节点表
+   * 两种写法：
+   *
+   * ```ts
+   * new Provider(window.ethereum)          // 只传节点：chainId 从节点识别
+   * new Provider([url1, url2], config)
+   * new Provider(56)                       // 只传 chainId：使用内置公共节点
+   * new Provider(56, rpc, config)          // 都传（与 ethcall 相同），不需要识别
+   * ```
+   *
+   * @param provider 节点：RPC URL、ethers Provider、钱包（window.ethereum / tronWeb）或它们的数组（主节点 + 备用节点）
    * @param config 可选配置
    */
-  constructor(chainId: number | string, provider?: ProviderSource | readonly ProviderSource[], config: ProviderConfig = {}) {
-    const id = Number(chainId)
-    this.#ctx = {
-      provider: resolveSource(id, provider, config),
-      chainId: id,
-      multicall: config.deployless ? null : resolveMulticall(id, config.multicall),
-      chunkSize: config.chunkSize ?? 500,
-    }
+  constructor(provider: ProviderSource | readonly ProviderSource[], config?: ProviderConfig)
+  /**
+   * @param chainId 链 ID（接受数字字符串）
+   * @param provider 节点，不传则使用内置的公共节点表
+   * @param config 可选配置
+   */
+  constructor(chainId: number | string, provider?: ProviderSource | readonly ProviderSource[], config?: ProviderConfig)
+  constructor(
+    first: number | string | ProviderSource | readonly ProviderSource[],
+    second?: ProviderSource | readonly ProviderSource[] | ProviderConfig,
+    third?: ProviderConfig,
+  ) {
+    const hasChainId = isChainIdArg(first)
+    const source = (hasChainId ? second : first) as ProviderSource | readonly ProviderSource[] | undefined
+    const config = ((hasChainId ? third : second) ?? {}) as ProviderConfig
+    this.#config = config
     this.#batcher = new Batcher((requests, overrides) => this.#aggregate(requests, overrides), config.batch)
     this.#nativeTokens = new Set((config.nativeTokens ?? DEFAULT_NATIVE_TOKENS).map((t) => t.toLowerCase()))
-    this.#nativeDecimals = config.nativeDecimals ?? (isTronChain(id) ? 6 : 18)
+
+    if (hasChainId) {
+      this.#ctx = this.#createContext(Number(first), source)
+      this.#ready = Promise.resolve(this.#ctx)
+    } else {
+      if (source === undefined) {
+        throw new Error('Provider requires a chainId or a provider')
+      }
+      this.#ready = detectChainId(source, config.fallback?.timeout).then((id) => {
+        this.#ctx = this.#createContext(id, source)
+        return this.#ctx
+      })
+      // 识别失败时由使用方的调用拿到错误，这里避免未处理的 rejection
+      this.#ready.catch(() => {})
+    }
+  }
+
+  #createContext(chainId: number, source: ProviderSource | readonly ProviderSource[] | undefined): AggregateContext {
+    const config = this.#config
+    return {
+      provider: resolveSource(chainId, source, config),
+      chainId,
+      multicall: config.deployless ? null : resolveMulticall(chainId, config.multicall),
+      chunkSize: config.chunkSize ?? 500,
+    }
+  }
+
+  /** 链 ID（不传 chainId 构造时，会等待从节点识别完成） */
+  async getChainId(): Promise<number> {
+    return (await this.#ready).chainId
+  }
+
+  /** 等待初始化完成（只传节点时会先识别 chainId；识别失败在这里抛出） */
+  async ready(): Promise<this> {
+    await this.#ready
+    return this
+  }
+
+  #nativeCurrency(chainId: number): { decimals: number; symbol: string | null } {
+    const known = getNativeCurrency(chainId)
+    return {
+      decimals: this.#config.nativeDecimals ?? known?.decimals ?? (isTronChain(chainId) ? 6 : 18),
+      symbol: this.#config.nativeSymbol ?? known?.symbol ?? null,
+    }
   }
 
   /**
@@ -114,47 +192,71 @@ export class Provider implements ContractRunner {
    * 批量查余额（含按 decimals 换算后的数值），主币和代币混在一起、一次请求。
    *
    * ```ts
-   * const list = await multi.balances(user, [NATIVE_TOKEN, USDT, { address: USDC, decimals: 6 }])
-   * list[1] // { token: USDT, native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', success: true }
+   * const list = await multi.balances(user, [NATIVE_TOKEN, USDT, { address: USDC, decimals: 6 }], { symbol: true })
+   * list[1] // { token: USDT, native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', symbol: 'USDT', success: true }
    * ```
    *
-   * - 主币地址见 config.nativeTokens（默认 0xeeee…eeee 和零地址），精度见 config.nativeDecimals
-   * - decimals 查到一次后缓存，之后只查 balanceOf；也可以直接传 `{ address, decimals }`
+   * - 主币地址见 config.nativeTokens（默认 0xeeee…eeee 和零地址）；精度 / symbol 按内置链信息表，可用 nativeDecimals / nativeSymbol 覆盖
+   * - decimals、symbol 查到一次后缓存，之后只查 balanceOf；也可以直接传 `{ address, decimals }`
    * - 单个代币失败（非合约地址、非法地址等）不影响其他代币，该项 success 为 false
    */
-  async balances(owner: string, tokens: readonly BalanceToken[], overrides?: CallOverrides): Promise<TokenBalance[]> {
-    const chainId = this.#ctx.chainId
+  async balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions = {}): Promise<TokenBalance[]> {
+    const { symbol: withSymbol = false, ...overrides } = options
+    const { chainId } = await this.#ready
+    const nativeCurrency = this.#nativeCurrency(chainId)
     const items = tokens.map((token) => {
       const address = typeof token === 'string' ? token : token.address
       const native = this.#nativeTokens.has(address.toLowerCase())
-      const known = native
-        ? this.#nativeDecimals
-        : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedDecimals(chainId, address))
-      return { address, native, known }
+      const decimals = native
+        ? nativeCurrency.decimals
+        : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedTokenMeta(chainId, address).decimals)
+      const symbol = native ? nativeCurrency.symbol : getCachedTokenMeta(chainId, address).symbol
+      return { address, native, decimals, symbol }
     })
 
     const calls: Call[] = []
-    const plan = items.map(({ address, native, known }) => {
+    const plan = items.map(({ address, native, decimals, symbol }) => {
       const balanceIndex = calls.push(native ? this.getEthBalance(owner) : this.erc20(address).balanceOf(owner)) - 1
-      const decimalsIndex = known === undefined ? calls.push(this.erc20(address).decimals()) - 1 : -1
-      return { balanceIndex, decimalsIndex }
+      const decimalsIndex = decimals === undefined ? calls.push(this.erc20(address).decimals()) - 1 : -1
+      const symbolIndex = withSymbol && !native && symbol === undefined ? calls.push(this.#symbolCall(address)) - 1 : -1
+      return { balanceIndex, decimalsIndex, symbolIndex }
     })
     const results = await this.tryAll(calls, overrides)
 
-    return items.map(({ address, native, known }, i) => {
-      const { balanceIndex, decimalsIndex } = plan[i] as { balanceIndex: number; decimalsIndex: number }
+    return items.map((item, i) => {
+      const { balanceIndex, decimalsIndex, symbolIndex } = plan[i] as { balanceIndex: number; decimalsIndex: number; symbolIndex: number }
       const balance = results[balanceIndex] as bigint | null
-      const fetched = decimalsIndex === -1 ? null : (results[decimalsIndex] as bigint | null)
-      if (fetched !== null && !native) {
-        setCachedDecimals(chainId, address, Number(fetched))
+      const fetchedDecimals = decimalsIndex === -1 ? null : (results[decimalsIndex] as bigint | null)
+      const fetchedSymbol = symbolIndex === -1 ? null : (results[symbolIndex] as string | null)
+      if (!item.native && (fetchedDecimals !== null || fetchedSymbol !== null)) {
+        setCachedTokenMeta(chainId, item.address, {
+          ...(fetchedDecimals !== null ? { decimals: Number(fetchedDecimals) } : {}),
+          ...(fetchedSymbol !== null ? { symbol: fetchedSymbol } : {}),
+        })
       }
-      const decimals = known ?? (fetched === null ? null : Number(fetched))
+      const decimals = item.decimals ?? (fetchedDecimals === null ? null : Number(fetchedDecimals))
+      const extra = withSymbol ? { symbol: item.symbol ?? fetchedSymbol ?? null } : {}
       if (balance === null || decimals === null) {
-        return { token: address, native, balance: '0', decimals: decimals ?? 0, formatted: '0', success: false }
+        return { token: item.address, native: item.native, balance: '0', decimals: decimals ?? 0, formatted: '0', ...extra, success: false }
       }
-      // 结果全是字符串 / 数字 / 布尔，可以直接 JSON.stringify
-      return { token: address, native, balance: balance.toString(), decimals, formatted: formatAmount(balance, decimals), success: true }
+      // 结果全是字符串 / 数字 / 布尔 / null，可以直接 JSON.stringify
+      return {
+        token: item.address,
+        native: item.native,
+        balance: balance.toString(),
+        decimals,
+        formatted: formatAmount(balance, decimals),
+        ...extra,
+        success: true,
+      }
     })
+  }
+
+  /** symbol() 调用：string 解码失败时按 bytes32 解析（MKR 等老代币） */
+  #symbolCall(address: string): Call<string> {
+    const call = this.erc20(address).symbol()
+    call.kind = 'stringOrBytes32'
+    return call
   }
 
   /**
@@ -166,7 +268,9 @@ export class Provider implements ContractRunner {
     const targets = tokens.filter((token) => !this.#nativeTokens.has(token.toLowerCase()))
     const calls = targets.flatMap((token) => {
       const erc20 = this.erc20(token)
-      return [erc20.symbol(), erc20.name(), erc20.decimals()]
+      const name = erc20.name()
+      name.kind = 'stringOrBytes32'
+      return [this.#symbolCall(token), name, erc20.decimals()]
     })
     const results = calls.length ? await this.tryAll(calls, overrides) : []
     const infoByToken = new Map<string, TokenInfo | null>()
@@ -193,7 +297,8 @@ export class Provider implements ContractRunner {
    */
   getEthBalance(address: string): BoundCall<bigint> {
     const call: Call<bigint> = {
-      contract: { address: this.#ctx.multicall?.address ?? MULTICALL3_ADDRESS },
+      // 地址只用于展示：执行时合约模式会换成实际的 multicall 地址，deployless 时由合约内部处理
+      contract: { address: this.#ctx?.multicall?.address ?? MULTICALL3_ADDRESS },
       name: 'getEthBalance',
       inputs: ETH_BALANCE_INPUTS,
       outputs: ETH_BALANCE_OUTPUTS,
@@ -307,7 +412,8 @@ export class Provider implements ContractRunner {
     const merged: StaticCallOverrides = merge(merge({ ...shared }, call.overrides), explicit)
     if (call.kind === 'ethBalance') {
       try {
-        return { success: true, data: (await this.#ctx.provider.getBalance(call.params[0], merged.blockTag)) as T }
+        const { provider } = await this.#ready
+        return { success: true, data: (await provider.getBalance(call.params[0], merged.blockTag)) as T }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err : new Error(String(err)) }
       }
@@ -315,7 +421,8 @@ export class Provider implements ContractRunner {
     let returnData: string
     try {
       const request = encodeCall(call, false)
-      returnData = await this.#ctx.provider.call({
+      const { provider } = await this.#ready
+      returnData = await provider.call({
         to: request.target,
         data: request.callData,
         from: merged.from,
@@ -338,18 +445,21 @@ export class Provider implements ContractRunner {
     }
   }
 
-  /** 底层连接（多节点时是 FallbackRpc） */
+  /** 底层连接（多节点时是 FallbackRpc）。只传节点构造时，需在 ready() 之后读取 */
   get rpc(): EthersLikeProvider {
+    if (!this.#ctx) {
+      throw new Error('Provider is still detecting chainId; await provider.ready() first')
+    }
     return this.#ctx.provider
   }
 
-  /** 当前使用的 multicall 合约（null 表示 deployless） */
+  /** 当前使用的 multicall 合约（null 表示 deployless；只传节点构造时在 ready() 之前也为 null） */
   get multicall(): Multicall | null {
-    return this.#ctx.multicall
+    return this.#ctx?.multicall ?? null
   }
 
-  #aggregate(requests: CallRequest[], overrides?: CallOverrides): Promise<RawResult[]> {
-    return aggregate(this.#ctx, requests, overrides)
+  async #aggregate(requests: CallRequest[], overrides?: CallOverrides): Promise<RawResult[]> {
+    return aggregate(await this.#ready, requests, overrides)
   }
 }
 
