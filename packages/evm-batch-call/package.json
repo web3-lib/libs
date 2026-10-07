@@ -1,0 +1,55 @@
+{
+  "name": "evm-batch-call",
+  "version": "0.1.0",
+  "description": "Batched EVM/Tron contract reads via Multicall3 with deployless fallback, native balances, RPC failover, auto-batching and staticCall simulation. ethcall compatible.",
+  "keywords": [
+    "ethers",
+    "ethereum",
+    "evm",
+    "multicall",
+    "multicall3",
+    "batch",
+    "ethcall"
+  ],
+  "license": "MIT",
+  "author": "L",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "contracts",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:live": "LIVE=1 vitest run test/live.test.ts",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
+    "build:contracts": "node scripts/build-contracts.mjs",
+    "check:rpc": "node scripts/check-rpc-nodes.mjs"
+  },
+  "peerDependencies": {
+    "ethers": "^6.0.0"
+  },
+  "devDependencies": {
+    "ethers": "^6.17.0",
+    "solc": "0.8.30"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
