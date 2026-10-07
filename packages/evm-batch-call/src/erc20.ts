@@ -36,8 +36,53 @@ export interface TokenInfo {
   decimals: number
 }
 
-/** 常见的主币占位地址：多数聚合器用 0xeeee…eeee，部分协议用零地址 */
-export const DEFAULT_NATIVE_TOKENS: readonly string[] = [
-  '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-  '0x0000000000000000000000000000000000000000',
-]
+/** 主币占位地址（多数聚合器、钱包的约定），传给 balances() 时按主币处理 */
+export const NATIVE_TOKEN = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+
+/** balances() 默认视为主币的地址：0xeeee…eeee 和零地址 */
+export const DEFAULT_NATIVE_TOKENS: readonly string[] = [NATIVE_TOKEN, '0x0000000000000000000000000000000000000000']
+
+/** balances() 的代币参数：地址，或带已知 decimals 的对象（跳过 decimals 查询） */
+export type BalanceToken = string | { address: string; decimals?: number }
+
+export interface TokenBalance {
+  /** 传入的代币地址（原样） */
+  token: string
+  /** 是否按主币查询 */
+  native: boolean
+  /** 原始余额（最小单位） */
+  balance: bigint
+  decimals: number
+  /** 按 decimals 换算后的十进制字符串，如 "1234.5"；整数不带小数点 */
+  formatted: string
+  /** 余额和 decimals 都查到时为 true；失败时 balance 为 0n、formatted 为 "0" */
+  success: boolean
+}
+
+/**
+ * 按精度格式化：formatAmount(1234500000n, 6) === '1234.5'，formatAmount(10n ** 18n, 18) === '1'。
+ * 不做四舍五入，保留全部有效小数位。
+ */
+export function formatAmount(value: bigint, decimals: number): string {
+  const negative = value < 0n
+  const digits = (negative ? -value : value).toString().padStart(decimals + 1, '0')
+  const whole = digits.slice(0, digits.length - decimals)
+  const fraction = digits.slice(digits.length - decimals).replace(/0+$/, '')
+  return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
+}
+
+// decimals 不会变，按 chainId + 地址缓存，轮询余额时只需要查 balanceOf
+const decimalsCache = new Map<string, number>()
+
+export function getCachedDecimals(chainId: number, token: string): number | undefined {
+  return decimalsCache.get(`${chainId}:${token.toLowerCase()}`)
+}
+
+export function setCachedDecimals(chainId: number, token: string, decimals: number): void {
+  decimalsCache.set(`${chainId}:${token.toLowerCase()}`, decimals)
+}
+
+/** 测试用：清空 decimals 缓存 */
+export function resetDecimalsCache(): void {
+  decimalsCache.clear()
+}

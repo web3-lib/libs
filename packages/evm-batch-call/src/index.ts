@@ -1,5 +1,15 @@
 export { Contract, bindCall, type BoundMethod, type ContractAbi, type ContractRunner } from './contract.js'
-export { DEFAULT_NATIVE_TOKENS, ERC20_ABI, type Erc20Contract, type TokenInfo } from './erc20.js'
+export { getBalances, type GetBalancesOptions } from './shortcuts.js'
+export {
+  DEFAULT_NATIVE_TOKENS,
+  ERC20_ABI,
+  NATIVE_TOKEN,
+  formatAmount,
+  type BalanceToken,
+  type Erc20Contract,
+  type TokenBalance,
+  type TokenInfo,
+} from './erc20.js'
 export {
   Provider,
   type ProviderConfig,

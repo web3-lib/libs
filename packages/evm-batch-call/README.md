@@ -8,6 +8,29 @@ pnpm add @w3lib/evm-batch-call ethers
 
 ## 快速上手
 
+### 批量查余额
+
+```ts
+import { NATIVE_TOKEN, getBalances } from '@w3lib/evm-batch-call'
+
+// 主币 + 代币一次请求，返回原始余额、decimals 和换算后的数值；不传节点使用内置公共节点
+const list = await getBalances(56, user, [NATIVE_TOKEN, USDT, BUSD])
+// [
+//   { token: NATIVE_TOKEN, native: true,  balance: 1500000000000000000n, decimals: 18, formatted: '1.5',    success: true },
+//   { token: USDT,         native: false, balance: 1234500000000000000000n, decimals: 18, formatted: '1234.5', success: true },
+//   ...
+// ]
+```
+
+- 主币地址：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）和零地址；可通过 `nativeTokens` 配置
+- 主币精度：EVM 链 18、Tron 6（TRX 以 sun 为单位）；可通过 `nativeDecimals` 配置
+- decimals 查过一次后按链缓存，之后轮询只查 `balanceOf`；已知精度可以直接传 `{ address, decimals }`
+- 单个代币失败（非合约地址、非法地址等）不影响其他代币：该项 `success: false`、`balance: 0n`、`formatted: '0'`
+- `formatted` 保留全部有效小数位、不四舍五入，整数不带小数点；单独格式化可用 `formatAmount(value, decimals)`
+- 指定节点或区块：`getBalances(56, user, tokens, { rpc: ['https://…'], blockTag: 'pending' })`；也可以用 Provider 上的同名方法 `multi.balances(user, tokens)`
+
+### 合约调用
+
 ```ts
 import { Provider } from '@w3lib/evm-batch-call'
 
@@ -28,8 +51,7 @@ const { decimals, allowance } = await multi.all({
   allowance: usdt.allowance(user, spender),
 })
 
-// 批量余额（主币 0xeeee…eeee / 零地址 自动识别）、批量代币信息
-const balances = await multi.balances(user, [USDT, NATIVE_TOKEN, BUSD]) // bigint[]，失败为 0n
+// 批量代币信息
 const infos = await multi.tokenInfo([USDT, BUSD]) // { symbol, name, decimals } | null
 
 // 任意合约
@@ -47,6 +69,7 @@ const amountOut = await router.swap.staticCall(params, { value, from: user })
 
 ## 功能
 
+- **批量余额**：`getBalances` / `balances`，主币 + 代币一次请求，带 decimals 换算后的数值
 - **批量读取**：`all` / `tryAll` / `tryEach`，N 条读调用合成一次 `eth_call`；支持数组或对象输入
 - **自动合并**：绑定合约直接 `await`，或 `provider.call(x)`，同一收集窗口内的调用合并成一次请求并去重
 - **预执行**：`staticCall` / `staticCallAll` / `method.staticCall`，带 `from` / `value` 模拟交易，返回解析好的 revert 原因
@@ -191,7 +214,8 @@ new Provider(chainId, nodes?, {
   batch: { wait: 0, maxSize: 500 },        // 自动合并参数
   fallback: { timeout: 10_000, cooldown: 30_000 }, // 节点超时 / 出错节点冷却时间
   tron: { apiKey, minInterval: 200 },      // 用 URL 创建 TronProvider 时的参数
-  nativeTokens: ['0xeeee…eeee'],           // balances() 里视为主币的地址
+  nativeTokens: [NATIVE_TOKEN, ZeroAddress], // balances() 里视为主币的地址（默认值；ZeroAddress 来自 ethers）
+  nativeDecimals: 18,                      // 主币精度（默认 EVM 18、Tron 6）
 })
 ```
 
@@ -215,7 +239,7 @@ API 兼容，大多数情况下只需替换 import，现有调用（含 `tryAll<
 const multi = new Provider(chainId, ['https://rpc-1.example', 'https://rpc-2.example'])
 
 // 主币余额不用再单独 getBalance，和代币余额一次查
-const balances = await multi.balances(account, tokens) // bigint[]
+const balances = await multi.balances(account, tokens) // [{ balance, decimals, formatted, success }]
 
 // 代币信息一次查
 const infos = await multi.tokenInfo(tokens)

@@ -4,10 +4,20 @@ import { aggregate, type AggregateContext, type BlockTag, type CallOverrides, ty
 import { Batcher, type BatchOptions } from './batcher.js'
 import { decodeCall, encodeCall, type BoundCall, type Call, type CallRequest, type FailableCall, type RawResult } from './call.js'
 import { Contract, bindCall, type ContractAbi, type ContractRunner } from './contract.js'
-import { DEFAULT_NATIVE_TOKENS, ERC20_ABI, type Erc20Contract, type TokenInfo } from './erc20.js'
+import {
+  DEFAULT_NATIVE_TOKENS,
+  ERC20_ABI,
+  formatAmount,
+  getCachedDecimals,
+  setCachedDecimals,
+  type BalanceToken,
+  type Erc20Contract,
+  type TokenBalance,
+  type TokenInfo,
+} from './erc20.js'
 import { CallFailedError, isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
-import { resolveSource, type ProviderSource, type SourceOptions } from './source.js'
+import { isTronChain, resolveSource, type ProviderSource, type SourceOptions } from './source.js'
 
 export type { ProviderSource }
 
@@ -40,8 +50,10 @@ export interface ProviderConfig extends SourceOptions {
   chunkSize?: number
   /** `provider.call()` 自动合并的参数 */
   batch?: BatchOptions
-  /** `balances()` 里视为主币的地址，默认 0xeeee…eeee 和零地址 */
+  /** `balances()` 里视为主币的地址，默认 0xeeee…eeee（NATIVE_TOKEN）和零地址 */
   nativeTokens?: readonly string[]
+  /** 主币精度，默认 EVM 链 18、Tron 6（TRX 以 sun 为单位） */
+  nativeDecimals?: number
 }
 
 const ETH_BALANCE_INPUTS = [{ name: 'addr', type: 'address' }] as const
@@ -59,6 +71,7 @@ export class Provider implements ContractRunner {
   readonly #ctx: AggregateContext
   readonly #batcher: Batcher
   readonly #nativeTokens: Set<string>
+  readonly #nativeDecimals: number
 
   /**
    * @param chainId 链 ID（接受数字字符串）
@@ -76,6 +89,7 @@ export class Provider implements ContractRunner {
     }
     this.#batcher = new Batcher((requests, overrides) => this.#aggregate(requests, overrides), config.batch)
     this.#nativeTokens = new Set((config.nativeTokens ?? DEFAULT_NATIVE_TOKENS).map((t) => t.toLowerCase()))
+    this.#nativeDecimals = config.nativeDecimals ?? (isTronChain(id) ? 6 : 18)
   }
 
   /**
@@ -97,15 +111,49 @@ export class Provider implements ContractRunner {
   }
 
   /**
-   * 批量查余额，主币和代币混在一起、一次请求。主币地址见 config.nativeTokens。
-   * 查询失败（非合约地址、非法地址等）的位置为 0n；需要区分失败请用 tryAll。
+   * 批量查余额（含按 decimals 换算后的数值），主币和代币混在一起、一次请求。
+   *
+   * ```ts
+   * const list = await multi.balances(user, [NATIVE_TOKEN, USDT, { address: USDC, decimals: 6 }])
+   * list[1] // { token: USDT, native: false, balance: 1234500000000000000000n, decimals: 18, formatted: '1234.5', success: true }
+   * ```
+   *
+   * - 主币地址见 config.nativeTokens（默认 0xeeee…eeee 和零地址），精度见 config.nativeDecimals
+   * - decimals 查到一次后缓存，之后只查 balanceOf；也可以直接传 `{ address, decimals }`
+   * - 单个代币失败（非合约地址、非法地址等）不影响其他代币，该项 success 为 false
    */
-  async balances(owner: string, tokens: readonly string[], overrides?: CallOverrides): Promise<bigint[]> {
-    const calls = tokens.map((token) =>
-      this.#nativeTokens.has(token.toLowerCase()) ? this.getEthBalance(owner) : this.erc20(token).balanceOf(owner),
-    )
-    const results = await this.tryAll<bigint>(calls, overrides)
-    return results.map((balance) => balance ?? 0n)
+  async balances(owner: string, tokens: readonly BalanceToken[], overrides?: CallOverrides): Promise<TokenBalance[]> {
+    const chainId = this.#ctx.chainId
+    const items = tokens.map((token) => {
+      const address = typeof token === 'string' ? token : token.address
+      const native = this.#nativeTokens.has(address.toLowerCase())
+      const known = native
+        ? this.#nativeDecimals
+        : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedDecimals(chainId, address))
+      return { address, native, known }
+    })
+
+    const calls: Call[] = []
+    const plan = items.map(({ address, native, known }) => {
+      const balanceIndex = calls.push(native ? this.getEthBalance(owner) : this.erc20(address).balanceOf(owner)) - 1
+      const decimalsIndex = known === undefined ? calls.push(this.erc20(address).decimals()) - 1 : -1
+      return { balanceIndex, decimalsIndex }
+    })
+    const results = await this.tryAll(calls, overrides)
+
+    return items.map(({ address, native, known }, i) => {
+      const { balanceIndex, decimalsIndex } = plan[i] as { balanceIndex: number; decimalsIndex: number }
+      const balance = results[balanceIndex] as bigint | null
+      const fetched = decimalsIndex === -1 ? null : (results[decimalsIndex] as bigint | null)
+      if (fetched !== null && !native) {
+        setCachedDecimals(chainId, address, Number(fetched))
+      }
+      const decimals = known ?? (fetched === null ? null : Number(fetched))
+      if (balance === null || decimals === null) {
+        return { token: address, native, balance: 0n, decimals: decimals ?? 0, formatted: '0', success: false }
+      }
+      return { token: address, native, balance, decimals, formatted: formatAmount(balance, decimals), success: true }
+    })
   }
 
   /**

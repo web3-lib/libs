@@ -130,19 +130,6 @@ describe('兼容 ethcall 写法', () => {
 })
 
 describe('快捷方法', () => {
-  it('balances：主币和代币一次查，失败为 0n', async () => {
-    const { mock, multi } = setup()
-    const res = await multi.balances(USER, [TOKEN_A, NATIVE, TOKEN_B, NO_CODE, 'bad-address'])
-    expect(res).toEqual([100n, 42n, 200n, 0n, 0n])
-    expect(mock.calls).toHaveLength(1)
-  })
-
-  it('balances：自定义主币地址', async () => {
-    const mock = createMockProvider({ multicallAddresses: [MULTICALL3_ADDRESS], balances: { [USER]: 7n } })
-    const multi = new Provider(56, mock, { nativeTokens: ['0x0000000000000000000000000000000000001010'] })
-    expect(await multi.balances(USER, ['0x0000000000000000000000000000000000001010'])).toEqual([7n])
-  })
-
   it('tokenInfo：symbol / name / decimals，非代币为 null', async () => {
     const { mock, multi } = setup()
     const res = await multi.tokenInfo([TOKEN_A, NO_CODE, NATIVE])

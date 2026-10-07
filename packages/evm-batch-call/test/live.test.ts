@@ -5,7 +5,7 @@
 import { JsonRpcProvider } from 'ethers'
 import { describe, expect, it } from 'vitest'
 
-import { CallFailedError, Contract, Provider, TRON_CHAIN_ID, TronProvider } from '../src/index.js'
+import { CallFailedError, Contract, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, TronProvider, getBalances } from '../src/index.js'
 
 const live = process.env.LIVE ? describe : describe.skip
 
@@ -47,6 +47,15 @@ live('BSC', () => {
     expect(await usdt.symbol()).toBe('USDT')
     const multi = new Provider(56, ['https://bad-node.invalid', 'https://bsc-dataseed.bnbchain.org'])
     expect(await multi.balances(HOLDER, [USDT, '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'])).toHaveLength(2)
+  })
+
+  it('getBalances：内置节点，主币 + 代币，带 decimals 换算', async () => {
+    const [bnb, usdt] = await getBalances(56, HOLDER, [NATIVE_TOKEN, USDT])
+    expect(bnb).toMatchObject({ native: true, decimals: 18, success: true })
+    expect(usdt).toMatchObject({ native: false, decimals: 18, success: true })
+    expect(bnb?.balance).toBe(await rpc.getBalance(HOLDER))
+    expect(Number(usdt?.formatted)).toBeCloseTo(Number(usdt?.balance) / 1e18)
+    console.log('BSC balances:', bnb?.formatted, 'BNB,', usdt?.formatted, 'USDT')
   })
 
   it('简化写法：绑定合约直接 await + 对象形式', async () => {
@@ -138,6 +147,13 @@ live('Tron 主网', () => {
     const [symbol, trx] = await multi.tryAll([usdt.symbol(), multi.getEthBalance(HOLDER)])
     expect(symbol).toBe('USDT')
     expect(trx).toBe(await tron.getBalance(HOLDER))
+  })
+
+  it('getBalances：TRX 6 位精度', async () => {
+    const [trx, usdt] = await getBalances(TRON_CHAIN_ID.mainnet, HOLDER, [NATIVE_TOKEN, USDT])
+    expect(trx).toMatchObject({ native: true, decimals: 6, success: true })
+    expect(usdt).toMatchObject({ native: false, decimals: 6, success: true })
+    console.log('Tron balances:', trx?.formatted, 'TRX,', usdt?.formatted, 'USDT')
   })
 
   it('不传节点用内置 Tron 节点', async () => {
