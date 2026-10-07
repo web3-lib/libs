@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { MULTICALL3_ADDRESS, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, formatAmount, getBalances } from '../src/index.js'
 import { multicall3Interface, resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
+import { resetBalancesProviderCache } from '../src/shortcuts.js'
 import { createMockProvider, fakeToken } from './mockProvider.js'
 
 const TOKEN_A = '0x1000000000000000000000000000000000000001' // 18 位
@@ -32,7 +33,24 @@ function subCalls(mock: ReturnType<typeof createMockProvider>, index: number): n
 beforeEach(() => {
   resetMulticallCache()
   resetDecimalsCache()
+  resetBalancesProviderCache()
 })
+
+/** 模拟浏览器插件钱包（EIP-1193），请求转给 mock 节点；chainId 可变以模拟用户切链 */
+function wallet(mock: ReturnType<typeof createMockProvider>, chainId = '0x38') {
+  const state = { chainId, methods: [] as string[] }
+  return Object.assign(state, {
+    async request({ method, params }: { method: string; params?: any[] }) {
+      state.methods.push(method)
+      if (method === 'eth_chainId') return state.chainId
+      if (method === 'eth_call') {
+        const [tx, blockTag] = params as [any, string]
+        return mock.call({ ...tx, blockTag })
+      }
+      throw new Error(`unsupported ${method}`)
+    },
+  })
+}
 
 describe('formatAmount', () => {
   it('按精度换算，去掉多余的 0，整数不带小数点', () => {
@@ -119,16 +137,61 @@ describe('Provider.balances', () => {
 })
 
 describe('getBalances', () => {
-  it('传 rpc 时用指定节点', async () => {
+  it('指定节点', async () => {
     const { mock } = setup()
-    const res = await getBalances(56, USER, [NATIVE_TOKEN, TOKEN_B], { rpc: mock })
+    const res = await getBalances(56, USER, [NATIVE_TOKEN, TOKEN_B], { provider: mock })
     expect(res.map((r) => r.formatted)).toEqual(['1.5', '5'])
     expect(mock.calls).toHaveLength(1)
   })
 
   it('blockTag 透传', async () => {
     const { mock } = setup()
-    await getBalances(56, USER, [TOKEN_B], { rpc: mock, blockTag: 'pending' })
+    await getBalances(56, USER, [TOKEN_B], { provider: mock, blockTag: 'pending' })
     expect(mock.calls[0]?.blockTag).toBe('pending')
+  })
+})
+
+describe('getBalances 使用浏览器插件钱包', () => {
+  it('EVM 钱包（window.ethereum）', async () => {
+    const { mock } = setup()
+    const ethereum = wallet(mock)
+    const res = await getBalances(56, USER, [NATIVE_TOKEN, TOKEN_B], { provider: ethereum })
+    expect(res.map((r) => r.formatted)).toEqual(['1.5', '5'])
+    expect(ethereum.methods).toContain('eth_call')
+  })
+
+  it('钱包不在这条链上时报错，不会返回别的链的数据', async () => {
+    const { mock } = setup()
+    const ethereum = wallet(mock, '0x1')
+    await expect(getBalances(56, USER, [TOKEN_B], { provider: ethereum })).rejects.toThrow(/network/i)
+  })
+
+  it('钱包 + 公共节点：钱包切到别的链时自动改用后面的节点', async () => {
+    const { mock } = setup()
+    const backup = setup().mock
+    const ethereum = wallet(mock)
+    expect((await getBalances(56, USER, [TOKEN_B], { provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
+    expect(backup.calls).toHaveLength(0)
+    ethereum.chainId = '0x1' // 用户在钱包里切了链
+    expect((await getBalances(56, USER, [TOKEN_B], { provider: [ethereum, backup] }))[0]?.formatted).toBe('5')
+    expect(backup.calls).toHaveLength(1)
+  })
+
+  it('Tron 钱包（window.tronWeb）', async () => {
+    const tronWeb = {
+      defaultAddress: { base58: 'TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G' },
+      fullNode: {
+        request: async (path: string) => {
+          if (path !== 'wallet/triggerconstantcontract') throw new Error(path)
+          // 主网 Multicall3 上的 aggregate3：返回一条 getEthBalance 结果（2.5 TRX）
+          const ret = multicall3Interface.encodeFunctionResult('aggregate3', [
+            [[true, '0x' + (2_500_000n).toString(16).padStart(64, '0')]],
+          ])
+          return { constant_result: [ret.slice(2)], result: { result: true }, transaction: { ret: [{}] } }
+        },
+      },
+    }
+    const [trx] = await getBalances(TRON_CHAIN_ID.mainnet, 'TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G', [NATIVE_TOKEN], { provider: tronWeb })
+    expect(trx).toMatchObject({ native: true, decimals: 6, formatted: '2.5', success: true })
   })
 })

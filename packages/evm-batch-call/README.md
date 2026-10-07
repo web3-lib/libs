@@ -28,7 +28,20 @@ const list = await getBalances(56, user, [NATIVE_TOKEN, USDT, BUSD])
 - 结果字段都是字符串 / 数字 / 布尔，可以直接 `JSON.stringify` 传给前端或接口；`balance` 是最小单位的十进制字符串，需要计算时用 `BigInt(balance)`
 - 单个代币失败（非合约地址、非法地址等）不影响其他代币：该项 `success: false`，`balance`、`formatted` 都是 `'0'`
 - `formatted` 保留全部有效小数位、不四舍五入，整数不带小数点；单独格式化可用 `formatAmount(value, decimals)`
-- 指定节点或区块：`getBalances(56, user, tokens, { rpc: ['https://…'], blockTag: 'pending' })`；也可以用 Provider 上的同名方法 `multi.balances(user, tokens)`
+- 也可以用 Provider 上的同名方法 `multi.balances(user, tokens)`
+
+指定节点或浏览器插件钱包（`provider` 与 `new Provider(chainId, provider)` 的第二个参数相同）：
+
+```ts
+await getBalances(56, user, tokens, { provider: 'https://bsc-dataseed.bnbchain.org' })        // 单个节点
+await getBalances(56, user, tokens, { provider: ['https://rpc-1.example', 'https://rpc-2.example'] }) // 主节点 + 备用节点
+await getBalances(56, user, tokens, { provider: window.ethereum })                             // EVM 钱包
+await getBalances(56, user, tokens, { provider: [window.ethereum, 'https://bsc-dataseed.bnbchain.org'] }) // 钱包优先，失败用公共节点
+await getBalances(TRON_CHAIN_ID.mainnet, user, tokens, { provider: window.tronWeb })            // Tron 钱包
+await getBalances(56, user, tokens, { blockTag: 'pending' })                                   // 指定区块
+```
+
+同一个钱包或同一组 URL 多次调用时会复用同一个 Provider。
 
 ### 合约调用
 
@@ -181,7 +194,7 @@ const tron = new Provider(TRON_CHAIN_ID.mainnet, window.tronWeb) // TronLink / O
 
 - EVM 钱包内部用 ethers `BrowserProvider` 包装
 - Tron 钱包请求走钱包配置的节点，预执行默认以当前连接地址作为 `from`，切换账号后自动跟随
-- 请求发到的是**钱包当前所选的链**，要与传入的 `chainId` 一致；可以写成 `[window.ethereum, ...公共节点]`，钱包出错时自动用公共节点
+- 请求发到的是**钱包当前所选的链**。钱包不在传入的 `chainId` 上（包括用户中途切链）时请求会报 `NETWORK_ERROR`，不会返回别的链的数据；写成 `[window.ethereum, ...公共节点]` 时会自动改用公共节点
 
 ## Tron
 

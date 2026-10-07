@@ -78,7 +78,9 @@ function toEthersLike(chainId: number, source: ProviderSource, options: SourceOp
     return TronProvider.fromTronWeb(source as TronWebLike, options.tron)
   }
   if (typeof value.request === 'function') {
-    return new BrowserProvider(source as Eip1193Provider)
+    // 传入 chainId：钱包当前所在的链与之不符时请求报 NETWORK_ERROR（network changed），
+    // 而不是静默返回另一条链的数据；在多节点列表里会据此自动切到下一个节点
+    return new BrowserProvider(source as Eip1193Provider, Number.isFinite(chainId) ? chainId : undefined)
   }
   throw new Error('Unsupported provider: expected an RPC URL, an ethers Provider, an EIP-1193 provider or a tronWeb instance')
 }
