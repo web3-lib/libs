@@ -101,13 +101,18 @@ export interface TokenMetadata {
 }
 
 const MINT_SIZE = 82
-/** Token-2022 扩展从账户类型字节之后开始：基础布局补齐到 165（Account 的大小）+ 1 字节账户类型 */
+const ACCOUNT_SIZE = 165
+/** Token-2022 带扩展的账户：基础布局补齐到 165（Account 的大小），第 165 字节是账户类型，之后是扩展 */
+const ACCOUNT_TYPE_OFFSET = 165
 const EXTENSIONS_OFFSET = 166
+const ACCOUNT_TYPE_MINT = 1
+const ACCOUNT_TYPE_ACCOUNT = 2
 const EXTENSION_TOKEN_METADATA = 19
 
 /** 解析 Mint 账户（SPL Token / Token-2022 通用，Token-2022 额外解析 TokenMetadata 扩展） */
 export function parseMint(data: Uint8Array): MintInfo {
-  if (data.length < MINT_SIZE) {
+  // 只接受真正的 mint：SPL Token 恰好 82 字节；Token-2022 带扩展时账户类型必须是 Mint（避免把代币账户 / 多签账户当成 mint）
+  if (data.length !== MINT_SIZE && !(data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_MINT)) {
     throw new RangeError('Not a mint account')
   }
   const r = new Reader(data)
@@ -159,7 +164,7 @@ export interface TokenAccountInfo {
 
 /** 解析代币账户（SPL Token / Token-2022 前 72 字节相同） */
 export function parseTokenAccount(data: Uint8Array): TokenAccountInfo {
-  if (data.length < 165) {
+  if (data.length !== ACCOUNT_SIZE && !(data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_ACCOUNT)) {
     throw new RangeError('Not a token account')
   }
   const r = new Reader(data)

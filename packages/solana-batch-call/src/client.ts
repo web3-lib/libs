@@ -64,12 +64,23 @@ const TOKEN_STANDARDS: readonly TokenStandard[] = [
 interface TokenMeta {
   decimals?: number
   tokenProgram?: string
-  name?: string
-  symbol?: string
+  /** null：确认没有元数据 */
+  name?: string | null
+  symbol?: string | null
 }
 
-// 不会变（或基本不变）的代币信息，按 网络 + mint 缓存：decimals / 所属程序 / name / symbol
-const tokenMetaCache = new Map<string, TokenMeta>()
+interface CachedMeta extends TokenMeta {
+  /** name / symbol 的写入时间 */
+  namesAt?: number
+}
+
+// 代币信息缓存（按 网络 + mint）：decimals / 所属程序不会变，永久缓存；
+// name / symbol 来自可修改的元数据，缓存 1 小时。条目数有上限，超出时淘汰最早写入的
+const NAME_TTL = 60 * 60 * 1000
+const MAX_CACHED_TOKENS = 50_000
+const tokenMetaCache = new Map<string, CachedMeta>()
+
+let clientIds = 0
 
 /** 测试用：清空代币信息缓存 */
 export function resetTokenMetaCache(): void {
@@ -101,6 +112,7 @@ export class SolanaClient {
   readonly #cluster: Cluster | undefined
   readonly #commitment: Commitment
   readonly #nativeMints: Set<string>
+  readonly #scopeId: string
 
   constructor(provider?: RpcSource | readonly RpcSource[], config: ClientConfig = {}) {
     const resolved = resolveSource(provider, config.cluster ?? (provider === undefined ? 'mainnet' : undefined), config)
@@ -109,6 +121,8 @@ export class SolanaClient {
     this.#cluster = config.cluster ?? (provider === undefined ? 'mainnet' : undefined)
     this.#commitment = config.commitment ?? 'confirmed'
     this.#nativeMints = new Set(config.nativeMints ?? [NATIVE_MINT, SYSTEM_PROGRAM_ID])
+    // 网络已知时按网络共享缓存；未知（自定义节点且没指定 cluster）时缓存只在本客户端内使用，避免不同网络串数据
+    this.#scopeId = this.#cluster ?? `client-${++clientIds}`
   }
 
   /** 节点所在网络（按创世区块哈希识别）；不是 mainnet / devnet / testnet 时为 null */
@@ -212,7 +226,13 @@ export class SolanaClient {
         return withSymbolField({ token: item.mint, native: false, balance: '0', decimals: 0, formatted: '0', tokenProgram: null, success: false }, withSymbol, null)
       }
       const mintAccount = item.mintIndex === -1 ? null : (accounts[item.mintIndex] ?? null)
-      const meta = this.#learn(scope, item.mint, mintAccount, item.metadataIndex === -1 ? null : (accounts[item.metadataIndex] ?? null))
+      const meta = this.#learn(
+        scope,
+        item.mint,
+        mintAccount,
+        item.metadataIndex === -1 ? null : (accounts[item.metadataIndex] ?? null),
+        item.metadataIndex !== -1 && item.mintIndex !== -1,
+      )
       // 代币账户由哪个程序持有就是哪个；mint 账户的 owner 也能确定程序
       let amount = 0n
       for (const ata of item.atas) {
@@ -269,6 +289,10 @@ export class SolanaClient {
         if (!mint || decimals === undefined) {
           continue
         }
+        // Wrapped SOL（So111…112）默认按原生 SOL 处理，已体现在 SOL 余额那一项里，不再重复列出
+        if (this.#nativeMints.has(mint)) {
+          continue
+        }
         const prev = held.get(mint)
         const amount = BigInt(info?.tokenAmount?.amount ?? '0')
         held.set(mint, { amount: (prev?.amount ?? 0n) + amount, decimals, program })
@@ -278,11 +302,12 @@ export class SolanaClient {
     const sol = BigInt(lamports.value)
 
     const targets = mints ?? [NATIVE_MINT, ...[...held].filter(([, h]) => h.amount > 0n).map(([mint]) => mint)]
-    // scan 模式下没持有的代币拿不到 decimals：走一遍 ATA 路径补上（也顺带拿 symbol）
-    const missing = targets.filter((mint) => !this.#nativeMints.has(mint) && !held.has(mint))
-    const symbolsNeeded = withSymbol ? targets.filter((mint) => !this.#nativeMints.has(mint) && getMeta(scope, mint).symbol === undefined) : []
-    const extra = missing.length || symbolsNeeded.length ? await this.#ataBalances(owner, [...new Set([...missing, ...symbolsNeeded])], withSymbol) : []
-    const extraByMint = new Map(extra.map((b) => [b.token, b]))
+    // 没持有的代币（拿不到 decimals）和缺 symbol 的代币：只读 mint / 元数据账户补上，不需要 ATA
+    await this.#loadMeta(
+      scope,
+      targets.filter((mint) => !this.#nativeMints.has(mint) && isAddress(mint)),
+      withSymbol,
+    )
 
     return targets.map((mint): TokenBalance => {
       if (this.#nativeMints.has(mint)) {
@@ -294,9 +319,13 @@ export class SolanaClient {
       }
       const h = held.get(mint)
       if (!h) {
-        // 没持有：余额为 0，decimals 来自 ATA 路径（mint 不存在时 success 为 false）
-        const fallback = extraByMint.get(mint)
-        return fallback ? { ...fallback, balance: '0', formatted: '0' } : { token: mint, native: false, balance: '0', decimals: 0, formatted: '0', tokenProgram: null, success: false }
+        // 没持有：余额为 0；decimals 来自 mint 账户（mint 不存在时 success 为 false）
+        const meta = getMeta(scope, mint)
+        return withSymbolField(
+          { token: mint, native: false, balance: '0', decimals: meta.decimals ?? 0, formatted: '0', tokenProgram: meta.tokenProgram ?? null, success: meta.decimals !== undefined },
+          withSymbol,
+          meta.symbol ?? null,
+        )
       }
       return withSymbolField(
         { token: mint, native: false, balance: h.amount.toString(), decimals: h.decimals, formatted: formatAmount(h.amount, h.decimals), tokenProgram: h.program, success: true },
@@ -304,6 +333,26 @@ export class SolanaClient {
         getMeta(scope, mint).symbol ?? null,
       )
     })
+  }
+
+  /** 补齐 decimals / 所属程序（以及需要时的 symbol）：只读缺的 mint 账户和元数据账户 */
+  async #loadMeta(scope: string, mints: readonly string[], withSymbol: boolean): Promise<void> {
+    const addresses: string[] = []
+    const plan = [...new Set(mints)].flatMap((mint) => {
+      const meta = getMeta(scope, mint)
+      const needSymbol = withSymbol && meta.symbol === undefined
+      if (meta.decimals !== undefined && meta.tokenProgram !== undefined && !needSymbol) {
+        return []
+      }
+      return [{ mint, mintIndex: addresses.push(mint) - 1, metadataIndex: needSymbol ? addresses.push(getMetadataAddress(mint)) - 1 : -1 }]
+    })
+    if (!addresses.length) {
+      return
+    }
+    const accounts = await this.accounts(addresses)
+    for (const { mint, mintIndex, metadataIndex } of plan) {
+      this.#learn(scope, mint, accounts[mintIndex] ?? null, metadataIndex === -1 ? null : (accounts[metadataIndex] ?? null), metadataIndex !== -1)
+    }
   }
 
   /**
@@ -347,7 +396,14 @@ export class SolanaClient {
       const native = this.#nativeMints.has(mint)
       const values: Record<TokenField, unknown> & { exists: boolean } = native
         ? { exists: true, name: 'Solana', symbol: 'SOL', uri: null, decimals: SOL_DECIMALS, supply: null, tokenProgram: null, mintAuthority: null, freezeAuthority: null }
-        : this.#tokenValues(scope, mint, mintIndex === -1 ? null : (accounts[mintIndex] ?? null), metadataIndex === -1 ? null : (accounts[metadataIndex] ?? null), mintIndex !== -1)
+        : this.#tokenValues(
+            scope,
+            mint,
+            mintIndex === -1 ? null : (accounts[mintIndex] ?? null),
+            metadataIndex === -1 ? null : (accounts[metadataIndex] ?? null),
+            mintIndex !== -1,
+            mintIndex !== -1 && metadataIndex !== -1,
+          )
       const out: Record<string, unknown> = { address: mint, native }
       let success = values.exists
       for (const field of fields) {
@@ -374,13 +430,14 @@ export class SolanaClient {
     mintAccount: AccountInfo | null,
     metadataAccount: AccountInfo | null,
     fetchedMint: boolean,
+    lookedForNames = false,
   ): Record<TokenField, unknown> & { exists: boolean } {
-    const meta = this.#learn(scope, mint, mintAccount, metadataAccount)
+    const meta = this.#learn(scope, mint, mintAccount, metadataAccount, lookedForNames)
     const info = mintAccount ? safeParseMint(mintAccount) : null
     const uri = info?.metadata?.uri ?? (metadataAccount ? (safeParseMetaplex(metadataAccount)?.uri ?? null) : null)
     return {
-      // 读了 mint 账户就以它为准（不存在则 false）；没读说明全部命中缓存
-      exists: fetchedMint ? info !== null : meta.decimals !== undefined,
+      // 读了 mint 账户就以它为准（不存在则 false）；没读说明请求的字段全部命中缓存
+      exists: fetchedMint ? info !== null : true,
       name: meta.name ?? null,
       symbol: meta.symbol ?? null,
       uri,
@@ -403,7 +460,7 @@ export class SolanaClient {
     return plan.map(({ mint, metadataIndex, mintIndex }): NftDetails => {
       const metadataAccount = metadataIndex === -1 ? null : (accounts[metadataIndex] ?? null)
       const mintAccount = mintIndex === -1 ? null : (accounts[mintIndex] ?? null)
-      this.#learn(scope, mint, mintAccount, metadataAccount)
+      this.#learn(scope, mint, mintAccount, metadataAccount, mintIndex !== -1)
       const metaplex = metadataAccount ? safeParseMetaplex(metadataAccount) : null
       const ext = mintAccount ? (safeParseMint(mintAccount)?.metadata ?? null) : null
       if (!metaplex && !ext) {
@@ -482,11 +539,14 @@ export class SolanaClient {
   }
 
   #scope(): string {
-    return this.#cluster ?? 'unknown'
+    return this.#scopeId
   }
 
-  /** 从 mint 账户 / 元数据账户里学到不会变的信息，写入缓存并返回合并后的结果 */
-  #learn(scope: string, mint: string, mintAccount: AccountInfo | null, metadataAccount: AccountInfo | null): TokenMeta {
+  /**
+   * 从 mint 账户 / 元数据账户里学到的信息写入缓存，返回合并后的结果。
+   * lookedForNames：本次同时读了 mint 和元数据账户，都没有 name / symbol 时记为“确认没有”（null），之后不再重查
+   */
+  #learn(scope: string, mint: string, mintAccount: AccountInfo | null, metadataAccount: AccountInfo | null, lookedForNames = false): TokenMeta {
     const update: TokenMeta = {}
     const info = mintAccount ? safeParseMint(mintAccount) : null
     if (info && mintAccount) {
@@ -503,6 +563,10 @@ export class SolanaClient {
         update.name = metaplex.name
         update.symbol = metaplex.symbol
       }
+    }
+    if (lookedForNames && info && update.name === undefined) {
+      update.name = null
+      update.symbol = null
     }
     setMeta(scope, mint, update)
     return getMeta(scope, mint)
@@ -550,16 +614,33 @@ function safeParseMetaplex(account: AccountInfo): MetaplexMetadata | null {
 }
 
 function getMeta(scope: string, mint: string): TokenMeta {
-  return tokenMetaCache.get(`${scope}:${mint}`) ?? {}
+  const cached = tokenMetaCache.get(`${scope}:${mint}`)
+  if (!cached) {
+    return {}
+  }
+  const { namesAt, ...meta } = cached
+  if (namesAt === undefined || Date.now() - namesAt > NAME_TTL) {
+    delete meta.name
+    delete meta.symbol
+  }
+  return meta
 }
 
 function setMeta(scope: string, mint: string, meta: TokenMeta): void {
-  const defined = Object.fromEntries(Object.entries(meta).filter(([, v]) => v !== undefined))
+  const defined: CachedMeta = Object.fromEntries(Object.entries(meta).filter(([, v]) => v !== undefined))
   if (Object.keys(defined).length === 0) {
     return
   }
+  if ('name' in defined || 'symbol' in defined) {
+    defined.namesAt = Date.now()
+  }
   const key = `${scope}:${mint}`
-  tokenMetaCache.set(key, { ...tokenMetaCache.get(key), ...defined })
+  const merged = { ...tokenMetaCache.get(key), ...defined }
+  tokenMetaCache.delete(key) // 重新插入，保持“最近写入在后”的顺序
+  tokenMetaCache.set(key, merged)
+  if (tokenMetaCache.size > MAX_CACHED_TOKENS) {
+    tokenMetaCache.delete(tokenMetaCache.keys().next().value as string)
+  }
 }
 
 function withSymbolField(balance: TokenBalance, withSymbol: boolean, symbol: string | null): TokenBalance {

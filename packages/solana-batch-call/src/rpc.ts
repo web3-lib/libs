@@ -73,6 +73,13 @@ interface RpcResponse {
 
 let nextId = 1
 
+/** 批量请求被拒绝、可以降级为逐条请求的 HTTP 状态 */
+const BATCH_REJECTED_STATUS = new Set([400, 404, 405, 415, 422])
+
+function isBatchLimitError(message: string | undefined): boolean {
+  return !!message && /batch/i.test(message) && /more than \d+|too (large|many|big)|not (allowed|supported)|exceed/i.test(message)
+}
+
 /**
  * 基于 fetch 的 JSON-RPC 传输：同一收集窗口内的调用合并成一个 JSON-RPC 批量请求。
  * 节点不支持批量（返回非数组）或限制批量大小（如 drpc 免费档最多 3 条）时自动降级。
@@ -133,8 +140,15 @@ export class HttpRpc implements RpcTransport {
     try {
       body = await this.#post(items.map((item, i) => ({ jsonrpc: '2.0', id: ids[i], method: item.method, params: item.params })))
     } catch (err) {
-      // 有的节点对批量请求直接返回 4xx：降级为逐条请求再试一次（5xx / 429 多半是节点本身的问题，不降级）
-      if (err instanceof HttpError && err.status !== undefined && err.status >= 400 && err.status < 500 && err.status !== 429) {
+      if (err instanceof HttpError && err.status === 413 && items.length > 1) {
+        // 请求体太大：批量减半后重发
+        this.#maxBatchSize = Math.max(1, Math.floor(items.length / 2))
+        await this.#redispatch(items)
+        return
+      }
+      // 400 / 404 / 405 / 415 / 422 等：节点多半不接受批量请求，降级为逐条请求
+      // （401 / 403 / 429 / 5xx 是鉴权、限频或节点本身的问题，降级没有用，原样报错）
+      if (err instanceof HttpError && err.status !== undefined && BATCH_REJECTED_STATUS.has(err.status)) {
         this.#disableBatch()
         await Promise.all(items.map((item) => this.#single(item)))
         return
@@ -143,21 +157,27 @@ export class HttpRpc implements RpcTransport {
       return
     }
     if (!Array.isArray(body)) {
-      // 不支持批量：返回单个错误对象
+      const error = (body as RpcResponse)?.error
+      const rpcError = new RpcError(error?.message ?? 'Invalid JSON-RPC batch response', error?.code, error?.data)
+      // 限频 / 鉴权等节点问题：原样报错，不降级（降级成逐条请求只会让限频更严重）
+      if (rpcError.nodeFault) {
+        items.forEach((item) => item.reject(rpcError))
+        return
+      }
+      // 其他（如 -32600 invalid request）：节点不支持批量，降级为逐条请求
       this.#disableBatch()
       await Promise.all(items.map((item) => this.#single(item)))
       return
     }
     const byId = new Map((body as RpcResponse[]).map((res) => [res.id, res]))
-    const limited = (body as RpcResponse[]).find((res) => /batch/i.test(res.error?.message ?? ''))
+    const limited = (body as RpcResponse[]).find((res) => isBatchLimitError(res.error?.message))
     if (limited) {
-      // 如 “Batch of more than 3 requests are not allowed”：按限制缩小批量后重发
+      // 如 “Batch of more than 3 requests are not allowed”：按限制缩小批量后重发；
+      // 限制不小于当前批量（节点的上限判断有偏差）或解析不出数字时，降级为逐条请求，避免无限重发
       const max = Number(/more than (\d+)/i.exec(limited.error?.message ?? '')?.[1])
-      if (Number.isFinite(max) && max > 1) {
+      if (Number.isFinite(max) && max > 1 && max < items.length) {
         this.#maxBatchSize = max
-        for (let i = 0; i < items.length; i += max) {
-          void this.#dispatch(items.slice(i, i + max))
-        }
+        await this.#redispatch(items)
       } else {
         this.#disableBatch()
         await Promise.all(items.map((item) => this.#single(item)))
@@ -178,6 +198,16 @@ export class HttpRpc implements RpcTransport {
       await new Promise((r) => setTimeout(r, 500))
       await Promise.all(limitedItems.map((item) => this.#single(item)))
     }
+  }
+
+  /** 按当前的 maxBatchSize 重新分批发送（每批都比原来小，不会无限循环） */
+  async #redispatch(items: Pending[]): Promise<void> {
+    const size = this.#maxBatchSize
+    const chunks: Pending[][] = []
+    for (let i = 0; i < items.length; i += size) {
+      chunks.push(items.slice(i, i + size))
+    }
+    await Promise.all(chunks.map((chunk) => this.#dispatch(chunk)))
   }
 
   async #single(item: Pending): Promise<void> {
@@ -213,7 +243,7 @@ export class HttpRpc implements RpcTransport {
       const text = await response.text()
       let body: unknown
       try {
-        body = JSON.parse(text)
+        body = parseJson(text)
       } catch {
         throw new HttpError(`Invalid JSON from ${this.url} (HTTP ${response.status})`, response.status)
       }
@@ -229,6 +259,27 @@ export class HttpRpc implements RpcTransport {
       return body
     }
   }
+}
+
+// lamports 等 u64 以 JSON 数字返回，超过 2^53（约 900 万 SOL）时 JSON.parse 会丢精度：
+// 支持 JSON.parse source text access 的环境（Node 21+、新版浏览器）直接取原文；否则先把超长整数改成字符串再解析
+let sourceAccess: boolean | undefined
+
+function parseJson(text: string): unknown {
+  sourceAccess ??= (() => {
+    let supported = false
+    JSON.parse('1', (_key, value, context?: { source?: string }) => {
+      supported = typeof context?.source === 'string'
+      return value
+    })
+    return supported
+  })()
+  if (sourceAccess) {
+    return JSON.parse(text, (_key, value: unknown, context?: { source?: string }) =>
+      typeof value === 'number' && !Number.isSafeInteger(value) && Number.isInteger(value) && context?.source ? context.source : value,
+    )
+  }
+  return JSON.parse(text.replace(/([:[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"'))
 }
 
 function isRateLimited(body: unknown): boolean {

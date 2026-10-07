@@ -62,8 +62,9 @@ await getOwnerNfts(owner)    // 某地址持有的全部 NFT（需要支持索�
 
 其他规则：
 
-- **主币**：`So111…112`（`NATIVE_MINT`，Wrapped SOL 的 mint）和 `11111…1`（System Program）按原生 SOL 查询（lamports，9 位精度）；可用 `nativeMints` 配置，传 `[]` 时 `So111…112` 按普通代币（Wrapped SOL）查询
-- **缓存**：decimals、所属程序、name、symbol 查过一次后按网络缓存（各函数共用），之后轮询只查余额
+- **主币**：`So111…112`（`NATIVE_MINT`，Wrapped SOL 的 mint）和 `11111…1`（System Program）按原生 SOL 查询（lamports，9 位精度）；此时 Wrapped SOL 代币账户里的余额不单独列出。可用 `nativeMints` 配置，传 `[SYSTEM_PROGRAM_ID]` 时 `So111…112` 按普通代币（Wrapped SOL）查询
+- **缓存**：decimals、所属程序永久缓存；name、symbol 来自可修改的元数据，缓存 1 小时（确认没有元数据的代币同样缓存，不会每次重查）。按网络共享（各函数共用）；自定义节点且没指定 `cluster` 时只在该客户端内缓存。最多 5 万个代币，超出淘汰最早的
+- **大数**：lamports 等 u64 超过 2⁵³ 时不会丢精度
 - **失败**：mint 不存在、地址非法等只让该项 `success: false`；节点不可用等整个请求失败时才抛错
 
 ## 节点
@@ -92,8 +93,8 @@ await getBalances(owner, mints, { provider: 'https://my-rpc.example', cluster: '
 **传输层行为**（`HttpRpc`）：
 
 - 收集窗口（`batchWait`，默认 0 即同一 tick）内的调用合并成一个批量请求，最多 `maxBatchSize`（默认 20）条
-- 节点不支持批量请求时自动改为逐条并发；返回 “Batch of more than N” 时按 N 缩小批量
-- HTTP 429 和 JSON-RPC 错误码 429 都会退避重试（`retries`，默认 2；多节点时为 0，直接换节点），批量里只重试被限频的那几条
+- 节点不支持批量请求时自动改为逐条并发；返回 “Batch of more than N” 时按 N 缩小批量；请求体过大（413）时批量减半。批量请求被限频或拒绝访问时不会降级（降级只会让限频更严重）
+- HTTP 429 和 JSON-RPC 错误码 429 都会退避重试（`retries`，默认 2；传入多个自定义节点时为 0，直接换节点；内置节点保留重试），批量里只重试被限频的那几条
 - 单次请求超时 `timeout`，默认 10 秒
 
 **故障切换**（多节点时）：网络错误、超时、限频、403、需要 API Key、请求被拦截等节点问题换下一个节点，出错节点冷却 `cooldown`（默认 30 秒）；参数错误等确定性错误直接抛出（`RpcError`，`isNodeFault(err)` 可判断）。

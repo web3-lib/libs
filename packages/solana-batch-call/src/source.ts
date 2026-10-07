@@ -11,17 +11,17 @@ export type RpcSource = string | RpcTransport | { rpcEndpoint: string }
 
 export interface SourceOptions extends HttpRpcOptions, FallbackOptions {}
 
-function toTransport(source: RpcSource, options: SourceOptions, multiple: boolean): RpcTransport {
+/** @param failFast 多个自定义节点时为 true：不在单节点内重试 429，直接切到下一个节点 */
+function toTransport(source: RpcSource, options: SourceOptions, failFast: boolean): RpcTransport {
   if (typeof source === 'string') {
-    // 多节点时不在单节点内重试 429，直接切到下一个节点
-    return new HttpRpc(source, { ...options, retries: multiple ? 0 : options.retries })
+    return new HttpRpc(source, { ...options, retries: failFast ? 0 : options.retries })
   }
   if (typeof (source as RpcTransport).request === 'function') {
     return source as RpcTransport
   }
   const endpoint = (source as { rpcEndpoint?: unknown }).rpcEndpoint
   if (typeof endpoint === 'string') {
-    return new HttpRpc(endpoint, { ...options, retries: multiple ? 0 : options.retries })
+    return new HttpRpc(endpoint, { ...options, retries: failFast ? 0 : options.retries })
   }
   throw new Error('Unsupported RPC source: expected a URL, a web3.js Connection or an object with request(method, params)')
 }
@@ -113,7 +113,8 @@ export function resolveSource(
     throw new Error('RPC source list is empty')
   }
   const multiple = list.length > 1
-  const raw = list.map((item) => toTransport(item, options, multiple))
+  // 内置节点保留 429 重试：浏览器里官方节点总是 403，实际只有 publicnode 一个可用节点
+  const raw = list.map((item) => toTransport(item, options, multiple && !isDefault))
 
   let detecting: Promise<string> | null = null
   const genesis = (): Promise<string> => {
