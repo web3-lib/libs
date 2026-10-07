@@ -115,7 +115,7 @@ export class Provider implements ContractRunner {
    *
    * ```ts
    * const list = await multi.balances(user, [NATIVE_TOKEN, USDT, { address: USDC, decimals: 6 }])
-   * list[1] // { token: USDT, native: false, balance: 1234500000000000000000n, decimals: 18, formatted: '1234.5', success: true }
+   * list[1] // { token: USDT, native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', success: true }
    * ```
    *
    * - 主币地址见 config.nativeTokens（默认 0xeeee…eeee 和零地址），精度见 config.nativeDecimals
@@ -150,9 +150,10 @@ export class Provider implements ContractRunner {
       }
       const decimals = known ?? (fetched === null ? null : Number(fetched))
       if (balance === null || decimals === null) {
-        return { token: address, native, balance: 0n, decimals: decimals ?? 0, formatted: '0', success: false }
+        return { token: address, native, balance: '0', decimals: decimals ?? 0, formatted: '0', success: false }
       }
-      return { token: address, native, balance, decimals, formatted: formatAmount(balance, decimals), success: true }
+      // 结果全是字符串 / 数字 / 布尔，可以直接 JSON.stringify
+      return { token: address, native, balance: balance.toString(), decimals, formatted: formatAmount(balance, decimals), success: true }
     })
   }
 

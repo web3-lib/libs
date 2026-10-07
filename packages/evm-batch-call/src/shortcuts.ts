@@ -27,7 +27,7 @@ function getDefaultProvider(chainId: number): Provider {
  * import { NATIVE_TOKEN, getBalances } from '@w3lib/evm-batch-call'
  *
  * const list = await getBalances(56, user, [NATIVE_TOKEN, USDT])
- * // [{ token: NATIVE_TOKEN, native: true, balance: 1500000000000000000n, decimals: 18, formatted: '1.5', success: true }, ...]
+ * // [{ token: NATIVE_TOKEN, native: true, balance: '1500000000000000000', decimals: 18, formatted: '1.5', success: true }, ...]
  * ```
  *
  * 等价于 `new Provider(chainId, rpc, config).balances(owner, tokens, { blockTag, from })`。

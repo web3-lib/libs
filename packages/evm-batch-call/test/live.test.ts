@@ -53,7 +53,7 @@ live('BSC', () => {
     const [bnb, usdt] = await getBalances(56, HOLDER, [NATIVE_TOKEN, USDT])
     expect(bnb).toMatchObject({ native: true, decimals: 18, success: true })
     expect(usdt).toMatchObject({ native: false, decimals: 18, success: true })
-    expect(bnb?.balance).toBe(await rpc.getBalance(HOLDER))
+    expect(bnb?.balance).toBe((await rpc.getBalance(HOLDER)).toString())
     expect(Number(usdt?.formatted)).toBeCloseTo(Number(usdt?.balance) / 1e18)
     console.log('BSC balances:', bnb?.formatted, 'BNB,', usdt?.formatted, 'USDT')
   })

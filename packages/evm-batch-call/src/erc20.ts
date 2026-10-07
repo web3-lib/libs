@@ -50,12 +50,12 @@ export interface TokenBalance {
   token: string
   /** 是否按主币查询 */
   native: boolean
-  /** 原始余额（最小单位） */
-  balance: bigint
+  /** 原始余额（最小单位）的十进制字符串，如 "1234500000"；需要计算时用 BigInt(balance) */
+  balance: string
   decimals: number
   /** 按 decimals 换算后的十进制字符串，如 "1234.5"；整数不带小数点 */
   formatted: string
-  /** 余额和 decimals 都查到时为 true；失败时 balance 为 0n、formatted 为 "0" */
+  /** 余额和 decimals 都查到时为 true；失败时 balance、formatted 都为 "0" */
   success: boolean
 }
 

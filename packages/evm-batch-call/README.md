@@ -16,8 +16,8 @@ import { NATIVE_TOKEN, getBalances } from '@w3lib/evm-batch-call'
 // 主币 + 代币一次请求，返回原始余额、decimals 和换算后的数值；不传节点使用内置公共节点
 const list = await getBalances(56, user, [NATIVE_TOKEN, USDT, BUSD])
 // [
-//   { token: NATIVE_TOKEN, native: true,  balance: 1500000000000000000n, decimals: 18, formatted: '1.5',    success: true },
-//   { token: USDT,         native: false, balance: 1234500000000000000000n, decimals: 18, formatted: '1234.5', success: true },
+//   { token: NATIVE_TOKEN, native: true,  balance: '1500000000000000000',    decimals: 18, formatted: '1.5',    success: true },
+//   { token: USDT,         native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', success: true },
 //   ...
 // ]
 ```
@@ -25,7 +25,8 @@ const list = await getBalances(56, user, [NATIVE_TOKEN, USDT, BUSD])
 - 主币地址：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）和零地址；可通过 `nativeTokens` 配置
 - 主币精度：EVM 链 18、Tron 6（TRX 以 sun 为单位）；可通过 `nativeDecimals` 配置
 - decimals 查过一次后按链缓存，之后轮询只查 `balanceOf`；已知精度可以直接传 `{ address, decimals }`
-- 单个代币失败（非合约地址、非法地址等）不影响其他代币：该项 `success: false`、`balance: 0n`、`formatted: '0'`
+- 结果字段都是字符串 / 数字 / 布尔，可以直接 `JSON.stringify` 传给前端或接口；`balance` 是最小单位的十进制字符串，需要计算时用 `BigInt(balance)`
+- 单个代币失败（非合约地址、非法地址等）不影响其他代币：该项 `success: false`，`balance`、`formatted` 都是 `'0'`
 - `formatted` 保留全部有效小数位、不四舍五入，整数不带小数点；单独格式化可用 `formatAmount(value, decimals)`
 - 指定节点或区块：`getBalances(56, user, tokens, { rpc: ['https://…'], blockTag: 'pending' })`；也可以用 Provider 上的同名方法 `multi.balances(user, tokens)`
 

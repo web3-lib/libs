@@ -50,11 +50,13 @@ describe('Provider.balances', () => {
     const { mock, multi } = setup()
     const res = await multi.balances(USER, [NATIVE_TOKEN, TOKEN_A, TOKEN_B])
     expect(res).toEqual([
-      { token: NATIVE_TOKEN, native: true, balance: 1_500_000_000_000_000_000n, decimals: 18, formatted: '1.5', success: true },
-      { token: TOKEN_A, native: false, balance: 1_234_500_000_000_000_000_000n, decimals: 18, formatted: '1234.5', success: true },
-      { token: TOKEN_B, native: false, balance: 5_000_000n, decimals: 6, formatted: '5', success: true },
+      { token: NATIVE_TOKEN, native: true, balance: '1500000000000000000', decimals: 18, formatted: '1.5', success: true },
+      { token: TOKEN_A, native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', success: true },
+      { token: TOKEN_B, native: false, balance: '5000000', decimals: 6, formatted: '5', success: true },
     ])
     expect(mock.calls).toHaveLength(1)
+    // 可以直接序列化
+    expect(JSON.parse(JSON.stringify(res))).toEqual(res)
   })
 
   it('0xeeee…eeee（不区分大小写）和零地址都按主币处理', async () => {
@@ -90,7 +92,7 @@ describe('Provider.balances', () => {
     const { multi } = setup()
     const res = await multi.balances(USER, [TOKEN_A, NO_CODE, 'bad-address', NATIVE_TOKEN])
     expect(res.map((r) => r.success)).toEqual([true, false, false, true])
-    expect(res[1]).toMatchObject({ token: NO_CODE, balance: 0n, formatted: '0', success: false })
+    expect(res[1]).toMatchObject({ token: NO_CODE, balance: '0', formatted: '0', success: false })
   })
 
   it('失败的 decimals 不缓存', async () => {
@@ -112,7 +114,7 @@ describe('Provider.balances', () => {
     const mock = createMockProvider({ multicallAddresses: [MULTICALL3_ADDRESS], balances: { [USER]: 7n } })
     const multi = new Provider(56, mock, { nativeTokens: ['0x0000000000000000000000000000000000001010'] })
     const [res] = await multi.balances(USER, ['0x0000000000000000000000000000000000001010'])
-    expect(res).toMatchObject({ native: true, balance: 7n })
+    expect(res).toMatchObject({ native: true, balance: '7' })
   })
 })
 
