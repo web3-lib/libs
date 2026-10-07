@@ -2,7 +2,7 @@
 import { AbiCoder, JsonRpcProvider, makeError, type TransactionRequest } from 'ethers'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { CallFailedError, Contract, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID, TronProvider, isExecutionError, type Call } from '../src/index.js'
+import { CallFailedError, ChainCheckedProvider, Contract, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID, TronProvider, isExecutionError, type Call } from '../src/index.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { createMockProvider, fakeToken } from './mockProvider.js'
 
@@ -115,11 +115,12 @@ describe('解码缓存', () => {
   })
 })
 
-describe('tokenInfo', () => {
+describe('tokens', () => {
   it('主币占位地址不发调用', async () => {
     const mock = healthy()
     const multi = new Provider(56, mock)
-    expect(await multi.tokenInfo(['0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'])).toEqual([null])
+    const [native] = await multi.tokens(['0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'])
+    expect(native).toMatchObject({ native: true, symbol: 'BNB', decimals: 18 })
     expect(mock.calls).toHaveLength(0)
   })
 })
@@ -129,7 +130,9 @@ describe('Tron', () => {
     const requests: string[] = []
     const node = (name: string) =>
       new TronProvider({
-        request: async () => {
+        request: async (path) => {
+          // 链校验读创世区块，不计入业务请求
+          if (path === 'wallet/getblockbynum') return { blockID: '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc' }
           requests.push(name)
           return { result: { code: 'CONTRACT_VALIDATE_ERROR', message: Buffer.from('balance is not sufficient').toString('hex') } }
         },
@@ -184,7 +187,7 @@ describe('timeout', () => {
     const multi = new Provider(56, [healthy(), healthy()], { fallback: { timeout: 0 } })
     expect(await multi.all([new Contract(TOKEN, ABI).symbol()])).toEqual(['AAA'])
     // URL 节点：FetchRequest 的 timeout 为 0 会让请求立即超时，应保持 ethers 默认值
-    const rpc = new Provider(56, 'https://a.example', { fallback: { timeout: 0 } }).rpc as JsonRpcProvider
+    const rpc = (new Provider(56, 'https://a.example', { fallback: { timeout: 0 } }).rpc as ChainCheckedProvider).inner as JsonRpcProvider
     expect(rpc._getConnection().timeout).toBeGreaterThan(0)
   })
 })

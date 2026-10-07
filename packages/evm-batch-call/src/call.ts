@@ -146,6 +146,12 @@ export function decodeCall<T>(call: Call, returnData: string): T {
   return (call.outputs.length === 1 ? result[0] : result) as T
 }
 
+/** 标记 string 返回值的调用：解码失败时按 bytes32 解析（MKR 等老代币的 symbol / name） */
+export function asStringOrBytes32<T>(call: Call<T>): Call<T> {
+  call.kind = 'stringOrBytes32'
+  return call
+}
+
 function decodeStringOrBytes32(call: Call, returnData: string): string {
   try {
     const iface = getInterface(call)

@@ -2,10 +2,23 @@
  * 连真实节点的测试，默认跳过：`pnpm test:live`
  * 可用环境变量覆盖 RPC：BSC_RPC / ETH_RPC / TRON_HOST / TRON_API_KEY
  */
-import { JsonRpcProvider } from 'ethers'
+import { FetchRequest, JsonRpcProvider } from 'ethers'
 import { describe, expect, it } from 'vitest'
 
-import { CallFailedError, Contract, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, TronProvider, getBalances } from '../src/index.js'
+import {
+  CallFailedError,
+  Contract,
+  NATIVE_TOKEN,
+  Provider,
+  TRON_CHAIN_ID,
+  TronProvider,
+  getAllowances,
+  getBalances,
+  getNftCollections,
+  getNftOwners,
+  getNftTokenUris,
+  getTokens,
+} from '../src/index.js'
 
 const live = process.env.LIVE ? describe : describe.skip
 
@@ -66,6 +79,12 @@ live('BSC', () => {
     ])
   })
 
+  it('getAllowances：授权额度', async () => {
+    const [usdt, bnb] = await getAllowances(HOLDER, '0x10ED43C718714eb63d5aA57B78B54704E256024E', [USDT, NATIVE_TOKEN], { chainId: 56 })
+    expect(usdt).toMatchObject({ native: false, decimals: 18, success: true })
+    expect(bnb).toMatchObject({ native: true, unlimited: true, success: true })
+  })
+
   it('简化写法：绑定合约直接 await + 对象形式', async () => {
     const multi = new Provider(56, rpc)
     const usdt = multi.erc20(USDT)
@@ -73,8 +92,8 @@ live('BSC', () => {
     expect([symbol, decimals]).toEqual(['USDT', 18n])
     expect(bnb).toBeTypeOf('bigint')
     expect(await usdt.transfer.staticCall(USDT, 1n, { from: HOLDER })).toBe(true)
-    const [info] = await multi.tokenInfo([USDT])
-    expect(info).toMatchObject({ symbol: 'USDT', decimals: 18 })
+    const [info] = await multi.tokens([USDT])
+    expect(info).toMatchObject({ symbol: 'USDT', decimals: 18, success: true })
   })
 
   it('deployless 模式结果一致', async () => {
@@ -113,8 +132,36 @@ live('BSC', () => {
   })
 }, 30_000)
 
+live('Ethereum NFT / 代币详情', () => {
+  const BAYC = '0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D'
+  const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+
+  it('NFT 集合：ERC165 识别标准 + name / totalSupply', async () => {
+    const [bayc] = await getNftCollections([BAYC], { chainId: 1, fields: ['standard', 'name', 'symbol', 'totalSupply'] })
+    expect(bayc).toMatchObject({ standard: 'ERC721', name: 'BoredApeYachtClub', symbol: 'BAYC', totalSupply: '10000', success: true })
+  })
+
+  it('NFT 持有人与元数据地址', async () => {
+    const [owner] = await getNftOwners([{ contract: BAYC, tokenId: 1 }], { chainId: 1 })
+    expect(owner?.owner).toMatch(/^0x[0-9a-fA-F]{40}$/)
+    const [uri] = await getNftTokenUris([{ contract: BAYC, tokenId: 1 }], { chainId: 1, ipfsGateway: 'https://ipfs.io/ipfs/' })
+    expect(uri?.uri).toMatch(/^https:\/\/ipfs\.io\/ipfs\/.+\/1$/)
+    console.log('BAYC #1 owner', owner?.owner, 'uri', uri?.uri)
+  })
+
+  it('getTokens：字段可选 + totalSupply 换算', async () => {
+    const [usdc, eth] = await getTokens([USDC, NATIVE_TOKEN], { chainId: 1, fields: ['symbol', 'decimals', 'totalSupply'] })
+    expect(usdc).toMatchObject({ symbol: 'USDC', decimals: 6, success: true })
+    expect(Number(usdc?.totalSupplyFormatted)).toBeGreaterThan(1e9)
+    expect(eth).toMatchObject({ native: true, symbol: 'ETH', decimals: 18, totalSupply: null, success: true })
+  })
+}, 60_000)
+
 live('Ethereum 历史区块', () => {
-  const rpc = new JsonRpcProvider(process.env.ETH_RPC ?? 'https://ethereum-rpc.publicnode.com', 1, { staticNetwork: true })
+  // 公共节点对历史区块请求可能直接挂住，加超时，超时按“不是归档节点”跳过
+  const request = new FetchRequest(process.env.ETH_RPC ?? 'https://ethereum-rpc.publicnode.com')
+  request.timeout = 10_000
+  const rpc = new JsonRpcProvider(request, 1, { staticNetwork: true })
   it('blockTag 早于 Multicall3 部署区块时走 deployless（需要归档节点）', async (ctx) => {
     const dai = new Contract('0x6B175474E89094C44Da98b954EedeAC495271d0F', ERC20ABI)
     try {

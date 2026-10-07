@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CallFailedError,
+  ChainCheckedProvider,
   Contract,
   DEFAULT_RPC_URLS,
   FallbackRpc,
@@ -128,8 +129,10 @@ describe('节点来源', () => {
   it('URL 字符串：EVM 链创建 JsonRpcProvider，Tron 链创建 TronProvider', () => {
     const evm = new Provider(56, ['https://a.example', 'https://b.example'])
     expect(evm.rpc).toBeInstanceOf(FallbackRpc)
-    expect((evm.rpc as FallbackRpc).nodes[0]).toBeInstanceOf(JsonRpcProvider)
-    expect(new Provider(TRON_CHAIN_ID.mainnet, 'https://api.trongrid.io').rpc).toBeInstanceOf(TronProvider)
-    expect((new Provider(TRON_CHAIN_ID.mainnet).rpc as FallbackRpc).nodes[0]).toBeInstanceOf(TronProvider)
+    // URL 节点外面套了一层链校验
+    const inner = (node: unknown) => (node as ChainCheckedProvider).inner
+    expect(inner((evm.rpc as FallbackRpc).nodes[0])).toBeInstanceOf(JsonRpcProvider)
+    expect(inner(new Provider(TRON_CHAIN_ID.mainnet, 'https://api.trongrid.io').rpc)).toBeInstanceOf(TronProvider)
+    expect(inner((new Provider(TRON_CHAIN_ID.mainnet).rpc as FallbackRpc).nodes[0])).toBeInstanceOf(TronProvider)
   })
 })

@@ -62,7 +62,8 @@ function toTronHex(address: string): string {
 
 /** 只用到 tronWeb 的这几个字段，兼容 tronweb v5/v6 及钱包注入的实例 */
 export interface TronWebLike {
-  fullNode: { request: (url: string, payload: Record<string, unknown>, method: string) => Promise<any> }
+  /** host 是当前连接的全节点地址，TronLink 切换网络时会变，用于区分 chainId 缓存 */
+  fullNode: { request: (url: string, payload: Record<string, unknown>, method: string) => Promise<any>; host?: string }
   defaultAddress?: { base58?: string | false }
 }
 
@@ -85,6 +86,8 @@ export interface TronProviderOptions {
   minInterval?: number
   /** 遇到 HTTP 429 时的重试次数（指数退避，从 1s 开始）。默认 3 */
   retries?: number
+  /** 单次 HTTP 请求超时（毫秒，仅对内置 fetch 生效，自定义 request 自行处理）。默认 10000；<= 0 不限制 */
+  timeout?: number
   /** 不传 from 时使用的调用者地址；传函数则每次调用时取值（钱包切换账号后自动跟随） */
   defaultFrom?: string | (() => string | null | undefined)
 }
@@ -131,8 +134,14 @@ export class TronProvider implements EthersLikeProvider {
       if (options.apiKey) {
         headers['TRON-PRO-API-KEY'] = options.apiKey
       }
+      const timeout = options.timeout ?? 10_000
       this.#request = async (path, body) => {
-        const res = await fetch(`${host}/${path}`, { method: 'POST', headers, body: JSON.stringify(body) })
+        const res = await fetch(`${host}/${path}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+          signal: timeout > 0 && Number.isFinite(timeout) ? AbortSignal.timeout(timeout) : undefined,
+        })
         if (!res.ok) {
           throw new HttpError(`Tron request ${path} failed: HTTP ${res.status}`, res.status)
         }

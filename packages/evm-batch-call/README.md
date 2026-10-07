@@ -8,47 +8,91 @@ pnpm add @w3lib/evm-batch-call ethers
 
 ## 快速上手
 
-### 批量查余额
+### 常用查询
+
+常用的批量查询都有现成函数，一次请求查完一批，结果都是字符串 / 数字 / 布尔，可以直接 `JSON.stringify`：
 
 ```ts
-import { NATIVE_TOKEN, getBalances } from '@w3lib/evm-batch-call'
+import {
+  NATIVE_TOKEN,
+  getAllowances,
+  getBalances,
+  getErc1155Balances,
+  getNftBalances,
+  getNftCollections,
+  getNftOwners,
+  getNftTokenUris,
+  getTokens,
+} from '@w3lib/evm-batch-call'
 
-// 主币 + 代币一次请求，返回原始余额、decimals 和换算后的数值；不传节点使用内置公共节点
-const list = await getBalances(56, user, [NATIVE_TOKEN, USDT, BUSD])
-// [
-//   { token: NATIVE_TOKEN, native: true,  balance: '1500000000000000000',    decimals: 18, formatted: '1.5',    success: true },
-//   { token: USDT,         native: false, balance: '1234500000000000000000', decimals: 18, formatted: '1234.5', success: true },
-//   ...
-// ]
+// 余额：主币 + 代币，带 decimals 换算
+await getBalances(user, [NATIVE_TOKEN, USDT], { chainId: 56 })
+// [{ token: NATIVE_TOKEN, native: true, balance: '1500000000000000000', decimals: 18, formatted: '1.5', success: true }, ...]
+await getBalances(user, [NATIVE_TOKEN, USDT], { chainId: 56, symbol: true }) // 额外返回 symbol
+
+// 代币详情，字段可选：name / symbol / decimals / totalSupply（默认前三个）
+await getTokens([USDT, NATIVE_TOKEN], { chainId: 56, fields: ['symbol', 'decimals', 'totalSupply'] })
+// [{ address: USDT, native: false, symbol: 'USDT', decimals: 18, totalSupply: '…', totalSupplyFormatted: '…', success: true }, ...]
+
+// 授权额度：发交易前判断是否需要 approve
+const [allowance] = await getAllowances(user, router, [USDT], { chainId: 56 })
+// { token: USDT, spender: router, allowance: '…', formatted: '100', unlimited: false, success: true }
+
+// NFT
+await getNftCollections([BAYC], { chainId: 1, fields: ['standard', 'name', 'totalSupply'] }) // standard 通过 ERC165 识别
+await getNftBalances(user, [BAYC, MAYC], { chainId: 1 })                                     // ERC721 持有数量
+await getNftOwners([{ contract: BAYC, tokenId: 1 }], { chainId: 1 })                        // ERC721 持有人
+await getNftTokenUris([{ contract: BAYC, tokenId: 1 }], { chainId: 1, ipfsGateway: 'https://ipfs.io/ipfs/' })
+await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137 })         // ERC1155 余额
 ```
 
-- 主币地址：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）和零地址；可通过 `nativeTokens` 配置
-- 主币精度：EVM 链 18、Tron 6（TRX 以 sun 为单位）；可通过 `nativeDecimals` 配置
-- decimals 查过一次后按链缓存，之后轮询只查 `balanceOf`；已知精度可以直接传 `{ address, decimals }`
-- 结果字段都是字符串 / 数字 / 布尔，可以直接 `JSON.stringify` 传给前端或接口；`balance` 是最小单位的十进制字符串，需要计算时用 `BigInt(balance)`
-- 单个代币失败（非合约地址、非法地址等）不影响其他代币：该项 `success: false`，`balance`、`formatted` 都是 `'0'`
-- `formatted` 保留全部有效小数位、不四舍五入，整数不带小数点；单独格式化可用 `formatAmount(value, decimals)`
-- 也可以用 Provider 上的同名方法 `multi.balances(user, tokens)`
+| 函数 | Provider 方法 | 说明 |
+| --- | --- | --- |
+| `getBalances(owner, tokens, opts)` | `balances` | 主币 + 代币余额；`symbol: true` 额外返回 symbol |
+| `getTokens(tokens, opts)` | `tokens` | ERC20 详情，`fields` 选择返回字段，结果类型随之收窄 |
+| `getAllowances(owner, spender, tokens, opts)` | `allowances` | 授权额度；`unlimited` 表示额度 ≥ uint96 最大值（覆盖 MaxUint256 及 UNI / COMP 这类截断为 uint96 的代币） |
+| `getNftCollections(contracts, opts)` | `nftCollections` | NFT 集合 standard / name / symbol / totalSupply，`fields` 可选 |
+| `getNftBalances(owner, contracts, opts)` | `nftBalances` | ERC721 持有数量 |
+| `getNftOwners(items, opts)` | `nftOwners` | ERC721 持有人，可混合多个集合；不存在的 tokenId 为 null |
+| `getNftTokenUris(items, opts)` | `nftTokenUris` | 元数据地址：自动兼容 ERC721 `tokenURI` 与 ERC1155 `uri`（`{id}` 按规范替换），`ipfsGateway` 转换 `ipfs://`；首次查询顺带识别集合标准并缓存，之后只发对应的调用 |
+| `getErc1155Balances(owner, items, opts)` | `erc1155Balances` | ERC1155 余额 |
 
-指定节点或浏览器插件钱包（`provider` 与 `new Provider(chainId, provider)` 的第二个参数相同）：
+共同的规则：
+
+- **主币**：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）和零地址按主币处理，不发合约调用；name / symbol / 精度来自内置链信息表（`NATIVE_CURRENCIES`），可用 `nativeTokens` / `nativeName` / `nativeSymbol` / `nativeDecimals` 配置
+- **缓存**：decimals / symbol / name / NFT 标准不会变，查过一次后按链缓存（各函数共用），之后只查会变的数据；余额已知精度可以直接传 `{ address, decimals }`
+- **失败**：单项失败（非合约地址、非法地址、不存在的 tokenId 等）不影响其他项，该项 `success: false`；整个请求失败（节点不可用等）才会抛错
+- **数值**：原始数值是最小单位的十进制字符串，需要计算时用 `BigInt(x)`；`formatted` 保留全部有效小数位、不四舍五入，整数不带小数点（单独格式化可用 `formatAmount(value, decimals)`）
+- **老代币**：symbol / name 返回 bytes32 的代币（MKR 等）也能解析
+
+### 节点参数
+
+以上函数的节点参数相同，`chainId` 和 `provider` 至少传一个：
 
 ```ts
-await getBalances(56, user, tokens, { provider: 'https://bsc-dataseed.bnbchain.org' })        // 单个节点
-await getBalances(56, user, tokens, { provider: ['https://rpc-1.example', 'https://rpc-2.example'] }) // 主节点 + 备用节点
-await getBalances(56, user, tokens, { provider: window.ethereum })                             // EVM 钱包
-await getBalances(56, user, tokens, { provider: [window.ethereum, 'https://bsc-dataseed.bnbchain.org'] }) // 钱包优先，失败用公共节点
-await getBalances(TRON_CHAIN_ID.mainnet, user, tokens, { provider: window.tronWeb })            // Tron 钱包
-await getBalances(56, user, tokens, { blockTag: 'pending' })                                   // 指定区块
+await getBalances(user, tokens, { chainId: 56 })                                   // 只传 chainId：使用内置公共节点
+await getBalances(user, tokens, { provider: 'https://bsc-dataseed.bnbchain.org' }) // 只传节点：chainId 自动识别
+await getBalances(user, tokens, { provider: ['https://rpc-1.example', 'https://rpc-2.example'] }) // 主节点 + 备用节点
+await getBalances(user, tokens, { provider: window.ethereum })                     // EVM 钱包
+await getBalances(user, tokens, { provider: window.tronWeb })                      // Tron 钱包
+await getBalances(user, tokens, { chainId: 56, provider: [window.ethereum, 'https://bsc-dataseed.bnbchain.org'] }) // 钱包优先，失败用公共节点
+await getBalances(user, tokens, { chainId: 56, blockTag: 'pending' })              // 指定区块
 ```
 
-同一个钱包或同一组 URL 多次调用时会复用同一个 Provider。
+- **chainId 自动识别**：EVM 节点 / 钱包用 `eth_chainId`，ethers Provider 用 `getNetwork()`，Tron 读创世区块哈希的最后 4 字节（与 TronGrid 的 `eth_chainId` 一致）；只传 URL 时先按 EVM 识别，失败再按 Tron 识别，所以 Tron 节点 URL 也不用传 chainId
+- **识别结果缓存**：同时发起的识别共用一个请求，失败或超时不缓存（下次重试）。URL 按地址缓存；tronWeb 按当前连接的节点地址缓存（TronLink 切网络后自动重新识别）；EIP-1193 钱包按对象缓存并监听 `chainChanged`，切链时失效，不支持事件监听的钱包不缓存。`clearChainIdCache()` 可手动清空
+- **链校验**：每个节点首次使用前会确认它所在的链与 chainId 一致（结果同样缓存，只多一次请求），不一致时报 `NETWORK_ERROR`，多节点时自动换下一个节点。所以 `[钱包, 公共节点]` 这类组合、或配错了节点 URL，都不会把另一条链的数据当成这条链的返回
+- **Provider 复用**：同一个 chainId + 节点多次调用会复用同一个 Provider（共享连接和合并队列）；只传钱包时每次按钱包当前的链创建，切链后自动按新链查询
+- 其余 Provider 配置（`fallback`、`nativeSymbol` 等，见[配置](#配置)）也可以直接放进这个参数
 
 ### 合约调用
 
 ```ts
 import { Provider } from '@w3lib/evm-batch-call'
 
-const multi = new Provider(56) // 不传节点：使用内置公共节点（多节点自动故障切换）
+const multi = new Provider(56)                 // 只传 chainId：使用内置公共节点（多节点自动故障切换）
+// const multi = await Provider.create(window.ethereum) // 只传节点：等 chainId 识别完成后返回（也可以 new Provider(window.ethereum)，首次调用时识别）
+// const multi = new Provider(56, rpc, config) // 都传：与 ethcall 相同
 
 const usdt = multi.erc20('0x55d398326f99059fF775485246999027B3197955')
 
@@ -65,8 +109,9 @@ const { decimals, allowance } = await multi.all({
   allowance: usdt.allowance(user, spender),
 })
 
-// 批量代币信息
-const infos = await multi.tokenInfo([USDT, BUSD]) // { symbol, name, decimals } | null
+// 常用查询都有对应的 Provider 方法
+const list = await multi.balances(user, [NATIVE_TOKEN, USDT], { symbol: true })
+const infos = await multi.tokens([USDT, BUSD], { fields: ['symbol', 'decimals'] })
 
 // 任意合约
 const pair = multi.contract(pairAddress, [
@@ -83,13 +128,14 @@ const amountOut = await router.swap.staticCall(params, { value, from: user })
 
 ## 功能
 
-- **批量余额**：`getBalances` / `balances`，主币 + 代币一次请求，带 decimals 换算后的数值
+- **常用查询**：余额、代币详情、授权额度、NFT（集合 / 持有 / 元数据地址 / ERC1155 余额），一个函数一次请求
 - **批量读取**：`all` / `tryAll` / `tryEach`，N 条读调用合成一次 `eth_call`；支持数组或对象输入
 - **自动合并**：绑定合约直接 `await`，或 `provider.call(x)`，同一收集窗口内的调用合并成一次请求并去重
 - **预执行**：`staticCall` / `staticCallAll` / `method.staticCall`，带 `from` / `value` 模拟交易，返回解析好的 revert 原因
 - **主币余额合并**：`getEthBalance` 与合约调用在同一次 `eth_call` 里——无论链上有没有 Multicall3
 - **任意链可用**：内置 Multicall3 地址表；表里没有、地址无效、或查询早于部署区块时，自动改用 deployless（链上无需部署任何合约）
 - **备用节点**：传多个节点自动故障切换；不传节点使用内置公共节点表（34 条 EVM 链 + Tron）
+- **chainId 可选**：传了节点就能自动识别 chainId，结果缓存，钱包切链自动失效
 - **Tron**：走 Tron HTTP API，T 开头地址可以直接用
 - **浏览器插件钱包**：直接传 `window.ethereum`（EIP-1193）或 `window.tronWeb`
 - **大批量**：合约模式按 `chunkSize`（默认 500）分片；deployless 按 48KB initcode 上限自动分片，结果超过 24KB 也能拿回
@@ -97,6 +143,7 @@ const amountOut = await router.swap.staticCall(params, { value, from: user })
 ## 节点与备用节点
 
 ```ts
+new Provider('https://bsc-dataseed.bnbchain.org')       // 只传节点：chainId 自动识别
 new Provider(56)                                        // 内置公共节点
 new Provider(56, 'https://bsc-dataseed.bnbchain.org')   // 单个 URL
 new Provider(56, ['https://a.example', 'https://b.example']) // 主节点 + 备用节点
@@ -188,13 +235,16 @@ deployless 还修正了 ethcall 自带字节码的两个上限问题（在 BSC �
 ## 浏览器插件钱包
 
 ```ts
-const multi = new Provider(chainId, window.ethereum)          // MetaMask / OKX / Rabby …
-const tron = new Provider(TRON_CHAIN_ID.mainnet, window.tronWeb) // TronLink / OKX …
+const multi = new Provider(window.ethereum) // MetaMask / OKX / Rabby …，chainId 取钱包当前的链
+const tron = new Provider(window.tronWeb)   // TronLink / OKX …
+const bsc = new Provider(56, window.ethereum) // 指定链：钱包不在这条链上时报错
 ```
 
 - EVM 钱包内部用 ethers `BrowserProvider` 包装
 - Tron 钱包请求走钱包配置的节点，预执行默认以当前连接地址作为 `from`，切换账号后自动跟随
-- 请求发到的是**钱包当前所选的链**。钱包不在传入的 `chainId` 上（包括用户中途切链）时请求会报 `NETWORK_ERROR`，不会返回别的链的数据；写成 `[window.ethereum, ...公共节点]` 时会自动改用公共节点
+- 请求发到的是**钱包当前所选的链**。传了 `chainId` 而钱包不在这条链上（包括用户中途切链）时请求会报 `NETWORK_ERROR`，不会返回别的链的数据；写成 `[window.ethereum, ...公共节点]` 时会自动改用公共节点
+- 只传钱包时，同一个 Provider 实例固定在识别时的链上，用户切链后请求同样报 `NETWORK_ERROR`；需要跟随钱包切链时用 `getBalances` 等函数（每次按当前链查询），或在 `chainChanged` 时重新创建 Provider
+- 只传节点时 chainId 在首次调用时识别，识别失败（如钱包未解锁、节点限流）会在下次调用时重试；`rpc` / `multicall` 这类同步属性需要在 `await multi.ready()` 之后读取，或直接用 `await Provider.create(...)`
 
 ## Tron
 
@@ -221,15 +271,17 @@ toTronAddress('0xa614f803b6fd780986a42c78ec9c7f77e6ded13c') // 返回值里的�
 ## 配置
 
 ```ts
-new Provider(chainId, nodes?, {
+new Provider(chainId, nodes?, { // 或 new Provider(nodes, { … })
   multicall: { address: '0x…', block: 0 }, // 自定义 Multicall3 地址（默认查内置表）
   deployless: false,                       // true：强制走 deployless
   chunkSize: 500,                          // 合约模式单次 eth_call 最多打包的调用数
   batch: { wait: 0, maxSize: 500 },        // 自动合并参数
   fallback: { timeout: 10_000, cooldown: 30_000 }, // 节点超时 / 出错节点冷却时间
   tron: { apiKey, minInterval: 200 },      // 用 URL 创建 TronProvider 时的参数
-  nativeTokens: [NATIVE_TOKEN, ZeroAddress], // balances() 里视为主币的地址（默认值；ZeroAddress 来自 ethers）
-  nativeDecimals: 18,                      // 主币精度（默认 EVM 18、Tron 6）
+  nativeTokens: [NATIVE_TOKEN, ZeroAddress], // 视为主币的地址（默认值；ZeroAddress 来自 ethers）
+  nativeDecimals: 18,                      // 主币精度 / symbol / 名称，默认按内置链信息表（NATIVE_CURRENCIES）
+  nativeSymbol: 'BNB',
+  nativeName: 'BNB',
 })
 ```
 
@@ -255,8 +307,9 @@ const multi = new Provider(chainId, ['https://rpc-1.example', 'https://rpc-2.exa
 // 主币余额不用再单独 getBalance，和代币余额一次查
 const balances = await multi.balances(account, tokens) // [{ balance, decimals, formatted, success }]
 
-// 代币信息一次查
-const infos = await multi.tokenInfo(tokens)
+// 代币详情、授权额度一次查
+const infos = await multi.tokens(tokens)
+const allowances = await multi.allowances(account, router, tokens)
 
 // Tron 也能批量查，不用逐个 triggerConstantContract
 const tron = new Provider(TRON_CHAIN_ID.mainnet, window.tronWeb)

@@ -228,7 +228,7 @@ describe('symbol 选项', () => {
     })
     const multi = new Provider(1, mock)
     expect((await multi.balances(USER, [MKR], { symbol: true }))[0]?.symbol).toBe('MKR')
-    expect((await multi.tokenInfo([MKR]))[0]?.symbol).toBe('MKR')
+    expect((await multi.tokens([MKR], { fields: ['symbol'] }))[0]?.symbol).toBe('MKR')
   })
 
   it('symbol 读取失败为 null，不影响余额', async () => {

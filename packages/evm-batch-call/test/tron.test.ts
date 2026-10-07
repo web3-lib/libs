@@ -29,9 +29,18 @@ describe('Tron 地址转换', () => {
 })
 
 /** 模拟 /wallet/triggerconstantcontract 与 /wallet/getaccount */
-function createTronNode() {
+const GENESIS = {
+  mainnet: '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653dc',
+  nile: '0000000000000000d698d4192c56cb6be724a558448e2684802de4d6cd8690dc',
+}
+
+function createTronNode(network: keyof typeof GENESIS = 'mainnet') {
   const requests: Array<{ path: string; body: any }> = []
   const request = async (path: string, body: any) => {
+    // 链校验读创世区块（Tron 主网），不计入业务请求
+    if (path === 'wallet/getblockbynum') {
+      return { blockID: GENESIS[network] }
+    }
     requests.push({ path, body })
     if (path === 'wallet/getaccount') {
       return { balance: 1234 }
@@ -71,6 +80,13 @@ function createTronNode() {
 }
 
 describe('TronProvider', () => {
+  it('节点实际所在的链与 chainId 不一致时报错，不会返回另一条链的数据', async () => {
+    const node = createTronNode('nile')
+    const multi = new Provider(TRON_CHAIN_ID.mainnet, new TronProvider({ request: node.request }))
+    await expect(multi.all([new Contract(USDT, erc20).symbol()])).rejects.toThrow(/chainId mismatch/)
+    expect(node.requests).toHaveLength(0)
+  })
+
   it('Tron 主网走 Multicall3，T 地址可直接用于合约地址和参数', async () => {
     const node = createTronNode()
     const multi = new Provider(TRON_CHAIN_ID.mainnet, new TronProvider({ request: node.request }))
@@ -81,7 +97,7 @@ describe('TronProvider', () => {
   })
 
   it('未知 Tron 网络（如 Nile）走 deployless', async () => {
-    const node = createTronNode()
+    const node = createTronNode('nile')
     const multi = new Provider(TRON_CHAIN_ID.nile, new TronProvider({ request: node.request }))
     expect(await multi.tryAll([new Contract(USDT, erc20).symbol()])).toEqual(['USDT'])
     expect(node.requests[0]?.body.contract_address).toBeUndefined()

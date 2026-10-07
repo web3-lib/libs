@@ -130,15 +130,6 @@ describe('兼容 ethcall 写法', () => {
 })
 
 describe('快捷方法', () => {
-  it('tokenInfo：symbol / name / decimals，非代币为 null', async () => {
-    const { mock, multi } = setup()
-    const res = await multi.tokenInfo([TOKEN_A, NO_CODE, NATIVE])
-    expect(res[0]).toMatchObject({ address: TOKEN_A, symbol: 'AAA', decimals: 18 })
-    expect(res[1]).toBeNull()
-    expect(res[2]).toBeNull()
-    expect(mock.calls).toHaveLength(1)
-  })
-
   it('不传节点时用内置公共节点', () => {
     expect(new Provider(56).rpc).toBeTruthy()
   })

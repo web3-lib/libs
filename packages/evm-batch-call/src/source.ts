@@ -1,6 +1,7 @@
-import { BrowserProvider, FetchRequest, JsonRpcProvider, type Eip1193Provider } from 'ethers'
+import { BrowserProvider, FetchRequest, JsonRpcProvider, makeError, type Eip1193Provider, type TransactionRequest } from 'ethers'
 
 import type { EthersLikeProvider } from './aggregate.js'
+import { canDetectChainId, detectChainId } from './detect.js'
 import { FallbackRpc, type FallbackOptions } from './fallback.js'
 import { DEFAULT_RPC_URLS, DEFAULT_TRON_HOSTS } from './rpcNodes.js'
 import { TRON_CHAIN_ID, TronProvider, type TronProviderOptions, type TronWebLike } from './tron.js'
@@ -50,8 +51,60 @@ export function resolveSource(
   }
   // 多节点时 Tron 节点不在单节点内重试 429，直接切到下一个节点
   const multiple = list.length > 1
-  const nodes = list.map((item) => toEthersLike(chainId, item, options, multiple))
+  const timeout = options.fallback?.timeout ?? 10_000
+  const nodes = list.map((item) => withChainCheck(chainId, item, toEthersLike(chainId, item, options, multiple), timeout))
   return multiple ? new FallbackRpc(nodes, options.fallback) : (nodes[0] as EthersLikeProvider)
+}
+
+/**
+ * 校验节点所在的链与 Provider 的 chainId 一致，避免把另一条链的数据当成这条链的返回：
+ * 比如 [钱包, 公共节点] 自动识别出钱包的链后，公共节点其实在另一条链上；或者配错了节点 URL。
+ * 不一致时抛 NETWORK_ERROR（多节点时 FallbackRpc 会换下一个节点）。
+ * 节点的 chainId 识别有缓存，每个节点只多一次请求；识别本身失败时不拦截（交给实际请求去报错）。
+ */
+export class ChainCheckedProvider implements EthersLikeProvider {
+  constructor(
+    readonly inner: EthersLikeProvider,
+    readonly chainId: number,
+    readonly source: ProviderSource,
+    readonly timeout: number,
+  ) {}
+
+  async #check(): Promise<void> {
+    let actual: number
+    try {
+      actual = await detectChainId(this.source, this.timeout)
+    } catch {
+      return
+    }
+    if (actual !== this.chainId) {
+      throw makeError(`chainId mismatch: expected ${this.chainId}, but the node is on ${actual}`, 'NETWORK_ERROR', {
+        event: 'chainIdMismatch',
+      })
+    }
+  }
+
+  async call(tx: TransactionRequest): Promise<string> {
+    await this.#check()
+    return this.inner.call(tx)
+  }
+
+  async getBalance(...args: Parameters<EthersLikeProvider['getBalance']>): Promise<bigint> {
+    await this.#check()
+    return this.inner.getBalance(...args)
+  }
+
+  async getChainId(): Promise<number> {
+    return this.chainId
+  }
+}
+
+function withChainCheck(chainId: number, source: ProviderSource, node: EthersLikeProvider, timeout: number): EthersLikeProvider {
+  // EIP-1193 钱包已经用 BrowserProvider 固定在 chainId 上（每次请求都会校验），无法识别的对象跳过
+  if (!Number.isFinite(chainId) || node instanceof BrowserProvider || !canDetectChainId(source)) {
+    return node
+  }
+  return new ChainCheckedProvider(node, chainId, source, timeout)
 }
 
 function toEthersLike(chainId: number, source: ProviderSource, options: SourceOptions, multiple: boolean): EthersLikeProvider {

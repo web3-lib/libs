@@ -2,7 +2,7 @@ import { type BigNumberish } from 'ethers'
 
 import { aggregate, type AggregateContext, type BlockTag, type CallOverrides, type EthersLikeProvider } from './aggregate.js'
 import { Batcher, type BatchOptions } from './batcher.js'
-import { decodeCall, encodeCall, type BoundCall, type Call, type CallRequest, type FailableCall, type RawResult } from './call.js'
+import { asStringOrBytes32, decodeCall, encodeCall, type BoundCall, type Call, type CallRequest, type FailableCall, type RawResult } from './call.js'
 import { Contract, bindCall, type ContractAbi, type ContractRunner } from './contract.js'
 import {
   DEFAULT_NATIVE_TOKENS,
@@ -13,11 +13,34 @@ import {
   type BalanceToken,
   type Erc20Contract,
   type TokenBalance,
-  type TokenInfo,
+  type TokenAllowance,
+  MAX_UINT256,
+  UNLIMITED_ALLOWANCE_THRESHOLD,
+  DEFAULT_TOKEN_FIELDS,
+  type DefaultTokenField,
+  type TokenDetails,
+  type TokenField,
 } from './erc20.js'
 import { CallFailedError, isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
 import { getNativeCurrency } from './chains.js'
+import {
+  erc1155Balances,
+  nftBalances,
+  nftCollections,
+  nftOwners,
+  nftTokenUris,
+  type DefaultNftCollectionField,
+  type Erc1155Balance,
+  type NftBalance,
+  type NftCollection,
+  type NftCollectionField,
+  type NftCollectionsOptions,
+  type NftItem,
+  type NftOwner,
+  type NftTokenUri,
+  type NftTokenUriOptions,
+} from './nft.js'
 import { detectChainId } from './detect.js'
 import { isTronChain, resolveSource, type ProviderSource, type SourceOptions } from './source.js'
 
@@ -56,8 +79,15 @@ export interface ProviderConfig extends SourceOptions {
   nativeTokens?: readonly string[]
   /** 主币精度，默认按内置链信息表（NATIVE_CURRENCIES），表里没有时 EVM 18、Tron 6 */
   nativeDecimals?: number
-  /** 主币 symbol（balances 的 symbol 选项用），默认按内置链信息表，表里没有时为 null */
+  /** 主币 symbol（balances 的 symbol 选项、tokens 用），默认按内置链信息表，表里没有时为 null */
   nativeSymbol?: string
+  /** 主币名称（tokens 用），默认按内置链信息表，表里没有时为 null */
+  nativeName?: string
+}
+
+export interface TokensOptions<F extends TokenField = DefaultTokenField> extends CallOverrides {
+  /** 要返回的字段，默认 ['name', 'symbol', 'decimals'] */
+  fields?: readonly F[]
 }
 
 export interface BalancesOptions extends CallOverrides {
@@ -70,7 +100,7 @@ function isChainIdArg(value: unknown): value is number | bigint | string {
   return (
     typeof value === 'number' ||
     typeof value === 'bigint' ||
-    (typeof value === 'string' && /^(\d+|0x[0-9a-fA-F]+)$/.test(value))
+    (typeof value === 'string' && /^\s*(\d+|0x[0-9a-fA-F]+)\s*$/.test(value))
   )
 }
 
@@ -88,7 +118,9 @@ const ETH_BALANCE_OUTPUTS = [{ name: 'balance', type: 'uint256' }] as const
 export class Provider implements ContractRunner {
   /** 不传 chainId 时在识别完成前为 null */
   #ctx: AggregateContext | null = null
-  readonly #ready: Promise<AggregateContext>
+  /** 识别中的 Promise；识别失败后置空，下次使用时重试 */
+  #detecting: Promise<AggregateContext> | null = null
+  readonly #source: ProviderSource | readonly ProviderSource[] | undefined
   readonly #batcher: Batcher
   readonly #nativeTokens: Set<string>
   readonly #config: ProviderConfig
@@ -125,20 +157,52 @@ export class Provider implements ContractRunner {
     this.#batcher = new Batcher((requests, overrides) => this.#aggregate(requests, overrides), config.batch)
     this.#nativeTokens = new Set((config.nativeTokens ?? DEFAULT_NATIVE_TOKENS).map((t) => t.toLowerCase()))
 
+    this.#source = source
     if (hasChainId) {
       this.#ctx = this.#createContext(Number(first), source)
-      this.#ready = Promise.resolve(this.#ctx)
     } else {
       if (source === undefined) {
         throw new Error('Provider requires a chainId or a provider')
       }
-      this.#ready = detectChainId(source, config.fallback?.timeout).then((id) => {
+      // 提前开始识别；失败时由使用方的调用拿到错误（这里避免未处理的 rejection）
+      this.#ensureReady().catch(() => {})
+    }
+  }
+
+  /**
+   * 只传节点时等 chainId 识别完成后再返回实例，之后 rpc / multicall 等同步属性可以直接用。
+   *
+   * ```ts
+   * const multi = await Provider.create(window.ethereum)
+   * multi.rpc // 已就绪
+   * ```
+   */
+  static async create(
+    provider: ProviderSource | readonly ProviderSource[],
+    config?: ProviderConfig,
+  ): Promise<Provider> {
+    return new Provider(provider, config).ready()
+  }
+
+  /** 取初始化好的上下文；识别失败不会被永久记住，下次调用重新识别（如节点短暂限流） */
+  #ensureReady(): Promise<AggregateContext> {
+    if (this.#ctx) {
+      return Promise.resolve(this.#ctx)
+    }
+    if (!this.#detecting) {
+      const source = this.#source as ProviderSource | readonly ProviderSource[]
+      const detecting = detectChainId(source, this.#config.fallback?.timeout).then((id) => {
         this.#ctx = this.#createContext(id, source)
         return this.#ctx
       })
-      // 识别失败时由使用方的调用拿到错误，这里避免未处理的 rejection
-      this.#ready.catch(() => {})
+      this.#detecting = detecting
+      detecting.catch(() => {
+        if (this.#detecting === detecting) {
+          this.#detecting = null
+        }
+      })
     }
+    return this.#detecting
   }
 
   #createContext(chainId: number, source: ProviderSource | readonly ProviderSource[] | undefined): AggregateContext {
@@ -153,20 +217,21 @@ export class Provider implements ContractRunner {
 
   /** 链 ID（不传 chainId 构造时，会等待从节点识别完成） */
   async getChainId(): Promise<number> {
-    return (await this.#ready).chainId
+    return (await this.#ensureReady()).chainId
   }
 
   /** 等待初始化完成（只传节点时会先识别 chainId；识别失败在这里抛出） */
   async ready(): Promise<this> {
-    await this.#ready
+    await this.#ensureReady()
     return this
   }
 
-  #nativeCurrency(chainId: number): { decimals: number; symbol: string | null } {
+  #nativeCurrency(chainId: number): { decimals: number; symbol: string | null; name: string | null } {
     const known = getNativeCurrency(chainId)
     return {
       decimals: this.#config.nativeDecimals ?? known?.decimals ?? (isTronChain(chainId) ? 6 : 18),
       symbol: this.#config.nativeSymbol ?? known?.symbol ?? null,
+      name: this.#config.nativeName ?? known?.name ?? null,
     }
   }
 
@@ -202,16 +267,12 @@ export class Provider implements ContractRunner {
    */
   async balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions = {}): Promise<TokenBalance[]> {
     const { symbol: withSymbol = false, ...overrides } = options
-    const { chainId } = await this.#ready
+    const { chainId } = await this.#ensureReady()
     const nativeCurrency = this.#nativeCurrency(chainId)
     const items = tokens.map((token) => {
-      const address = typeof token === 'string' ? token : token.address
-      const native = this.#nativeTokens.has(address.toLowerCase())
-      const decimals = native
-        ? nativeCurrency.decimals
-        : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedTokenMeta(chainId, address).decimals)
-      const symbol = native ? nativeCurrency.symbol : getCachedTokenMeta(chainId, address).symbol
-      return { address, native, decimals, symbol }
+      const resolved = this.#resolveToken(chainId, token, nativeCurrency.decimals)
+      const symbol = resolved.native ? nativeCurrency.symbol : getCachedTokenMeta(chainId, resolved.address).symbol
+      return { ...resolved, symbol }
     })
 
     const calls: Call[] = []
@@ -252,43 +313,186 @@ export class Provider implements ContractRunner {
     })
   }
 
+  /**
+   * 批量查 ERC20 授权额度（发交易前判断是否需要 approve），一次请求。
+   *
+   * ```ts
+   * const [usdt] = await multi.allowances(user, router, [USDT])
+   * usdt // { token: USDT, spender: router, native: false, allowance: '…', decimals: 18, formatted: '100', unlimited: false, success: true }
+   * ```
+   *
+   * - 主币不需要授权：native 为 true，额度视为 MaxUint256、unlimited 为 true，不发请求
+   * - decimals 与 balances / tokens 共用缓存；也可以直接传 `{ address, decimals }`
+   */
+  async allowances(
+    owner: string,
+    spender: string,
+    tokens: readonly BalanceToken[],
+    overrides?: CallOverrides,
+  ): Promise<TokenAllowance[]> {
+    const { chainId } = await this.#ensureReady()
+    const nativeDecimals = this.#nativeCurrency(chainId).decimals
+    const calls: Call[] = []
+    const plan = tokens.map((token) => {
+      const { address, native, decimals } = this.#resolveToken(chainId, token, nativeDecimals)
+      const allowanceIndex = native ? -1 : calls.push(this.erc20(address).allowance(owner, spender)) - 1
+      const decimalsIndex = native || decimals !== undefined ? -1 : calls.push(this.erc20(address).decimals()) - 1
+      return { address, native, decimals, allowanceIndex, decimalsIndex }
+    })
+    const results = calls.length ? await this.tryAll(calls, overrides) : []
+
+    return plan.map(({ address, native, decimals: known, allowanceIndex, decimalsIndex }) => {
+      const allowance = native ? MAX_UINT256 : ((results[allowanceIndex] as bigint | null) ?? null)
+      const fetched = decimalsIndex === -1 ? null : ((results[decimalsIndex] as bigint | null) ?? null)
+      if (fetched !== null) {
+        setCachedTokenMeta(chainId, address, { decimals: Number(fetched) })
+      }
+      const decimals = known ?? (fetched === null ? null : Number(fetched))
+      if (allowance === null || decimals === null) {
+        return { token: address, spender, native, allowance: '0', decimals: decimals ?? 0, formatted: '0', unlimited: false, success: false }
+      }
+      return {
+        token: address,
+        spender,
+        native,
+        allowance: allowance.toString(),
+        decimals,
+        formatted: formatAmount(allowance, decimals),
+        unlimited: allowance >= UNLIMITED_ALLOWANCE_THRESHOLD,
+        success: true,
+      }
+    })
+  }
+
+  /** 批量查 NFT 集合信息（标准 / name / symbol / totalSupply），字段可选 */
+  nftCollections<const F extends NftCollectionField = DefaultNftCollectionField>(
+    collections: readonly string[],
+    options?: NftCollectionsOptions<F>,
+  ): Promise<NftCollection<F>[]> {
+    return nftCollections<F>(this, collections, options)
+  }
+
+  /** 批量查 ERC721 持有数量（balanceOf） */
+  nftBalances(owner: string, collections: readonly string[], overrides?: CallOverrides): Promise<NftBalance[]> {
+    return nftBalances(this, owner, collections, overrides)
+  }
+
+  /** 批量查 ERC721 持有人（ownerOf），可混合多个集合 */
+  nftOwners(items: readonly NftItem[], overrides?: CallOverrides): Promise<NftOwner[]> {
+    return nftOwners(this, items, overrides)
+  }
+
+  /** 批量查 NFT 元数据地址：兼容 ERC721 tokenURI 与 ERC1155 uri（{id} 按规范替换），可转换 ipfs:// */
+  nftTokenUris(items: readonly NftItem[], options?: NftTokenUriOptions): Promise<NftTokenUri[]> {
+    return nftTokenUris(this, items, options)
+  }
+
+  /** 批量查 ERC1155 余额 */
+  erc1155Balances(owner: string, items: readonly NftItem[], overrides?: CallOverrides): Promise<Erc1155Balance[]> {
+    return erc1155Balances(this, owner, items, overrides)
+  }
+
   /** symbol() 调用：string 解码失败时按 bytes32 解析（MKR 等老代币） */
   #symbolCall(address: string): Call<string> {
-    const call = this.erc20(address).symbol()
-    call.kind = 'stringOrBytes32'
-    return call
+    return asStringOrBytes32(this.erc20(address).symbol())
+  }
+
+  /** 解析 balances / allowances 的代币参数：是否主币、已知的 decimals（传入的 > 缓存 > 主币配置） */
+  #resolveToken(chainId: number, token: BalanceToken, nativeDecimals: number): { address: string; native: boolean; decimals: number | undefined } {
+    const address = typeof token === 'string' ? token : token.address
+    const native = this.#nativeTokens.has(address.toLowerCase())
+    const decimals = native
+      ? nativeDecimals
+      : ((typeof token === 'string' ? undefined : token.decimals) ?? getCachedTokenMeta(chainId, address).decimals)
+    return { address, native, decimals }
   }
 
   /**
-   * 批量查代币信息（symbol / name / decimals），一次请求。
-   * decimals 读不到（非代币合约、主币占位地址等）的位置为 null。
+   * 批量查 ERC20 代币详情，一次请求；可以选择返回哪些字段。
+   *
+   * ```ts
+   * await multi.tokens([USDT, NATIVE_TOKEN])                                       // name / symbol / decimals
+   * await multi.tokens([USDT], { fields: ['symbol', 'decimals', 'totalSupply'] })
+   * // [{ address: USDT, native: false, symbol: 'USDT', decimals: 18, totalSupply: '…', totalSupplyFormatted: '…', success: true }]
+   * ```
+   *
+   * - name / symbol / decimals 查到一次后缓存（与 balances 共用），totalSupply 每次都查
+   * - 主币占位地址不发请求，信息取内置链信息表（可用 nativeName / nativeSymbol / nativeDecimals 覆盖），totalSupply 为 null
+   * - symbol / name 兼容返回 bytes32 的老代币（MKR 等）
+   * - 读取失败的字段为 null；请求的字段都读到时 success 为 true
    */
-  async tokenInfo(tokens: readonly string[], overrides?: CallOverrides): Promise<(TokenInfo | null)[]> {
-    // 主币占位地址不是合约，不发请求
-    const targets = tokens.filter((token) => !this.#nativeTokens.has(token.toLowerCase()))
-    const calls = targets.flatMap((token) => {
-      const erc20 = this.erc20(token)
-      const name = erc20.name()
-      name.kind = 'stringOrBytes32'
-      return [this.#symbolCall(token), name, erc20.decimals()]
+  async tokens<const F extends TokenField = DefaultTokenField>(
+    tokens: readonly string[],
+    options: TokensOptions<F> = {},
+  ): Promise<TokenDetails<F>[]> {
+    const { fields = DEFAULT_TOKEN_FIELDS as unknown as readonly F[], ...overrides } = options
+    const wanted = new Set<TokenField>(fields)
+    const needDecimals = wanted.has('decimals') || wanted.has('totalSupply')
+    const { chainId } = await this.#ensureReady()
+    const nativeCurrency = this.#nativeCurrency(chainId)
+
+    const calls: Call[] = []
+    const plan = tokens.map((address) => {
+      const native = this.#nativeTokens.has(address.toLowerCase())
+      const meta = native
+        ? { name: nativeCurrency.name ?? undefined, symbol: nativeCurrency.symbol ?? undefined, decimals: nativeCurrency.decimals }
+        : getCachedTokenMeta(chainId, address)
+      const index: Partial<Record<TokenField, number>> = {}
+      if (!native) {
+        const erc20 = this.erc20(address)
+        if (wanted.has('name') && meta.name === undefined) {
+          index.name = calls.push(asStringOrBytes32(erc20.name())) - 1
+        }
+        if (wanted.has('symbol') && meta.symbol === undefined) {
+          index.symbol = calls.push(this.#symbolCall(address)) - 1
+        }
+        if (needDecimals && meta.decimals === undefined) {
+          index.decimals = calls.push(erc20.decimals()) - 1
+        }
+        if (wanted.has('totalSupply')) {
+          index.totalSupply = calls.push(erc20.totalSupply()) - 1
+        }
+      }
+      return { address, native, meta, index }
     })
     const results = calls.length ? await this.tryAll(calls, overrides) : []
-    const infoByToken = new Map<string, TokenInfo | null>()
-    targets.forEach((address, i) => {
-      const decimals = results[i * 3 + 2] as bigint | null
-      infoByToken.set(
-        address,
-        decimals === null
-          ? null
-          : {
-              address,
-              symbol: (results[i * 3] as string | null) ?? null,
-              name: (results[i * 3 + 1] as string | null) ?? null,
-              decimals: Number(decimals),
-            },
-      )
+    const read = <T>(i: number | undefined): T | null => (i === undefined ? null : ((results[i] as T | null) ?? null))
+
+    return plan.map(({ address, native, meta, index }) => {
+      const name = meta.name ?? read<string>(index.name)
+      const symbol = meta.symbol ?? read<string>(index.symbol)
+      const fetchedDecimals = read<bigint>(index.decimals)
+      const decimals = meta.decimals ?? (fetchedDecimals === null ? null : Number(fetchedDecimals))
+      const totalSupply = read<bigint>(index.totalSupply)
+      if (!native) {
+        setCachedTokenMeta(chainId, address, {
+          ...(index.name !== undefined && name !== null ? { name } : {}),
+          ...(index.symbol !== undefined && symbol !== null ? { symbol } : {}),
+          ...(fetchedDecimals !== null ? { decimals: Number(fetchedDecimals) } : {}),
+        })
+      }
+
+      const values: Record<TokenField, unknown> = {
+        name,
+        symbol,
+        decimals,
+        totalSupply: totalSupply === null ? null : totalSupply.toString(),
+      }
+      const out: Record<string, unknown> = { address, native }
+      let success = true
+      for (const field of fields) {
+        out[field] = values[field]
+        // 主币没有 totalSupply，不算失败
+        if (values[field] === null && !(native && field === 'totalSupply')) {
+          success = false
+        }
+      }
+      if (wanted.has('totalSupply')) {
+        out.totalSupplyFormatted = totalSupply === null || decimals === null ? null : formatAmount(totalSupply, decimals)
+      }
+      out.success = success
+      return out as TokenDetails<F>
     })
-    return tokens.map((token) => infoByToken.get(token) ?? null)
   }
 
   /**
@@ -412,7 +616,7 @@ export class Provider implements ContractRunner {
     const merged: StaticCallOverrides = merge(merge({ ...shared }, call.overrides), explicit)
     if (call.kind === 'ethBalance') {
       try {
-        const { provider } = await this.#ready
+        const { provider } = await this.#ensureReady()
         return { success: true, data: (await provider.getBalance(call.params[0], merged.blockTag)) as T }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err : new Error(String(err)) }
@@ -421,7 +625,7 @@ export class Provider implements ContractRunner {
     let returnData: string
     try {
       const request = encodeCall(call, false)
-      const { provider } = await this.#ready
+      const { provider } = await this.#ensureReady()
       returnData = await provider.call({
         to: request.target,
         data: request.callData,
@@ -459,7 +663,7 @@ export class Provider implements ContractRunner {
   }
 
   async #aggregate(requests: CallRequest[], overrides?: CallOverrides): Promise<RawResult[]> {
-    return aggregate(await this.#ready, requests, overrides)
+    return aggregate(await this.#ensureReady(), requests, overrides)
   }
 }
 

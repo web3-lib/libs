@@ -28,13 +28,56 @@ export interface Erc20Contract extends Contract {
   transferFrom: Method<[from: string, to: string, amount: bigint | string | number], boolean>
 }
 
-export interface TokenInfo {
-  address: string
-  /** 读取失败（如 symbol 是 bytes32 的老代币）时为 null */
-  symbol: string | null
-  name: string | null
+/** allowances() / getAllowances() 的单项结果 */
+export interface TokenAllowance {
+  token: string
+  spender: string
+  /** 主币不需要授权，视为无限额度 */
+  native: boolean
+  /** 授权额度（最小单位的十进制字符串） */
+  allowance: string
   decimals: number
+  /** 按 decimals 换算后的额度 */
+  formatted: string
+  /** 额度 ≥ uint96 最大值时为 true（覆盖 MaxUint256，以及 UNI / COMP 等把额度截断为 uint96 的代币） */
+  unlimited: boolean
+  success: boolean
 }
+
+/** unlimited 的判定阈值：uint96 最大值 */
+export const UNLIMITED_ALLOWANCE_THRESHOLD = 2n ** 96n - 1n
+
+const MAX_UINT256 = 2n ** 256n - 1n
+
+export { MAX_UINT256 }
+
+/** tokens() / getTokens() 可选的字段 */
+export type TokenField = 'name' | 'symbol' | 'decimals' | 'totalSupply'
+
+/** 不指定 fields 时返回的字段 */
+export const DEFAULT_TOKEN_FIELDS = ['name', 'symbol', 'decimals'] as const satisfies readonly TokenField[]
+
+export type DefaultTokenField = (typeof DEFAULT_TOKEN_FIELDS)[number]
+
+interface TokenFieldTypes {
+  name: string | null
+  symbol: string | null
+  decimals: number | null
+  /** 最小单位的十进制字符串 */
+  totalSupply: string | null
+}
+
+/**
+ * tokens() / getTokens() 的单项结果，只包含请求的字段（读取失败的字段为 null）。
+ * 请求 totalSupply 时额外带 totalSupplyFormatted（按 decimals 换算）。
+ */
+export type TokenDetails<F extends TokenField = DefaultTokenField> = {
+  address: string
+  /** 是否是主币占位地址（信息来自内置链信息表 / nativeSymbol 等配置） */
+  native: boolean
+  /** 请求的字段都读到时为 true（主币没有 totalSupply，不计入） */
+  success: boolean
+} & { [K in F]: TokenFieldTypes[K] } & ('totalSupply' extends F ? { totalSupplyFormatted: string | null } : unknown)
 
 /** 主币占位地址（多数聚合器、钱包的约定），传给 balances() 时按主币处理 */
 export const NATIVE_TOKEN = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
@@ -73,10 +116,13 @@ export function formatAmount(value: bigint, decimals: number): string {
   return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
 }
 
-// decimals / symbol 不会变，按 chainId + 地址缓存，轮询余额时只需要查 balanceOf
+// decimals / symbol / name 不会变，按 chainId + 地址缓存，轮询余额时只需要查 balanceOf
 interface TokenMeta {
   decimals?: number
   symbol?: string
+  name?: string
+  /** NFT 集合标准（nftCollections 识别后缓存）；null 表示确认不是 ERC721 / ERC1155 */
+  standard?: 'ERC721' | 'ERC1155' | null
 }
 
 const tokenMetaCache = new Map<string, TokenMeta>()
@@ -86,6 +132,9 @@ export function getCachedTokenMeta(chainId: number, token: string): TokenMeta {
 }
 
 export function setCachedTokenMeta(chainId: number, token: string, meta: TokenMeta): void {
+  if (Object.keys(meta).length === 0) {
+    return // 没有新数据（如查询失败）时不写入空条目
+  }
   const key = `${chainId}:${token.toLowerCase()}`
   tokenMetaCache.set(key, { ...tokenMetaCache.get(key), ...meta })
 }
