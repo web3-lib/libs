@@ -657,6 +657,16 @@ export class Provider implements ContractRunner {
     }
   }
 
+  /** 是否是按主币处理的地址（config.nativeTokens，默认 0xeeee…eeee 和零地址） */
+  isNativeToken(address: string): boolean {
+    return this.#nativeTokens.has(address.toLowerCase())
+  }
+
+  /** 按主币处理的地址（小写），顺序同 config.nativeTokens */
+  get nativeTokens(): readonly string[] {
+    return [...this.#nativeTokens]
+  }
+
   /** 底层连接（多节点时是 FallbackRpc）。只传节点构造时，需在 ready() 之后读取 */
   get rpc(): EthersLikeProvider {
     if (!this.#ctx) {

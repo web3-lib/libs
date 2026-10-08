@@ -151,18 +151,19 @@ await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey: KEY }) }) //
 | `coingeckoTokenList()`（默认备用） | 否 | CoinGecko 收录的代币（Ethereum 约 6000 个、BSC 约 4500 个） | 覆盖 26 条链，见 `COINGECKO_PLATFORMS` |
 | `tokenList(url)` | 否 | 任意 Uniswap Token List 格式的列表（自己维护的、PancakeSwap 等） | |
 | `staticTokens(list)` | 否 | 固定的代币地址 | 如之前发现过、存下来的代币 |
-| `alchemy({ apiKey })` | **是** | 地址的全部历史持仓 | 19 条链，见 `ALCHEMY_NETWORKS`；可传 `url` 覆盖 |
-| `nodereal({ apiKey })` | **是** | 地址的全部历史持仓 | 仅 BSC、Ethereum |
+| `alchemy({ apiKey })` | **是** | 地址的全部历史持仓 | 19 条链，见 `ALCHEMY_NETWORKS`；可用 `urls: { [chainId]: url }` 按链覆盖地址 |
+| `nodereal({ apiKey })` | **是** | 地址的全部历史持仓 | 仅 BSC、Ethereum；同样支持 `urls` |
 
 - 默认来源是 `firstAvailable(metamaskTokenList(), coingeckoTokenList())`：MetaMask 列表不支持这条链、为空或请求失败时，用 CoinGecko 列表
-- 来源可以组合：`firstAvailable(a, b)` 依次尝试，`combine(a, b)` 合并去重，例如 `combine(defaultTokenSource(), staticTokens(savedTokens))`
-- **Key 只在调用时传入**：库里没有内置任何 Key，`alchemy()` / `nodereal()` 不传 `apiKey` 会直接报错，不传就不能用这两个来源。在浏览器里使用时 Key 会暴露给用户，建议在服务端调用，或使用对方控制台里的域名白名单
-- 不管代币从哪个来源发现，**余额都由本库在链上用 multicall 核对**（来源返回的余额不使用），所以结果格式一致、数值可信
+- 来源可以组合：`firstAvailable(a, b)` 依次尝试，`combine(a, b)` 合并去重（单个来源出错不影响其他来源），例如 `combine(defaultTokenSource(), staticTokens(savedTokens))`
+- **Key 只在调用时传入**：库里没有内置任何 Key，`alchemy()` / `nodereal()` 不传 `apiKey` 会直接报错，不传就不能用这两个来源。出错信息里不会包含 Key。在浏览器里使用时 Key 会暴露给用户，建议在服务端调用，或使用对方控制台里的域名白名单
+- 不管代币从哪个来源发现，**余额和精度都由本库在链上用 multicall 核对**（来源返回的余额不使用，来源给错的精度会被链上的值纠正），链上读不到精度的合约（不是正常的 ERC20）不返回
+- 主币用 Provider 配置的 `nativeTokens` 里的第一个地址查询（默认 `0xeeee…eeee`），名称 / symbol 同样遵循 `nativeName` / `nativeSymbol` 配置；列表里出现的主币映射地址（如 Polygon 的 `0x…1010`、zkSync 的 `0x…800A`）会被排除，不会把主币算两次
 - 公开代币列表按 URL 缓存 1 小时；`clearTokenListCache()` 可手动清空
 
 ### 价格
 
-`prices: true` 用 DefiLlama 查美元价格（免费、不需要 Key），结果带 `price` / `value`，并按价值从高到低排序；`minUsd` 只保留价值不低于它的代币（没有价格的代币也会被去掉，主币始终保留）。也可以传自己的价格源：`prices: { name, prices: async ({ chainId, tokens, native }) => Map }`。
+`prices: true` 用 DefiLlama 查美元价格（免费、不需要 Key），结果带 `price` / `value`，并按价值从高到低排序；`minUsd` 只保留价值不低于它的代币（没有价格的代币也会被去掉，主币始终保留）。只传 `minUsd` 时会自动开启 DefiLlama 价格；与 `prices: false` 同时使用会报错。也可以传自己的价格源：`prices: { name, prices: async ({ chainId, tokens, native }) => Map }`。
 
 ### 局限性
 
@@ -172,7 +173,7 @@ await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey: KEY }) }) //
 2. **默认来源依赖第三方免费服务**（MetaMask、CoinGecko 的列表，DefiLlama 的价格）：它们可能限流、变更格式或停止服务；MetaMask 列表接口不是对外承诺的公开 API。生产环境建议组合多个来源，或使用自己维护的列表（`tokenList(url)`）
 3. **列表里也有垃圾币和零头**。默认只用至少 3 家来源收录的代币来减少垃圾币，但仍会有不少价值很低的代币；需要干净的列表时开启 `prices` 并设置 `minUsd`
 4. **价格不一定可信**。流动性很差的代币价格可能严重虚高（实测有空投代币被估值数十万美元），默认已过滤 DefiLlama 置信度低于 0.9 的价格，但展示总资产时仍建议使用自己的价格源或再做校验
-5. **需要查几千到两万个代币的余额**，耗时几秒（实测 Ethereum 约 9500 个代币 4~7 秒，BSC 约 4800 个 3~4 秒），大量使用时建议缓存结果；列表很大时也会占用较多节点请求
+5. **需要查几千到两万个代币的余额**，耗时几秒：实测 Ethereum（约 9500 个代币）首次约 11 秒、之后约 6 秒，BSC（约 4800 个）首次约 8 秒、之后约 4 秒（首次要在链上核对持有代币的精度，之后有缓存）。大量使用时建议缓存结果；列表很大时也会占用较多节点请求
 6. **只包含 ERC20 代币**，不含 NFT（NFT 请用 `getNftBalances` 等）；Tron 链没有默认来源，需要自己传 `source`
 7. 使用 Alchemy / NodeReal 时受它们的免费额度和限频约束，翻页次数默认最多 20 页（2000 个代币），可用 `maxPages` 调整
 

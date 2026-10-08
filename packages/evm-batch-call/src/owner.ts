@@ -1,10 +1,10 @@
 import type { CallOverrides } from './aggregate.js'
-import { NATIVE_CURRENCIES } from './chains.js'
-import { NATIVE_TOKEN, type BalanceToken } from './erc20.js'
+import { NATIVE_TOKEN, formatAmount, type BalanceToken } from './erc20.js'
 import type { Provider } from './provider.js'
+import { isTronAddress } from './tron.js'
 
 // ---------------------------------------------------------------------------
-// 代币来源：负责“这个地址可能持有哪些代币”。余额一律由本库用 multicall 在链上核对。
+// 代币来源：负责“这个地址可能持有哪些代币”。余额和精度一律由本库用 multicall 在链上核对。
 // ---------------------------------------------------------------------------
 
 export interface DiscoveredToken {
@@ -30,50 +30,68 @@ export interface TokenSource {
 
 const REQUEST_TIMEOUT = 20_000
 const LIST_TTL = 60 * 60 * 1000
-const MAX_CACHED_LISTS = 32
+const MAX_CACHED_LISTS = 16
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
-class HttpStatusError extends Error {
+export class HttpStatusError extends Error {
   constructor(
     readonly status: number,
-    url: string,
+    target: string,
   ) {
-    super(`HTTP ${status} from ${url}`)
+    super(`HTTP ${status} from ${target}`)
     this.name = 'HttpStatusError'
   }
 }
 
-// 公开代币列表按 URL 缓存 1 小时（缓存 Promise，同时发起的请求共用；失败不缓存）
-const listCache = new Map<string, { at: number; promise: Promise<unknown> }>()
-
-/** 测试用：清空代币列表缓存 */
-export function clearTokenListCache(): void {
-  listCache.clear()
-}
-
-function fetchJson<T>(fetchFn: typeof fetch, url: string, init?: RequestInit): Promise<T> {
+/**
+ * @param secret 请求里带的 Key：出错时错误信息只写域名，不写完整地址，避免 Key 出现在日志里
+ */
+function fetchJson<T>(fetchFn: typeof fetch, url: string, init?: RequestInit, secret?: string): Promise<T> {
   return fetchFn(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT) }).then(async (res) => {
     if (!res.ok) {
-      throw new HttpStatusError(res.status, url.replace(/\/v[12]\/[^/?]+/, '/v*/***')) // 不在错误信息里暴露 Key
+      throw new HttpStatusError(res.status, secret ? safeHost(url) : url)
     }
     return (await res.json()) as T
   })
 }
 
-function cachedList<T>(fetchFn: typeof fetch, url: string): Promise<T> {
-  const hit = listCache.get(url)
-  if (hit && Date.now() - hit.at < LIST_TTL) {
-    return hit.promise as Promise<T>
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host
+  } catch {
+    return 'request'
   }
-  const promise = fetchJson<T>(fetchFn, url)
-  listCache.set(url, { at: Date.now(), promise })
+}
+
+// 公开代币列表：缓存“按链过滤、转换后”的结果（不缓存原始 JSON），1 小时；缓存 Promise，同时发起的请求共用，失败不缓存。
+// 公开列表与使用哪个 fetch 无关，所以缓存键只看列表和链
+const listCache = new Map<string, { at: number; promise: Promise<DiscoveredToken[] | null> }>()
+
+/** 清空代币列表缓存 */
+export function clearTokenListCache(): void {
+  listCache.clear()
+}
+
+function cachedList(key: string, load: () => Promise<DiscoveredToken[] | null>): Promise<DiscoveredToken[] | null> {
+  const hit = listCache.get(key)
+  if (hit && Date.now() - hit.at < LIST_TTL) {
+    return hit.promise
+  }
+  const promise = load()
+  listCache.set(key, { at: Date.now(), promise })
   if (listCache.size > MAX_CACHED_LISTS) {
     listCache.delete(listCache.keys().next().value as string)
   }
   promise.catch(() => {
-    if (listCache.get(url)?.promise === promise) listCache.delete(url)
+    if (listCache.get(key)?.promise === promise) listCache.delete(key)
   })
   return promise
+}
+
+/** 来源给的 decimals 只在是合法整数时使用（否则当作未知，由链上查询） */
+function validDecimals(value: unknown): number | null {
+  const n = typeof value === 'string' ? Number(value) : value
+  return typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= 255 ? n : null
 }
 
 /**
@@ -86,20 +104,23 @@ export function metamaskTokenList(options: { minOccurrences?: number } = {}): To
   const min = options.minOccurrences ?? 3
   return {
     name: 'metamask',
-    async discover({ chainId, fetch: fetchFn }) {
-      let list: Array<{ address: string; symbol?: string; name?: string; decimals?: number; iconUrl?: string; occurrences?: number }>
-      try {
-        list = await cachedList(fetchFn, `https://token.api.cx.metamask.io/tokens/${chainId}`)
-      } catch (err) {
-        if (err instanceof HttpStatusError && (err.status === 400 || err.status === 404)) {
-          return null // 不支持这条链
+    discover({ chainId, fetch: fetchFn }) {
+      const url = `https://token.api.cx.metamask.io/tokens/${chainId}`
+      return cachedList(`metamask:${chainId}:${min}`, async () => {
+        let list: Array<{ address: string; symbol?: string; name?: string; decimals?: number; iconUrl?: string; occurrences?: number }>
+        try {
+          list = await fetchJson(fetchFn, url)
+        } catch (err) {
+          if (err instanceof HttpStatusError && (err.status === 400 || err.status === 404)) {
+            return null // 不支持这条链
+          }
+          throw err
         }
-        throw err
-      }
-      const tokens = (Array.isArray(list) ? list : [])
-        .filter((t) => t.address && t.address !== ZERO_ADDRESS && (t.occurrences ?? 0) >= min)
-        .map((t) => ({ address: t.address, symbol: t.symbol ?? null, name: t.name ?? null, decimals: t.decimals ?? null, logo: t.iconUrl ?? null }))
-      return tokens.length ? tokens : null
+        const tokens = (Array.isArray(list) ? list : [])
+          .filter((t) => t.address && t.address !== ZERO_ADDRESS && (t.occurrences ?? 0) >= min)
+          .map((t) => ({ address: t.address, symbol: t.symbol ?? null, name: t.name ?? null, decimals: validDecimals(t.decimals), logo: t.iconUrl ?? null }))
+        return tokens.length ? tokens : null
+      })
     },
   }
 }
@@ -134,21 +155,6 @@ export const COINGECKO_PLATFORMS: Readonly<Record<number, string>> = {
   534352: 'scroll',
 }
 
-/** CoinGecko 代币列表（CoinGecko 收录的代币，Ethereum 约 6000 个、BSC 约 4500 个） */
-export function coingeckoTokenList(): TokenSource {
-  return {
-    name: 'coingecko',
-    async discover({ chainId, fetch: fetchFn }) {
-      const platform = COINGECKO_PLATFORMS[chainId]
-      if (!platform) {
-        return null
-      }
-      const list = await cachedList<{ tokens?: UniswapListToken[] }>(fetchFn, `https://tokens.coingecko.com/${platform}/all.json`)
-      return fromUniswapList(list.tokens ?? [], chainId)
-    },
-  }
-}
-
 interface UniswapListToken {
   chainId?: number
   address: string
@@ -161,24 +167,38 @@ interface UniswapListToken {
 function fromUniswapList(tokens: readonly UniswapListToken[], chainId: number): DiscoveredToken[] | null {
   const out = tokens
     .filter((t) => (t.chainId === undefined || t.chainId === chainId) && t.address)
-    .map((t) => ({ address: t.address, symbol: t.symbol ?? null, name: t.name ?? null, decimals: t.decimals ?? null, logo: t.logoURI ?? null }))
+    .map((t) => ({ address: t.address, symbol: t.symbol ?? null, name: t.name ?? null, decimals: validDecimals(t.decimals), logo: t.logoURI ?? null }))
   return out.length ? out : null
+}
+
+/** CoinGecko 代币列表（CoinGecko 收录的代币，Ethereum 约 6000 个、BSC 约 4500 个） */
+export function coingeckoTokenList(): TokenSource {
+  return {
+    name: 'coingecko',
+    async discover({ chainId, fetch: fetchFn }) {
+      const platform = COINGECKO_PLATFORMS[chainId]
+      if (!platform) {
+        return null
+      }
+      const url = `https://tokens.coingecko.com/${platform}/all.json`
+      return cachedList(`coingecko:${chainId}`, async () => fromUniswapList((await fetchJson<{ tokens?: UniswapListToken[] }>(fetchFn, url)).tokens ?? [], chainId))
+    },
+  }
 }
 
 /** 任意 Uniswap Token List 格式的列表（如 https://tokens.uniswap.org、PancakeSwap 列表、自己维护的列表） */
 export function tokenList(url: string, options: { name?: string } = {}): TokenSource {
   return {
     name: options.name ?? `list:${url}`,
-    async discover({ chainId, fetch: fetchFn }) {
-      const list = await cachedList<{ tokens?: UniswapListToken[] }>(fetchFn, url)
-      return fromUniswapList(list.tokens ?? [], chainId)
+    discover({ chainId, fetch: fetchFn }) {
+      return cachedList(`list:${url}:${chainId}`, async () => fromUniswapList((await fetchJson<{ tokens?: UniswapListToken[] }>(fetchFn, url)).tokens ?? [], chainId))
     },
   }
 }
 
 /** 固定的代币列表（如之前发现过、存下来的代币） */
 export function staticTokens(tokens: ReadonlyArray<string | DiscoveredToken>, options: { name?: string } = {}): TokenSource {
-  const list = tokens.map((t) => (typeof t === 'string' ? { address: t } : t))
+  const list = tokens.map((t) => (typeof t === 'string' ? { address: t } : { ...t, decimals: validDecimals(t.decimals) }))
   return {
     name: options.name ?? 'static',
     async discover() {
@@ -210,20 +230,29 @@ export const ALCHEMY_NETWORKS: Readonly<Record<number, string>> = {
   534352: 'scroll-mainnet',
 }
 
+export interface IndexerSourceOptions {
+  /** API Key（必填；库里没有内置 Key） */
+  apiKey: string
+  /** 按链覆盖请求地址（如代理或表里没有的链）：{ [chainId]: url }；其他链仍用默认地址 */
+  urls?: Readonly<Record<number, string>>
+  /** 最多翻几页（每页 100 个代币），默认 20 */
+  maxPages?: number
+}
+
 /**
  * Alchemy `alchemy_getTokenBalances`：查到地址的全部历史持仓（不限于公开列表）。需要 Alchemy 的 API Key（有免费额度）。
- * url 可覆盖默认地址（如表里没有的链）；maxPages 限制翻页次数（每页 100 个）。
  */
-export function alchemy(options: { apiKey: string; url?: string; maxPages?: number }): TokenSource {
+export function alchemy(options: IndexerSourceOptions): TokenSource {
   if (!options?.apiKey) {
     throw new Error('alchemy() requires an apiKey (https://dashboard.alchemy.com)')
   }
   const maxPages = options.maxPages ?? 20
+  const secret = options.apiKey
   return {
     name: 'alchemy',
     async discover({ chainId, owner, fetch: fetchFn }) {
       const network = ALCHEMY_NETWORKS[chainId]
-      const url = options.url ?? (network ? `https://${network}.g.alchemy.com/v2/${options.apiKey}` : null)
+      const url = options.urls?.[chainId] ?? (network ? `https://${network}.g.alchemy.com/v2/${secret}` : null)
       if (!url) {
         return null
       }
@@ -238,6 +267,7 @@ export function alchemy(options: { apiKey: string; url?: string; maxPages?: numb
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'alchemy_getTokenBalances', params: [owner, 'erc20', { maxCount: 100, ...(pageKey ? { pageKey } : {}) }] }),
           },
+          secret,
         )
         if (res.error) {
           throw new Error(`alchemy_getTokenBalances failed: ${res.error.message ?? 'unknown error'}`)
@@ -260,35 +290,40 @@ const NODEREAL_NETWORKS: Readonly<Record<number, string>> = { 1: 'eth-mainnet', 
 /**
  * NodeReal `nr_getTokenHoldings`：查到地址的全部历史持仓（仅 BSC、Ethereum）。需要 NodeReal 的 API Key（有免费额度）。
  */
-export function nodereal(options: { apiKey: string; url?: string; maxPages?: number }): TokenSource {
+export function nodereal(options: IndexerSourceOptions): TokenSource {
   if (!options?.apiKey) {
     throw new Error('nodereal() requires an apiKey (https://nodereal.io)')
   }
   const maxPages = options.maxPages ?? 20
+  const secret = options.apiKey
   return {
     name: 'nodereal',
     async discover({ chainId, owner, fetch: fetchFn }) {
       const network = NODEREAL_NETWORKS[chainId]
-      const url = options.url ?? (network ? `https://${network}.nodereal.io/v1/${options.apiKey}` : null)
+      const url = options.urls?.[chainId] ?? (network ? `https://${network}.nodereal.io/v1/${secret}` : null)
       if (!url) {
         return null
       }
       type Detail = { tokenAddress: string; tokenName?: string; tokenSymbol?: string; tokenDecimals?: string; tokenDecimails?: string }
       const out: DiscoveredToken[] = []
       for (let page = 1; page <= maxPages; page++) {
-        const res = await fetchJson<{ result?: { totalCount?: string; details?: Detail[] }; error?: { message?: string } }>(fetchFn, url, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'nr_getTokenHoldings', params: [owner, `0x${page.toString(16)}`, '0x64'] }),
-        })
+        const res = await fetchJson<{ result?: { totalCount?: string; details?: Detail[] }; error?: { message?: string } }>(
+          fetchFn,
+          url,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'nr_getTokenHoldings', params: [owner, `0x${page.toString(16)}`, '0x64'] }),
+          },
+          secret,
+        )
         if (res.error) {
           throw new Error(`nr_getTokenHoldings failed: ${res.error.message ?? 'unknown error'}`)
         }
         const details = res.result?.details ?? []
         for (const d of details) {
           // 文档里字段名就是 tokenDecimails（拼写如此），两种都兼容
-          const decimals = d.tokenDecimals ?? d.tokenDecimails
-          out.push({ address: d.tokenAddress, symbol: d.tokenSymbol ?? null, name: d.tokenName ?? null, decimals: decimals ? Number(decimals) : null })
+          out.push({ address: d.tokenAddress, symbol: d.tokenSymbol ?? null, name: d.tokenName ?? null, decimals: validDecimals(d.tokenDecimals ?? d.tokenDecimails) })
         }
         const total = Number(res.result?.totalCount ?? 0)
         if (!details.length || out.length >= total) {
@@ -300,7 +335,14 @@ export function nodereal(options: { apiKey: string; url?: string; maxPages?: num
   }
 }
 
-/** 按顺序尝试：前一个不支持这条链（返回 null）或出错时用下一个 */
+const SOURCE = Symbol('source')
+type Tagged = DiscoveredToken & { [SOURCE]?: string }
+
+function tag(tokens: DiscoveredToken[], name: string): Tagged[] {
+  return tokens.map((t) => ({ ...t, [SOURCE]: (t as Tagged)[SOURCE] ?? name }))
+}
+
+/** 按顺序尝试：前一个不支持这条链（返回 null）或出错时用下一个；全部出错时抛出最后一个错误 */
 export function firstAvailable(...sources: TokenSource[]): TokenSource {
   return {
     name: sources.map((s) => s.name).join('|'),
@@ -310,7 +352,7 @@ export function firstAvailable(...sources: TokenSource[]): TokenSource {
         try {
           const tokens = await source.discover(ctx)
           if (tokens) {
-            return tokens.map((t) => ({ ...t, [SOURCE]: (t as Tagged)[SOURCE] ?? source.name }))
+            return tag(tokens, source.name)
           }
         } catch (err) {
           lastError = err
@@ -324,16 +366,24 @@ export function firstAvailable(...sources: TokenSource[]): TokenSource {
   }
 }
 
-/** 合并多个来源（去重，先出现的元数据优先），如“公开列表 + 自己存下来的代币” */
+/**
+ * 合并多个来源（去重，先出现的元数据优先），如“公开列表 + 自己存下来的代币”。
+ * 单个来源出错不影响其他来源；全部出错时抛出第一个错误。
+ */
 export function combine(...sources: TokenSource[]): TokenSource {
   return {
     name: sources.map((s) => s.name).join('+'),
     async discover(ctx) {
-      const results = await Promise.all(sources.map((s) => s.discover(ctx).then((tokens) => tokens?.map((t) => ({ ...t, [SOURCE]: (t as Tagged)[SOURCE] ?? s.name })) ?? null)))
-      if (results.every((r) => r === null)) {
+      const settled = await Promise.allSettled(sources.map((s) => s.discover(ctx)))
+      const ok = settled.flatMap((r, i) => (r.status === 'fulfilled' && r.value ? [tag(r.value, (sources[i] as TokenSource).name)] : []))
+      if (!ok.length) {
+        const failed = settled.find((r) => r.status === 'rejected')
+        if (failed) {
+          throw (failed as PromiseRejectedResult).reason
+        }
         return null
       }
-      return dedupe(results.flatMap((r) => r ?? []))
+      return dedupe(ok.flat())
     },
   }
 }
@@ -343,13 +393,15 @@ export function defaultTokenSource(): TokenSource {
   return firstAvailable(metamaskTokenList(), coingeckoTokenList())
 }
 
-const SOURCE = Symbol('source')
-type Tagged = DiscoveredToken & { [SOURCE]?: string }
+/** 去重键：0x 地址不区分大小写；Tron 的 base58 地址区分大小写，原样比较 */
+function addressKey(address: string): string {
+  return isTronAddress(address) ? address : address.toLowerCase()
+}
 
-function dedupe(tokens: DiscoveredToken[]): DiscoveredToken[] {
-  const seen = new Map<string, DiscoveredToken>()
+function dedupe<T extends DiscoveredToken>(tokens: T[]): T[] {
+  const seen = new Map<string, T>()
   for (const t of tokens) {
-    const key = t.address.toLowerCase()
+    const key = addressKey(t.address)
     if (!seen.has(key)) seen.set(key, t)
   }
   return [...seen.values()]
@@ -363,14 +415,14 @@ export interface PriceSourceContext {
   chainId: number
   /** 代币地址（不含主币） */
   tokens: readonly string[]
-  /** 是否需要主币价格 */
-  native: boolean
+  /** 主币 symbol（需要主币价格时）；不需要时为 null */
+  nativeSymbol: string | null
   fetch: typeof fetch
 }
 
 export interface PriceSource {
   readonly name: string
-  /** 返回 小写地址 → 美元价格；主币用键 'native'。没有价格的不返回 */
+  /** 返回 去重键（0x 地址小写）→ 美元价格；主币用键 'native'。没有价格的不返回 */
   prices(ctx: PriceSourceContext): Promise<Map<string, number>>
 }
 
@@ -414,6 +466,7 @@ const NATIVE_PRICE_IDS: Readonly<Record<string, string>> = {
   CORE: 'coredaoorg',
   MON: 'monad',
   XPL: 'plasma',
+  TRX: 'tron',
 }
 
 /**
@@ -424,16 +477,21 @@ export function defillamaPrices(options: { minConfidence?: number } = {}): Price
   const minConfidence = options.minConfidence ?? 0.9
   return {
     name: 'defillama',
-    async prices({ chainId, tokens, native, fetch: fetchFn }) {
+    async prices({ chainId, tokens, nativeSymbol, fetch: fetchFn }) {
       const result = new Map<string, number>()
       const slug = DEFILLAMA_CHAINS[chainId]
-      const nativeId = NATIVE_PRICE_IDS[NATIVE_CURRENCIES[chainId]?.symbol ?? '']
-      const keys = [...(native && nativeId ? [`coingecko:${nativeId}`] : []), ...(slug ? tokens.map((t) => `${slug}:${t.toLowerCase()}`) : [])]
+      const nativeId = nativeSymbol ? NATIVE_PRICE_IDS[nativeSymbol.toUpperCase()] : undefined
+      const keys = [...(nativeId ? [`coingecko:${nativeId}`] : []), ...(slug ? tokens.map((t) => `${slug}:${t.toLowerCase()}`) : [])]
+      const batches: string[][] = []
       for (let i = 0; i < keys.length; i += 100) {
-        const batch = keys.slice(i, i + 100)
-        const res = await fetchJson<{ coins?: Record<string, { price?: number; confidence?: number }> }>(fetchFn, `https://coins.llama.fi/prices/current/${batch.join(',')}`)
+        batches.push(keys.slice(i, i + 100))
+      }
+      const responses = await Promise.all(
+        batches.map((batch) => fetchJson<{ coins?: Record<string, { price?: number; confidence?: number }> }>(fetchFn, `https://coins.llama.fi/prices/current/${batch.join(',')}`)),
+      )
+      for (const res of responses) {
         for (const [key, coin] of Object.entries(res.coins ?? {})) {
-          if (typeof coin.price !== 'number' || (coin.confidence !== undefined && coin.confidence < minConfidence)) {
+          if (typeof coin.price !== 'number' || !Number.isFinite(coin.price) || (coin.confidence !== undefined && coin.confidence < minConfidence)) {
             continue
           }
           result.set(key.startsWith('coingecko:') ? 'native' : key.slice(key.indexOf(':') + 1).toLowerCase(), coin.price)
@@ -448,14 +506,23 @@ export function defillamaPrices(options: { minConfidence?: number } = {}): Price
 // ownerTokens
 // ---------------------------------------------------------------------------
 
+/**
+ * 主币在部分链上的 ERC20 映射地址：balanceOf 返回的就是主币余额，列表里出现时要排除，否则主币会被算两次。
+ * （Polygon 的 POL、zkSync 的 ETH 系统合约）
+ */
+const NATIVE_ALIASES: Readonly<Record<number, readonly string[]>> = {
+  137: ['0x0000000000000000000000000000000000001010'],
+  324: ['0x000000000000000000000000000000000000800a'],
+}
+
 export interface OwnerTokensOptions extends CallOverrides {
   /** 代币来源，默认 defaultTokenSource()（MetaMask 列表 → CoinGecko 列表，免费免 Key） */
   source?: TokenSource
-  /** 查美元价格：true 用 DefiLlama，也可以传自己的 PriceSource。默认 false */
+  /** 查美元价格：true 用 DefiLlama，也可以传自己的 PriceSource。传了 minUsd 而没设置 prices 时自动用 DefiLlama */
   prices?: boolean | PriceSource
-  /** 只保留价值 ≥ minUsd 的代币（需要 prices；没有价格的代币也会被去掉；主币不受影响） */
+  /** 只保留价值 ≥ minUsd 的代币（没有价格的代币也会被去掉；主币不受影响）。与 prices: false 同时使用会报错 */
   minUsd?: number
-  /** 第一项返回主币。默认 true */
+  /** 第一项返回主币（用 Provider 的 nativeTokens 配置里的第一个地址查，默认 0xeeee…eeee；配置成 [] 时不返回）。默认 true */
   includeNative?: boolean
   /** 自定义 fetch（代理等场景）；默认全局 fetch */
   fetch?: typeof fetch
@@ -466,12 +533,13 @@ export interface OwnedToken {
   native: boolean
   /** 余额（最小单位的十进制字符串），由 multicall 在链上核对 */
   balance: string
+  /** 精度，由 multicall 在链上核对（不使用来源给的值） */
   decimals: number
   formatted: string
   symbol: string | null
   name: string | null
   logo: string | null
-  /** 美元单价；未开启 prices 或没有价格时为 null */
+  /** 美元单价；未开启价格或没有价格时为 null */
   price: number | null
   /** 美元价值（formatted × price） */
   value: number | null
@@ -480,7 +548,11 @@ export interface OwnedToken {
 }
 
 export async function ownerTokens(provider: Provider, owner: string, options: OwnerTokensOptions = {}): Promise<OwnedToken[]> {
-  const { source = defaultTokenSource(), prices = false, minUsd, includeNative = true, fetch: fetchOption, ...overrides } = options
+  const { source = defaultTokenSource(), prices, minUsd, includeNative = true, fetch: fetchOption, ...overrides } = options
+  if (minUsd !== undefined && prices === false) {
+    throw new Error('minUsd requires prices; remove prices: false or pass a PriceSource')
+  }
+  const priceSource = prices === true || (prices === undefined && minUsd !== undefined) ? defillamaPrices() : prices || null
   const fetchFn = fetchOption ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   const chainId = await provider.getChainId()
 
@@ -488,46 +560,60 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
   if (!discovered) {
     throw new Error(`No token source supports chain ${chainId}; pass options.source (e.g. tokenList(url), alchemy({ apiKey }))`)
   }
-  const candidates = dedupe(discovered).filter((t) => /^0x[0-9a-fA-F]{40}$/.test(t.address) && t.address.toLowerCase() !== NATIVE_TOKEN.toLowerCase() && t.address !== ZERO_ADDRESS)
+  const aliases = new Set(NATIVE_ALIASES[chainId] ?? [])
+  const candidates = dedupe(discovered).filter(
+    (t) =>
+      (/^0x[0-9a-fA-F]{40}$/.test(t.address) || isTronAddress(t.address)) &&
+      t.address !== ZERO_ADDRESS &&
+      !provider.isNativeToken(t.address) &&
+      !aliases.has(t.address.toLowerCase()),
+  )
 
-  // 余额统一在链上核对（来源给的 decimals 直接用，省一次查询）
+  // 主币用 Provider 配置里的主币地址查（默认 0xeeee…eeee）；配置成 [] 时不返回主币
+  const nativeAddress = includeNative ? (provider.nativeTokens[0] ?? null) : null
+  // 余额在链上核对；来源给的 decimals 先用于这一步（省一次查询），有余额的代币之后再核对精度
   const inputs: BalanceToken[] = candidates.map((t) => (typeof t.decimals === 'number' ? { address: t.address, decimals: t.decimals } : t.address))
-  const balances = await provider.balances(owner, includeNative ? [NATIVE_TOKEN, ...inputs] : inputs, overrides)
-  const nativeBalance = includeNative ? balances[0] : undefined
-  const tokenBalances = includeNative ? balances.slice(1) : balances
-
+  const balances = await provider.balances(owner, nativeAddress ? [nativeAddress, ...inputs] : inputs, overrides)
+  const nativeBalance = nativeAddress ? balances[0] : undefined
+  const tokenBalances = nativeAddress ? balances.slice(1) : balances
   const held = candidates
-    .map((t, i) => ({ meta: t, balance: tokenBalances[i] }))
-    .filter((x): x is { meta: DiscoveredToken; balance: NonNullable<typeof x.balance> } => !!x.balance?.success && x.balance.balance !== '0')
+    .map((meta, i) => ({ meta, balance: tokenBalances[i] }))
+    .filter((x): x is { meta: Tagged; balance: NonNullable<typeof x.balance> } => !!x.balance?.success && x.balance.balance !== '0')
 
-  // 来源没给 symbol / name 的（如 Alchemy），用 multicall 补
-  const missing = held.filter((x) => !x.meta.symbol || !x.meta.name).map((x) => x.meta.address)
-  const fetched = missing.length ? await provider.tokens(missing, { ...overrides, fields: ['name', 'symbol'] }) : []
-  const fetchedBy = new Map(fetched.map((t) => [t.address.toLowerCase(), t]))
-
-  const priceSource = prices === true ? defillamaPrices() : prices || null
+  // 并行：有余额的代币在链上核对精度（并补齐来源没给的 name / symbol）、主币信息（含 nativeSymbol 等配置）、价格
+  const [onchain, [nativeInfo]] = await Promise.all([
+    held.length ? provider.tokens(held.map((x) => x.meta.address), { ...overrides, fields: ['decimals', 'name', 'symbol'] }) : Promise.resolve([]),
+    nativeAddress ? provider.tokens([nativeAddress], { fields: ['name', 'symbol'] }) : Promise.resolve([undefined]),
+  ])
   const priceMap = priceSource
-    ? await priceSource.prices({ chainId, tokens: held.map((x) => x.meta.address), native: includeNative, fetch: fetchFn })
+    ? await priceSource.prices({ chainId, tokens: held.map((x) => x.meta.address), nativeSymbol: nativeAddress ? (nativeInfo?.symbol ?? null) : null, fetch: fetchFn })
     : new Map<string, number>()
-
   const valueOf = (formatted: string, price: number | undefined) => (price === undefined ? null : Number(formatted) * price)
 
-  let list: OwnedToken[] = held.map(({ meta, balance }) => {
-    const extra = fetchedBy.get(meta.address.toLowerCase())
-    const price = priceMap.get(meta.address.toLowerCase())
-    return {
-      token: meta.address,
-      native: false,
-      balance: balance.balance,
-      decimals: balance.decimals,
-      formatted: balance.formatted,
-      symbol: meta.symbol || extra?.symbol || null,
-      name: meta.name || extra?.name || null,
-      logo: meta.logo ?? null,
-      price: price ?? null,
-      value: valueOf(balance.formatted, price),
-      source: (meta as Tagged)[SOURCE] ?? source.name,
+  let list: OwnedToken[] = held.flatMap(({ meta, balance }, i) => {
+    const chain = onchain[i]
+    // 链上读不到精度的不是正常 ERC20，去掉
+    if (!chain || chain.decimals === null) {
+      return []
     }
+    const decimals = chain.decimals
+    const formatted = decimals === balance.decimals ? balance.formatted : formatAmount(BigInt(balance.balance), decimals)
+    const price = priceMap.get(addressKey(meta.address))
+    return [
+      {
+        token: meta.address,
+        native: false,
+        balance: balance.balance,
+        decimals,
+        formatted,
+        symbol: meta.symbol || chain.symbol || null,
+        name: meta.name || chain.name || null,
+        logo: meta.logo ?? null,
+        price: price ?? null,
+        value: valueOf(formatted, price),
+        source: meta[SOURCE] ?? source.name,
+      },
+    ]
   })
   if (minUsd !== undefined && priceSource) {
     list = list.filter((t) => t.value !== null && t.value >= minUsd)
@@ -536,17 +622,16 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
   if (priceSource) {
     list.sort((a, b) => (b.value ?? -1) - (a.value ?? -1))
   }
-  if (nativeBalance?.success) {
-    const currency = NATIVE_CURRENCIES[chainId]
+  if (nativeAddress && nativeBalance?.success) {
     const price = priceMap.get('native')
     list.unshift({
-      token: NATIVE_TOKEN,
+      token: nativeAddress === NATIVE_TOKEN.toLowerCase() ? NATIVE_TOKEN : nativeAddress,
       native: true,
       balance: nativeBalance.balance,
       decimals: nativeBalance.decimals,
       formatted: nativeBalance.formatted,
-      symbol: currency?.symbol ?? null,
-      name: currency?.name ?? null,
+      symbol: nativeInfo?.symbol ?? null,
+      name: nativeInfo?.name ?? null,
       logo: null,
       price: price ?? null,
       value: valueOf(nativeBalance.formatted, price),

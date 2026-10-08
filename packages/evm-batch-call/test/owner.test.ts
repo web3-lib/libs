@@ -76,8 +76,9 @@ describe('代币来源', () => {
     })
     const source = metamaskTokenList()
     expect(await source.discover(ctx(fn))).toEqual([{ address: A, symbol: 'AAA', name: 'Token A', decimals: 18, logo: 'https://icon/a' }])
+    await metamaskTokenList().discover(ctx(fn))
+    expect(calls).toHaveLength(1) // 同样的条件命中缓存（缓存的是过滤后的结果）
     expect(await metamaskTokenList({ minOccurrences: 1 }).discover(ctx(fn))).toHaveLength(2)
-    expect(calls).toHaveLength(1) // 第二次命中缓存
   })
 
   it('metamaskTokenList：不支持的链（400）或空列表返回 null', async () => {
@@ -183,7 +184,7 @@ describe('defillamaPrices', () => {
         },
       ],
     })
-    const prices = await defillamaPrices().prices({ chainId: 1, tokens: [A, B], native: true, fetch: fn })
+    const prices = await defillamaPrices().prices({ chainId: 1, tokens: [A, B], nativeSymbol: 'ETH', fetch: fn })
     expect(prices).toEqual(new Map([['native', 3000], [A, 2]]))
     expect(calls[0]?.url).toContain('coingecko:ethereum')
     expect(calls[0]?.url).toContain(`ethereum:${A}`)
@@ -192,7 +193,7 @@ describe('defillamaPrices', () => {
   it('超过 100 个代币分批请求', async () => {
     const { fn, calls } = mockFetch({ 'https://coins.llama.fi/prices/current/': () => [200, { coins: {} }] })
     const tokens = Array.from({ length: 150 }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`)
-    await defillamaPrices().prices({ chainId: 56, tokens, native: false, fetch: fn })
+    await defillamaPrices().prices({ chainId: 56, tokens, nativeSymbol: null, fetch: fn })
     expect(calls).toHaveLength(2)
   })
 })
