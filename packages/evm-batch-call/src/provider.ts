@@ -368,6 +368,11 @@ export class Provider implements ContractRunner {
   /**
    * 列出持有人拥有的代币（资产列表）：从代币来源拿候选代币，再用 multicall 在链上核对余额。
    * 默认来源是公开代币列表，**只能发现列表里的代币**，局限性见 README「资产列表」一节。
+   *
+   * @deprecated 不推荐使用：EVM 链上无法只靠节点可靠地列出地址持有的全部代币，这个方法只是尽力而为——
+   * 默认来源只能发现公开列表里的代币，依赖第三方免费服务（可能限流、改格式或停止服务），要查几千个代币的余额、耗时数秒，
+   * 价格也不一定可信；传 `alchemy` / `nodereal` 来源能查全，但同样受第三方服务的额度和可用性约束。
+   * 已知要查哪些代币时请用 `getBalances`；需要可靠的完整持仓请直接接入索引服务的接口或自己的索引。局限性详见 README「资产列表」。
    */
   ownerTokens(owner: string, options?: OwnerTokensOptions): Promise<OwnedToken[]> {
     return ownerTokens(this, owner, options)

@@ -49,7 +49,7 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | 函数 | Provider 方法 | 说明 |
 | --- | --- | --- |
 | `getBalances(owner, tokens, opts)` | `balances` | 主币 + 代币余额；`symbol: true` 额外返回 symbol |
-| `getOwnerTokens(owner, opts)` | `ownerTokens` | 资产列表：地址持有的代币（有局限性，见[资产列表](#资产列表)） |
+| `getOwnerTokens(owner, opts)` | `ownerTokens` | 资产列表：地址持有的代币（**不推荐使用**，结果不保证完整，见[资产列表](#资产列表)） |
 | `getTokens(tokens, opts)` | `tokens` | ERC20 详情，`fields` 选择返回字段，结果类型随之收窄 |
 | `getAllowances(owner, spender, tokens, opts)` | `allowances` | 授权额度；`unlimited` 表示额度 ≥ uint96 最大值（覆盖 MaxUint256 及 UNI / COMP 这类截断为 uint96 的代币） |
 | `getNftCollections(contracts, opts)` | `nftCollections` | NFT 集合 standard / name / symbol / totalSupply，`fields` 可选 |
@@ -128,6 +128,8 @@ const amountOut = await router.swap.staticCall(params, { value, from: user })
 ```
 
 ## 资产列表
+
+> **不推荐使用**（已标记 `@deprecated`）：`getOwnerTokens` / `provider.ownerTokens` 只能尽力而为，结果不保证完整、准确，局限性见下文。已知要查哪些代币时请用 `getBalances`；传 `alchemy` / `nodereal` 来源能查全，但同样受第三方服务的额度和可用性约束，需要可靠的完整持仓请直接接入索引服务的接口或自己的索引。
 
 EVM 链上**没有办法只靠节点列出一个地址持有的全部代币**（链上没有“某地址持有哪些代币”的索引）。`getOwnerTokens` 的做法是：先从“代币来源”拿到候选代币，再用 multicall 在链上核对这些代币的余额，返回有余额的部分。
 
@@ -217,7 +219,7 @@ await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000
 ## 功能
 
 - **常用查询**：余额、代币详情、授权额度、NFT（集合 / 持有 / 元数据地址 / ERC1155 余额），一个函数一次请求
-- **资产列表**：`getOwnerTokens`，免费公开代币列表或带 Key 的索引服务发现代币，multicall 核对余额，可选 DefiLlama 价格
+- **资产列表**（不推荐使用，尽力而为）：`getOwnerTokens`，免费公开代币列表或带 Key 的索引服务发现代币，multicall 核对余额，可选 DefiLlama 价格
 - **批量读取**：`all` / `tryAll` / `tryEach`，N 条读调用合成一次 `eth_call`；支持数组或对象输入
 - **自动合并**：绑定合约直接 `await`，或 `provider.call(x)`，同一收集窗口内的调用合并成一次请求并去重
 - **预执行**：`staticCall` / `staticCallAll` / `method.staticCall`，带 `from` / `value` 模拟交易，返回解析好的 revert 原因

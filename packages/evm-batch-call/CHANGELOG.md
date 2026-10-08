@@ -9,7 +9,7 @@
   - 代币来源可替换：`metamaskTokenList`、`coingeckoTokenList`、`tokenList(url)`、`staticTokens`、`alchemy({ apiKey })`、`nodereal({ apiKey })`，以及 `firstAvailable` / `combine` 组合；默认 MetaMask 列表 → CoinGecko 列表（免费免 Key）
   - 可选价格：`prices: true` 用 DefiLlama，或传自定义价格源；`minUsd` 过滤
   - 增量扫描开关 `scanTransfers`（默认关闭）：从第一次调用开始扫描转入的 ERC20 Transfer 事件，补充列表里没有的新代币；进度可持久化（`keyValueScanStorage` 或自定义存储），自动适配节点的区块范围上限与限频；`timeBudget` 限制每次调用的扫描时间，`confirmations` 避开链重组
-  - 局限性见 README「资产列表」
+  - 局限性见 README「资产列表」；结果不保证完整、准确，因此标记为 `@deprecated`（不推荐使用）
 
 ## 0.2.0
 
