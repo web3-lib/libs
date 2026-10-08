@@ -1,5 +1,14 @@
 # Changelog
 
+## 未发布
+
+### 新增
+
+- 资产列表 `getOwnerTokens` / `ownerTokens`：从代币来源发现候选代币，multicall 在链上核对余额，返回持有的代币
+  - 代币来源可替换：`metamaskTokenList`、`coingeckoTokenList`、`tokenList(url)`、`staticTokens`、`alchemy({ apiKey })`、`nodereal({ apiKey })`，以及 `firstAvailable` / `combine` 组合；默认 MetaMask 列表 → CoinGecko 列表（免费免 Key）
+  - 可选价格：`prices: true` 用 DefiLlama，或传自定义价格源；`minUsd` 过滤
+  - 局限性见 README「资产列表」
+
 ## 0.2.0
 
 ### 不兼容的改动

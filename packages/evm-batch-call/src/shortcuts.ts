@@ -1,4 +1,5 @@
 import type { CallOverrides } from './aggregate.js'
+import type { OwnedToken, OwnerTokensOptions } from './owner.js'
 import type { BalanceToken, DefaultTokenField, TokenAllowance, TokenBalance, TokenDetails, TokenField } from './erc20.js'
 import type {
   DefaultNftCollectionField,
@@ -243,6 +244,22 @@ export function getNftTokenUris(items: readonly NftItem[], options: GetNftTokenU
 export function getErc1155Balances(owner: string, items: readonly NftItem[], options: ShortcutOptions = {}): Promise<Erc1155Balance[]> {
   const { provider, overrides } = resolve(options)
   return provider.erc1155Balances(owner, items, overrides)
+}
+
+export interface GetOwnerTokensOptions extends OwnerTokensOptions, ShortcutProviderOptions {}
+
+/**
+ * 列出持有人拥有的代币（资产列表）。默认用免费公开代币列表发现代币，余额用 multicall 在链上核对。
+ *
+ * ```ts
+ * await getOwnerTokens(user, { chainId: 56 })                                  // 免费，只能发现公开列表里的代币
+ * await getOwnerTokens(user, { chainId: 1, prices: true, minUsd: 1 })          // 带美元价值，过滤零头和垃圾币
+ * await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey }) })     // 用 Alchemy 查全部历史持仓
+ * ```
+ */
+export function getOwnerTokens(owner: string, options: GetOwnerTokensOptions = {}): Promise<OwnedToken[]> {
+  const { provider, overrides, own } = resolve(options, ['source', 'prices', 'minUsd', 'includeNative', 'fetch'])
+  return provider.ownerTokens(owner, { ...overrides, ...own })
 }
 
 /** 测试用：按参数取（或创建）Provider，用于验证缓存复用（不在包的公开导出里） */

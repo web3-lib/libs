@@ -49,6 +49,7 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | 函数 | Provider 方法 | 说明 |
 | --- | --- | --- |
 | `getBalances(owner, tokens, opts)` | `balances` | 主币 + 代币余额；`symbol: true` 额外返回 symbol |
+| `getOwnerTokens(owner, opts)` | `ownerTokens` | 资产列表：地址持有的代币（有局限性，见[资产列表](#资产列表)） |
 | `getTokens(tokens, opts)` | `tokens` | ERC20 详情，`fields` 选择返回字段，结果类型随之收窄 |
 | `getAllowances(owner, spender, tokens, opts)` | `allowances` | 授权额度；`unlimited` 表示额度 ≥ uint96 最大值（覆盖 MaxUint256 及 UNI / COMP 这类截断为 uint96 的代币） |
 | `getNftCollections(contracts, opts)` | `nftCollections` | NFT 集合 standard / name / symbol / totalSupply，`fields` 可选 |
@@ -126,9 +127,59 @@ const router = multi.contract(routerAddress, RouterABI)
 const amountOut = await router.swap.staticCall(params, { value, from: user })
 ```
 
+## 资产列表
+
+EVM 链上**没有办法只靠节点列出一个地址持有的全部代币**（链上没有“某地址持有哪些代币”的索引）。`getOwnerTokens` 的做法是：先从“代币来源”拿到候选代币，再用 multicall 在链上核对这些代币的余额，返回有余额的部分。
+
+```ts
+import { alchemy, getOwnerTokens, nodereal, tokenList } from '@w3lib/evm-batch-call'
+
+await getOwnerTokens(user, { chainId: 56 })                                   // 默认：免费公开代币列表
+await getOwnerTokens(user, { chainId: 1, prices: true, minUsd: 1 })           // 带美元价值，按价值排序，过滤 < $1 的代币
+await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey: KEY }) }) // 用 Alchemy 查全部历史持仓（需要 Key）
+// [
+//   { token: NATIVE_TOKEN, native: true,  symbol: 'BNB',  formatted: '1.5', price: 600, value: 900, source: 'native', … },
+//   { token: '0x…',        native: false, symbol: 'CAKE', formatted: '120', price: 2,   value: 240, source: 'metamask', logo: '…', … },
+// ]
+```
+
+### 代币来源
+
+| 来源 | 需要 Key | 能发现什么 | 说明 |
+| --- | --- | --- | --- |
+| `metamaskTokenList()`（默认首选） | 否 | MetaMask 汇总的代币列表（Ethereum 约 9500 个、BSC 约 2 万个），默认只用至少 3 家来源收录的 | MetaMask 自用接口，非对外承诺的公开 API |
+| `coingeckoTokenList()`（默认备用） | 否 | CoinGecko 收录的代币（Ethereum 约 6000 个、BSC 约 4500 个） | 覆盖 26 条链，见 `COINGECKO_PLATFORMS` |
+| `tokenList(url)` | 否 | 任意 Uniswap Token List 格式的列表（自己维护的、PancakeSwap 等） | |
+| `staticTokens(list)` | 否 | 固定的代币地址 | 如之前发现过、存下来的代币 |
+| `alchemy({ apiKey })` | **是** | 地址的全部历史持仓 | 19 条链，见 `ALCHEMY_NETWORKS`；可传 `url` 覆盖 |
+| `nodereal({ apiKey })` | **是** | 地址的全部历史持仓 | 仅 BSC、Ethereum |
+
+- 默认来源是 `firstAvailable(metamaskTokenList(), coingeckoTokenList())`：MetaMask 列表不支持这条链、为空或请求失败时，用 CoinGecko 列表
+- 来源可以组合：`firstAvailable(a, b)` 依次尝试，`combine(a, b)` 合并去重，例如 `combine(defaultTokenSource(), staticTokens(savedTokens))`
+- **Key 只在调用时传入**：库里没有内置任何 Key，`alchemy()` / `nodereal()` 不传 `apiKey` 会直接报错，不传就不能用这两个来源。在浏览器里使用时 Key 会暴露给用户，建议在服务端调用，或使用对方控制台里的域名白名单
+- 不管代币从哪个来源发现，**余额都由本库在链上用 multicall 核对**（来源返回的余额不使用），所以结果格式一致、数值可信
+- 公开代币列表按 URL 缓存 1 小时；`clearTokenListCache()` 可手动清空
+
+### 价格
+
+`prices: true` 用 DefiLlama 查美元价格（免费、不需要 Key），结果带 `price` / `value`，并按价值从高到低排序；`minUsd` 只保留价值不低于它的代币（没有价格的代币也会被去掉，主币始终保留）。也可以传自己的价格源：`prices: { name, prices: async ({ chainId, tokens, native }) => Map }`。
+
+### 局限性
+
+使用前请了解：
+
+1. **默认来源只能发现公开列表里的代币**。刚发行、还没被列表收录的代币（如新上线的 meme 币）、小众代币查不到；需要完整持仓时，传 `alchemy({ apiKey })` 或 `nodereal({ apiKey })`
+2. **默认来源依赖第三方免费服务**（MetaMask、CoinGecko 的列表，DefiLlama 的价格）：它们可能限流、变更格式或停止服务；MetaMask 列表接口不是对外承诺的公开 API。生产环境建议组合多个来源，或使用自己维护的列表（`tokenList(url)`）
+3. **列表里也有垃圾币和零头**。默认只用至少 3 家来源收录的代币来减少垃圾币，但仍会有不少价值很低的代币；需要干净的列表时开启 `prices` 并设置 `minUsd`
+4. **价格不一定可信**。流动性很差的代币价格可能严重虚高（实测有空投代币被估值数十万美元），默认已过滤 DefiLlama 置信度低于 0.9 的价格，但展示总资产时仍建议使用自己的价格源或再做校验
+5. **需要查几千到两万个代币的余额**，耗时几秒（实测 Ethereum 约 9500 个代币 4~7 秒，BSC 约 4800 个 3~4 秒），大量使用时建议缓存结果；列表很大时也会占用较多节点请求
+6. **只包含 ERC20 代币**，不含 NFT（NFT 请用 `getNftBalances` 等）；Tron 链没有默认来源，需要自己传 `source`
+7. 使用 Alchemy / NodeReal 时受它们的免费额度和限频约束，翻页次数默认最多 20 页（2000 个代币），可用 `maxPages` 调整
+
 ## 功能
 
 - **常用查询**：余额、代币详情、授权额度、NFT（集合 / 持有 / 元数据地址 / ERC1155 余额），一个函数一次请求
+- **资产列表**：`getOwnerTokens`，免费公开代币列表或带 Key 的索引服务发现代币，multicall 核对余额，可选 DefiLlama 价格
 - **批量读取**：`all` / `tryAll` / `tryEach`，N 条读调用合成一次 `eth_call`；支持数组或对象输入
 - **自动合并**：绑定合约直接 `await`，或 `provider.call(x)`，同一收集窗口内的调用合并成一次请求并去重
 - **预执行**：`staticCall` / `staticCallAll` / `method.staticCall`，带 `from` / `value` 模拟交易，返回解析好的 revert 原因

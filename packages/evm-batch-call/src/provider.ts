@@ -24,6 +24,7 @@ import {
 import { CallFailedError, isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
 import { getNativeCurrency } from './chains.js'
+import { ownerTokens, type OwnedToken, type OwnerTokensOptions } from './owner.js'
 import {
   erc1155Balances,
   nftBalances,
@@ -362,6 +363,14 @@ export class Provider implements ContractRunner {
         success: true,
       }
     })
+  }
+
+  /**
+   * 列出持有人拥有的代币（资产列表）：从代币来源拿候选代币，再用 multicall 在链上核对余额。
+   * 默认来源是公开代币列表，**只能发现列表里的代币**，局限性见 README「资产列表」一节。
+   */
+  ownerTokens(owner: string, options?: OwnerTokensOptions): Promise<OwnedToken[]> {
+    return ownerTokens(this, owner, options)
   }
 
   /** 批量查 NFT 集合信息（标准 / name / symbol / totalSupply），字段可选 */

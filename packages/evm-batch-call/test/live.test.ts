@@ -17,6 +17,7 @@ import {
   getNftCollections,
   getNftOwners,
   getNftTokenUris,
+  getOwnerTokens,
   getTokens,
 } from '../src/index.js'
 
@@ -156,6 +157,27 @@ live('Ethereum NFT / 代币详情', () => {
     expect(eth).toMatchObject({ native: true, symbol: 'ETH', decimals: 18, totalSupply: null, success: true })
   })
 }, 60_000)
+
+live('资产列表 getOwnerTokens（免费公开代币列表）', () => {
+  const VITALIK = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045'
+  const BINANCE8 = '0xF977814e90dA44bFA03b6295A0616a897441aceC'
+
+  it('Ethereum：默认来源，主币在第一位，余额由链上核对', async () => {
+    const list = await getOwnerTokens(VITALIK, { chainId: 1 })
+    expect(list[0]).toMatchObject({ native: true, symbol: 'ETH', source: 'native' })
+    expect(list.length).toBeGreaterThan(50)
+    expect(list.every((t) => BigInt(t.balance) > 0n)).toBe(true)
+  })
+
+  it('BSC：带价格、按价值排序、过滤零头', async () => {
+    const list = await getOwnerTokens(BINANCE8, { chainId: 56, prices: true, minUsd: 1 })
+    expect(list[0]).toMatchObject({ native: true, symbol: 'BNB' })
+    const values = list.slice(1).map((t) => t.value as number)
+    expect(values.every((v) => v >= 1)).toBe(true)
+    expect([...values].sort((a, b) => b - a)).toEqual(values)
+    expect(list.some((t) => t.symbol === 'BTCB')).toBe(true)
+  })
+}, 120_000)
 
 live('Ethereum 历史区块', () => {
   // 公共节点对历史区块请求可能直接挂住，加超时，超时按“不是归档节点”跳过
