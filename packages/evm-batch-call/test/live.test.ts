@@ -173,7 +173,7 @@ live('资产列表 getOwnerTokens（免费公开代币列表）', () => {
 
   it('scanTransfers：增量扫描补充列表里没有的代币，进度可续扫', async () => {
     const storage = memoryScanStorage()
-    const first = await getOwnerTokens(VITALIK, { chainId: 1, scanTransfers: { storage, lookbackBlocks: 20_000 } })
+    const first = await getOwnerTokens(VITALIK, { chainId: 1, scanTransfers: { storage, lookbackBlocks: 20_000, timeBudget: 30_000 } })
     const state = await getTransferScanState(1, VITALIK, storage)
     expect(state?.cursor).toBeGreaterThan(state!.startBlock)
     expect(state?.tokens.length).toBeGreaterThan(0)

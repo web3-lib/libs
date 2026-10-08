@@ -177,8 +177,12 @@ await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000
 | --- | --- | --- |
 | `storage` | 内存 | 扫描进度（起始区块、已扫到的区块、发现的代币）。内存存储在进程 / 页面结束后丢失；`keyValueScanStorage(localStorage)` 或自己实现 `{ get, set }`（如存数据库）可以持久化 |
 | `lookbackBlocks` | 0 | 第一次调用时往回扫的区块数（0 表示只从现在开始） |
-| `blockRange` | 1000 | 单次 `eth_getLogs` 的区块范围；节点有上限时按报错里的上限自动缩小并记住 |
-| `maxRequests` | 20 | 每次调用最多发多少个 `eth_getLogs`；落后很多时分多次追上，不会卡住调用 |
+| `blockRange` | 1000 | 单次 `eth_getLogs` 的最大区块范围。节点有上限时按报错里的上限自动缩小（报错里没写上限就减半试），记下的上限 1 天后失效再重新试；偶发错误导致缩小后，连续成功会逐步放大回去 |
+| `maxRequests` | 20 | 每次调用最多发多少个 `eth_getLogs`；落后很多时分多次追上 |
+| `timeBudget` | 5000 | 每次调用的扫描时间预算（毫秒），超过后不再发新请求，留到下次调用 |
+| `confirmations` | 5 | 只扫到最新区块往前这么多个区块，避开链重组和节点之间的高度差（否则可能漏掉刚出的区块） |
+
+出错时的处理：所有节点都明确不开放 `eth_getLogs` 时暂停 10 分钟；能用的节点只是限频 / 超时时不缩小范围，退避后重试（连续 3 次失败留到下次调用）；有节点报范围超限时缩小范围。存储里的进度格式不对（如旧版本留下的）会被丢弃，重新开始。
 
 也可以单独当作代币来源使用：`combine(defaultTokenSource(), transferScan({ storage }))`；`getTransferScanState(chainId, owner, storage)` 读取扫描进度。
 
@@ -187,7 +191,9 @@ await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000
 - **只能发现开始扫描之后收到的代币**（以及 `lookbackBlocks` 范围内的）。更早收到、又不在代币列表里的代币仍然查不到；需要完整历史请用 `alchemy` / `nodereal`
 - **需要节点支持 `eth_getLogs`**，免费公共节点限制很多：BSC 上内置节点只有 blockrazor 可用，且每次最多 25 个区块（会自动适配），连续请求还会被限频；节点完全不支持时会暂停 10 分钟再试。持续使用建议传自己的节点
 - **进度默认只在内存里**：页面刷新、服务重启后会从头开始（重新记下当前区块），需要持久化请传 `storage`
-- **很久没调用时追赶较慢**：每次最多 `maxRequests` 个请求（如 BSC 上 20 × 25 = 500 个区块），落后很多时需要多次调用才能追上
+- **会增加 `getOwnerTokens` 的耗时**：扫描和余额查询一起等待，每次调用通常多几百毫秒到 `timeBudget`（默认 5 秒），最坏再加上一个请求的超时时间（节点超时默认 10 秒）。对耗时敏感时可以调小 `timeBudget` / `maxRequests`，或单独用 `transferScan` 在后台定期扫描、展示时只读进度
+- **很久没调用时追赶较慢**：每次最多 `maxRequests` 个请求、`timeBudget` 时间（如 BSC 上 20 × 25 = 500 个区块），落后很多时需要多次调用才能追上
+- **最新几个区块里收到的代币要等下一次调用**（`confirmations`，默认 5 个区块）
 - 扫描到的代币不经过任何列表筛选，**大部分会是空投垃圾币**，建议配合 `prices` + `minUsd` 使用
 - 只看转入（`to` 为该地址）的 ERC20 `Transfer` 事件；不发标准 `Transfer` 事件的代币发现不了；Tron 不支持
 
@@ -205,8 +211,8 @@ await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000
 4. **价格不一定可信**。流动性很差的代币价格可能严重虚高（实测有空投代币被估值数十万美元），默认已过滤 DefiLlama 置信度低于 0.9 的价格，但展示总资产时仍建议使用自己的价格源或再做校验
 5. **需要查几千到两万个代币的余额**，耗时几秒：实测 Ethereum（约 9500 个代币）首次约 11 秒、之后约 6 秒，BSC（约 4800 个）首次约 8 秒、之后约 4 秒（首次要在链上核对持有代币的精度，之后有缓存）。大量使用时建议缓存结果；列表很大时也会占用较多节点请求
 6. **只包含 ERC20 代币**，不含 NFT（NFT 请用 `getNftBalances` 等）；Tron 链没有默认来源，需要自己传 `source`
-8. 开启 `scanTransfers` 时另有局限，见上面「增量扫描」
 7. 使用 Alchemy / NodeReal 时受它们的免费额度和限频约束，翻页次数默认最多 20 页（2000 个代币），可用 `maxPages` 调整
+8. 开启 `scanTransfers` 时另有局限，见上面「增量扫描」
 
 ## 功能
 

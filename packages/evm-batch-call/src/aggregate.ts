@@ -5,10 +5,9 @@ import { DEPLOYLESS_MULTICALL3_BYTECODE } from './deployless.js'
 import { isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, type Multicall } from './multicall.js'
 
-/** 只用到 ethers Provider 的这两个方法，JsonRpcProvider / BrowserProvider 都满足 */
 /**
- * 必需 call / getBalance；getLogs / getBlockNumber 可选（只有增量扫描 Transfer 事件时用到，
- * ethers 的 JsonRpcProvider / BrowserProvider 都有）
+ * 只用到 ethers Provider 的这几个方法：必需 call / getBalance；getLogs / getBlockNumber 可选（只有增量扫描 Transfer 事件时用到）。
+ * ethers 的 JsonRpcProvider / BrowserProvider 都满足
  */
 export type EthersLikeProvider = Pick<EthersProvider, 'call' | 'getBalance'> & Partial<Pick<EthersProvider, 'getLogs' | 'getBlockNumber'>>
 

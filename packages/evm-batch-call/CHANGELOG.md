@@ -4,11 +4,11 @@
 
 ### 新增
 
-- `Provider.getBlockNumber()` / `Provider.getLogs()`；多节点时 getLogs 失败不会让节点进入冷却，全部失败抛 `GetLogsError`（带各节点的错误）
+- `Provider.getBlockNumber()` / `Provider.getLogs()`；多节点时 getLogs / getBlockNumber 失败不影响 call / getBalance 的节点顺序，getLogs 全部失败抛 `GetLogsError`（带各节点的错误）
 - 资产列表 `getOwnerTokens` / `ownerTokens`：从代币来源发现候选代币，multicall 在链上核对余额，返回持有的代币
   - 代币来源可替换：`metamaskTokenList`、`coingeckoTokenList`、`tokenList(url)`、`staticTokens`、`alchemy({ apiKey })`、`nodereal({ apiKey })`，以及 `firstAvailable` / `combine` 组合；默认 MetaMask 列表 → CoinGecko 列表（免费免 Key）
   - 可选价格：`prices: true` 用 DefiLlama，或传自定义价格源；`minUsd` 过滤
-  - 增量扫描开关 `scanTransfers`（默认关闭）：从第一次调用开始扫描转入的 ERC20 Transfer 事件，补充列表里没有的新代币；进度可持久化（`keyValueScanStorage` 或自定义存储），自动适配节点的区块范围上限与限频
+  - 增量扫描开关 `scanTransfers`（默认关闭）：从第一次调用开始扫描转入的 ERC20 Transfer 事件，补充列表里没有的新代币；进度可持久化（`keyValueScanStorage` 或自定义存储），自动适配节点的区块范围上限与限频；`timeBudget` 限制每次调用的扫描时间，`confirmations` 避开链重组
   - 局限性见 README「资产列表」
 
 ## 0.2.0
