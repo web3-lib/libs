@@ -258,7 +258,7 @@ export interface GetOwnerTokensOptions extends OwnerTokensOptions, ShortcutProvi
  * ```
  */
 export function getOwnerTokens(owner: string, options: GetOwnerTokensOptions = {}): Promise<OwnedToken[]> {
-  const { provider, overrides, own } = resolve(options, ['source', 'prices', 'minUsd', 'includeNative', 'fetch'])
+  const { provider, overrides, own } = resolve(options, ['source', 'prices', 'minUsd', 'includeNative', 'fetch', 'scanTransfers'])
   return provider.ownerTokens(owner, { ...overrides, ...own })
 }
 

@@ -19,6 +19,8 @@ import {
   getNftTokenUris,
   getOwnerTokens,
   getTokens,
+  getTransferScanState,
+  memoryScanStorage,
 } from '../src/index.js'
 
 const live = process.env.LIVE ? describe : describe.skip
@@ -167,6 +169,17 @@ live('资产列表 getOwnerTokens（免费公开代币列表）', () => {
     expect(list[0]).toMatchObject({ native: true, symbol: 'ETH', source: 'native' })
     expect(list.length).toBeGreaterThan(50)
     expect(list.every((t) => BigInt(t.balance) > 0n)).toBe(true)
+  })
+
+  it('scanTransfers：增量扫描补充列表里没有的代币，进度可续扫', async () => {
+    const storage = memoryScanStorage()
+    const first = await getOwnerTokens(VITALIK, { chainId: 1, scanTransfers: { storage, lookbackBlocks: 20_000 } })
+    const state = await getTransferScanState(1, VITALIK, storage)
+    expect(state?.cursor).toBeGreaterThan(state!.startBlock)
+    expect(state?.tokens.length).toBeGreaterThan(0)
+    expect(first.some((t) => t.source === 'transfers')).toBe(true)
+    await getOwnerTokens(VITALIK, { chainId: 1, scanTransfers: { storage } })
+    expect((await getTransferScanState(1, VITALIK, storage))?.cursor).toBeGreaterThanOrEqual(state!.cursor)
   })
 
   it('BSC：带价格、按价值排序、过滤零头', async () => {

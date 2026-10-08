@@ -657,6 +657,24 @@ export class Provider implements ContractRunner {
     }
   }
 
+  /** 当前区块号（底层节点需支持 getBlockNumber） */
+  async getBlockNumber(): Promise<number> {
+    const { provider } = await this.#ensureReady()
+    if (!provider.getBlockNumber) {
+      throw new Error('getBlockNumber is not supported by this provider')
+    }
+    return provider.getBlockNumber()
+  }
+
+  /** eth_getLogs（底层节点需支持 getLogs）。多节点时依次尝试，全部失败抛 GetLogsError */
+  async getLogs(filter: Parameters<NonNullable<EthersLikeProvider['getLogs']>>[0]): Promise<Awaited<ReturnType<NonNullable<EthersLikeProvider['getLogs']>>>> {
+    const { provider } = await this.#ensureReady()
+    if (!provider.getLogs) {
+      throw new Error('getLogs is not supported by this provider')
+    }
+    return provider.getLogs(filter)
+  }
+
   /** 是否是按主币处理的地址（config.nativeTokens，默认 0xeeee…eeee 和零地址） */
   isNativeToken(address: string): boolean {
     return this.#nativeTokens.has(address.toLowerCase())

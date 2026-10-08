@@ -1,6 +1,7 @@
 import type { CallOverrides } from './aggregate.js'
 import { NATIVE_TOKEN, formatAmount, type BalanceToken } from './erc20.js'
 import type { Provider } from './provider.js'
+import { transferScan, type TransferScanOptions } from './scan.js'
 import { isTronAddress } from './tron.js'
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,8 @@ export interface TokenSourceContext {
   chainId: number
   owner: string
   fetch: typeof fetch
+  /** 查询用的 Provider（扫描链上事件的来源会用到，如 transferScan） */
+  provider?: Provider
 }
 
 export interface TokenSource {
@@ -526,6 +529,11 @@ export interface OwnerTokensOptions extends CallOverrides {
   includeNative?: boolean
   /** 自定义 fetch（代理等场景）；默认全局 fetch */
   fetch?: typeof fetch
+  /**
+   * 增量扫描开关（默认关闭）：开启后，额外合并“从第一次调用开始，该地址收到过的 ERC20 代币”（扫描 Transfer 事件），
+   * 用来补充代币列表里没有的新代币。传对象可以配置进度存储、回扫区块数等，见 TransferScanOptions
+   */
+  scanTransfers?: boolean | TransferScanOptions
 }
 
 export interface OwnedToken {
@@ -548,7 +556,8 @@ export interface OwnedToken {
 }
 
 export async function ownerTokens(provider: Provider, owner: string, options: OwnerTokensOptions = {}): Promise<OwnedToken[]> {
-  const { source = defaultTokenSource(), prices, minUsd, includeNative = true, fetch: fetchOption, ...overrides } = options
+  const { source: baseSource = defaultTokenSource(), prices, minUsd, includeNative = true, fetch: fetchOption, scanTransfers, ...overrides } = options
+  const source = scanTransfers ? combine(baseSource, transferScan(scanTransfers === true ? {} : scanTransfers)) : baseSource
   if (minUsd !== undefined && prices === false) {
     throw new Error('minUsd requires prices; remove prices: false or pass a PriceSource')
   }
@@ -556,7 +565,7 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
   const fetchFn = fetchOption ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   const chainId = await provider.getChainId()
 
-  const discovered = await source.discover({ chainId, owner, fetch: fetchFn })
+  const discovered = await source.discover({ chainId, owner, fetch: fetchFn, provider })
   if (!discovered) {
     throw new Error(`No token source supports chain ${chainId}; pass options.source (e.g. tokenList(url), alchemy({ apiKey }))`)
   }

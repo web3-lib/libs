@@ -161,6 +161,36 @@ await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey: KEY }) }) //
 - 主币用 Provider 配置的 `nativeTokens` 里的第一个地址查询（默认 `0xeeee…eeee`），名称 / symbol 同样遵循 `nativeName` / `nativeSymbol` 配置；列表里出现的主币映射地址（如 Polygon 的 `0x…1010`、zkSync 的 `0x…800A`）会被排除，不会把主币算两次
 - 公开代币列表按 URL 缓存 1 小时；`clearTokenListCache()` 可手动清空
 
+### 增量扫描（可选）
+
+代币列表发现不了的新代币（刚发行、未被收录），可以用 `scanTransfers` 开关补充：开启后，从**第一次调用开始**，每次调用都往后扫描新区块里转给该地址的 ERC20 `Transfer` 事件，把发现的代币合并进来（结果的 `source` 为 `'transfers'`）。默认关闭。
+
+```ts
+import { getOwnerTokens, keyValueScanStorage } from '@w3lib/evm-batch-call'
+
+await getOwnerTokens(user, { chainId: 1, scanTransfers: true })                    // 进度存在内存里
+await getOwnerTokens(user, { chainId: 1, scanTransfers: { storage: keyValueScanStorage(localStorage) } }) // 刷新页面后接着扫
+await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000 } }) // 第一次额外往回扫一段
+```
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `storage` | 内存 | 扫描进度（起始区块、已扫到的区块、发现的代币）。内存存储在进程 / 页面结束后丢失；`keyValueScanStorage(localStorage)` 或自己实现 `{ get, set }`（如存数据库）可以持久化 |
+| `lookbackBlocks` | 0 | 第一次调用时往回扫的区块数（0 表示只从现在开始） |
+| `blockRange` | 1000 | 单次 `eth_getLogs` 的区块范围；节点有上限时按报错里的上限自动缩小并记住 |
+| `maxRequests` | 20 | 每次调用最多发多少个 `eth_getLogs`；落后很多时分多次追上，不会卡住调用 |
+
+也可以单独当作代币来源使用：`combine(defaultTokenSource(), transferScan({ storage }))`；`getTransferScanState(chainId, owner, storage)` 读取扫描进度。
+
+**增量扫描的局限**：
+
+- **只能发现开始扫描之后收到的代币**（以及 `lookbackBlocks` 范围内的）。更早收到、又不在代币列表里的代币仍然查不到；需要完整历史请用 `alchemy` / `nodereal`
+- **需要节点支持 `eth_getLogs`**，免费公共节点限制很多：BSC 上内置节点只有 blockrazor 可用，且每次最多 25 个区块（会自动适配），连续请求还会被限频；节点完全不支持时会暂停 10 分钟再试。持续使用建议传自己的节点
+- **进度默认只在内存里**：页面刷新、服务重启后会从头开始（重新记下当前区块），需要持久化请传 `storage`
+- **很久没调用时追赶较慢**：每次最多 `maxRequests` 个请求（如 BSC 上 20 × 25 = 500 个区块），落后很多时需要多次调用才能追上
+- 扫描到的代币不经过任何列表筛选，**大部分会是空投垃圾币**，建议配合 `prices` + `minUsd` 使用
+- 只看转入（`to` 为该地址）的 ERC20 `Transfer` 事件；不发标准 `Transfer` 事件的代币发现不了；Tron 不支持
+
 ### 价格
 
 `prices: true` 用 DefiLlama 查美元价格（免费、不需要 Key），结果带 `price` / `value`，并按价值从高到低排序；`minUsd` 只保留价值不低于它的代币（没有价格的代币也会被去掉，主币始终保留）。只传 `minUsd` 时会自动开启 DefiLlama 价格；与 `prices: false` 同时使用会报错。也可以传自己的价格源：`prices: { name, prices: async ({ chainId, tokens, native }) => Map }`。
@@ -175,6 +205,7 @@ await getOwnerTokens(user, { chainId: 56, source: alchemy({ apiKey: KEY }) }) //
 4. **价格不一定可信**。流动性很差的代币价格可能严重虚高（实测有空投代币被估值数十万美元），默认已过滤 DefiLlama 置信度低于 0.9 的价格，但展示总资产时仍建议使用自己的价格源或再做校验
 5. **需要查几千到两万个代币的余额**，耗时几秒：实测 Ethereum（约 9500 个代币）首次约 11 秒、之后约 6 秒，BSC（约 4800 个）首次约 8 秒、之后约 4 秒（首次要在链上核对持有代币的精度，之后有缓存）。大量使用时建议缓存结果；列表很大时也会占用较多节点请求
 6. **只包含 ERC20 代币**，不含 NFT（NFT 请用 `getNftBalances` 等）；Tron 链没有默认来源，需要自己传 `source`
+8. 开启 `scanTransfers` 时另有局限，见上面「增量扫描」
 7. 使用 Alchemy / NodeReal 时受它们的免费额度和限频约束，翻页次数默认最多 20 页（2000 个代币），可用 `maxPages` 调整
 
 ## 功能

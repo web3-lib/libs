@@ -1,5 +1,15 @@
 export { Contract, bindCall, type BoundMethod, type ContractAbi, type ContractRunner } from './contract.js'
 export {
+  getTransferScanState,
+  keyValueScanStorage,
+  memoryScanStorage,
+  transferScan,
+  type TransferScanOptions,
+  type TransferScanState,
+  type TransferScanStorage,
+} from './scan.js'
+export { GetLogsError } from './fallback.js'
+export {
   ALCHEMY_NETWORKS,
   COINGECKO_PLATFORMS,
   DEFILLAMA_CHAINS,

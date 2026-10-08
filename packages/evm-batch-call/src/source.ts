@@ -120,6 +120,22 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     return this.#run(() => this.inner.getBalance(...args))
   }
 
+  getBlockNumber(): Promise<number> {
+    const inner = this.inner
+    if (!inner.getBlockNumber) {
+      return Promise.reject(new Error('getBlockNumber is not supported by this node'))
+    }
+    return this.#run(() => (inner.getBlockNumber as () => Promise<number>)())
+  }
+
+  getLogs(filter: Parameters<NonNullable<EthersLikeProvider['getLogs']>>[0]): Promise<Awaited<ReturnType<NonNullable<EthersLikeProvider['getLogs']>>>> {
+    const inner = this.inner
+    if (!inner.getLogs) {
+      return Promise.reject(new Error('getLogs is not supported by this node'))
+    }
+    return this.#run(() => (inner.getLogs as NonNullable<EthersLikeProvider['getLogs']>)(filter))
+  }
+
   async getChainId(): Promise<number> {
     return this.chainId
   }

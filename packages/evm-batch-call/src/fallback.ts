@@ -24,6 +24,8 @@ export class FallbackRpc implements EthersLikeProvider {
   readonly #timeout: number
   readonly #cooldown: number
   readonly #failedAt: number[]
+  /** 上次 getLogs 成功的节点 */
+  #logsNode = -1
 
   constructor(nodes: EthersLikeProvider[], options: FallbackOptions = {}) {
     if (!nodes.length) {
@@ -50,6 +52,41 @@ export class FallbackRpc implements EthersLikeProvider {
   /** 按节点顺序探测 chainId（节点需实现 getChainId，见 detect.ts） */
   getChainId(): Promise<number> {
     return this.#run((node) => detectChainIdOf(node))
+  }
+
+  getBlockNumber(): Promise<number> {
+    return this.#run((node) => {
+      if (!node.getBlockNumber) throw new Error('getBlockNumber is not supported by this node')
+      return node.getBlockNumber()
+    })
+  }
+
+  /**
+   * 依次尝试支持 getLogs 的节点。与其他请求不同：
+   * - getLogs 失败多半是“区块范围超限 / 节点不开放这个方法”，不代表节点故障，所以不让节点进入冷却
+   * - 全部失败时抛出 GetLogsError，带上每个节点的错误（如只有某个节点的报错里写了范围上限）
+   */
+  async getLogs(filter: Parameters<NonNullable<EthersLikeProvider['getLogs']>>[0]): Promise<Awaited<ReturnType<NonNullable<EthersLikeProvider['getLogs']>>>> {
+    const errors: unknown[] = []
+    // 上次成功的节点排在最前（大多数公共节点不开放 getLogs，没必要每次从头试）
+    const order = this.#nodes.map((_, i) => i).sort((a, b) => (a === this.#logsNode ? -1 : b === this.#logsNode ? 1 : a - b))
+    for (const index of order) {
+      const node = this.#nodes[index] as EthersLikeProvider
+      if (!node.getLogs) {
+        continue
+      }
+      try {
+        const logs = await withTimeout(node.getLogs(filter), this.#timeout)
+        this.#logsNode = index
+        return logs
+      } catch (err) {
+        if (isError(err, 'INVALID_ARGUMENT')) {
+          throw err
+        }
+        errors.push(err)
+      }
+    }
+    throw new GetLogsError(errors)
   }
 
   async #run<T>(fn: (node: EthersLikeProvider) => Promise<T>): Promise<T> {
@@ -82,6 +119,21 @@ export class FallbackRpc implements EthersLikeProvider {
 }
 
 /** 换节点也不会变的错误：合约执行结果、参数错误、用户拒绝等 */
+/** 所有节点的 getLogs 都失败时抛出，errors 是各节点的错误 */
+export class GetLogsError extends Error {
+  constructor(readonly errors: readonly unknown[]) {
+    super(errors.length ? `getLogs failed on all nodes: ${errors.map(errorText).join(' | ')}` : 'No node supports getLogs')
+    this.name = 'GetLogsError'
+  }
+}
+
+/** 取出错误里节点返回的原始信息（ethers 会把它放在 error.message 里，外层是 “could not coalesce error”） */
+export function errorText(err: unknown): string {
+  const e = err as { error?: { message?: unknown }; info?: { error?: { message?: unknown } }; shortMessage?: unknown; message?: unknown } | null
+  const parts = [e?.error?.message, e?.info?.error?.message, e?.shortMessage ?? e?.message].filter((p) => typeof p === 'string')
+  return parts.length ? parts.join('; ') : String(err)
+}
+
 function isDeterministic(err: unknown): boolean {
   return (
     isExecutionError(err) ||
