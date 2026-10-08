@@ -19,6 +19,17 @@ export interface TokenBalance {
   success: boolean
 }
 
+/** ownerTokens() / getOwnerTokens() 的单项结果 */
+export interface OwnedToken extends Omit<TokenBalance, 'symbol'> {
+  /** 该代币的代币账户数量；大于 1 时 balance 为所有账户的合计 */
+  accounts: number
+  /** metadata 为 true（默认）时返回；没有元数据或读取失败时为 null（见 metadataStatus） */
+  name?: string | null
+  symbol?: string | null
+  /** metadata 为 true 时返回：ok 读到了；missing 确认没有元数据；failed 节点问题没能读到（可以稍后单独用 getTokens 重查） */
+  metadataStatus?: 'ok' | 'missing' | 'failed'
+}
+
 export interface SolBalance {
   address: string
   /** lamports（十进制字符串） */

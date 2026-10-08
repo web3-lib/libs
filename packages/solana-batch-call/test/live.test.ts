@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { NATIVE_MINT, NetworkMismatchError, SolanaClient, TOKEN_2022_PROGRAM_ID, getBalances, getNftOwners, getNfts, getTokens } from '../src/index.js'
+import { NATIVE_MINT, NetworkMismatchError, SolanaClient, TOKEN_2022_PROGRAM_ID, getBalances, getNftOwners, getNfts, getOwnerTokens, getTokens } from '../src/index.js'
 
 const live = process.env.LIVE ? describe : describe.skip
 
@@ -54,6 +54,15 @@ live('支持索引方法的节点', () => {
     const [ataOnly] = await getBalances(OWNER, [USDC], { provider: INDEXED_RPC })
     // 这个地址除了 ATA 还有很多非 ATA 的 USDC 账户
     expect(BigInt(usdc!.balance)).toBeGreaterThan(BigInt(ataOnly!.balance))
+  })
+
+  it('getOwnerTokens：全部持仓（不读元数据，大钱包也很快）', async () => {
+    const list = await getOwnerTokens(OWNER, { provider: INDEXED_RPC, metadata: false })
+    expect(list[0]).toMatchObject({ token: NATIVE_MINT, native: true })
+    expect(list.length).toBeGreaterThan(100)
+    const usdc = list.find((t) => t.token === USDC)
+    expect(usdc?.accounts).toBeGreaterThan(1) // 多个代币账户合计
+    expect(list.every((t) => !(t.decimals === 0 && t.balance === '1'))).toBe(true) // 默认不含 NFT
   })
 
   it('getNftOwners（官方节点对 getTokenLargestAccounts 限频很严，被限频时跳过）', async (ctx) => {

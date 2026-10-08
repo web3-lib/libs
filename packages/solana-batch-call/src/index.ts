@@ -1,12 +1,14 @@
-export { SolanaClient, type BalancesOptions, type ClientConfig, type TokensOptions } from './client.js'
+export { SolanaClient, type BalancesOptions, type ClientConfig, type OwnerTokensOptions, type TokensOptions } from './client.js'
 export {
   getBalances,
   getNftOwners,
   getNfts,
   getOwnerNfts,
+  getOwnerTokens,
   getSolBalances,
   getTokens,
   type GetBalancesOptions,
+  type GetOwnerTokensOptions,
   type GetTokensOptions,
   type ShortcutOptions,
 } from './shortcuts.js'
@@ -16,6 +18,7 @@ export {
   type DefaultTokenField,
   type NftDetails,
   type NftOwner,
+  type OwnedToken,
   type SolBalance,
   type TokenBalance,
   type TokenDetails,

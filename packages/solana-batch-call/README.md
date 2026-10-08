@@ -6,7 +6,7 @@ Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情
 pnpm add @w3lib/solana-batch-call
 ```
 
-- **一次请求查一批**：账户读取用 `getMultipleAccounts`（自动去重、按 100 个一组拆分）；同一 tick 内发起的 RPC 调用合并成一个 JSON-RPC 批量请求
+- **一次请求查一批**：账户读取用 `getMultipleAccounts`（自动去重、按 100 个一组拆分、最多同时 3 个请求）；同一 tick 内发起的 RPC 调用合并成一个 JSON-RPC 批量请求
 - **免费节点也能查余额**：指定代币时在本地推导关联代币账户（ATA）地址，和 SOL 账户、mint 账户一起一次读完，不需要 `getTokenAccountsByOwner` 这类索引方法
 - **Token-2022**：余额、decimals、TokenMetadata 扩展里的 name / symbol / uri 都支持
 - **多节点故障切换**：限频、403、需要 API Key、不支持某方法等节点问题自动换下一个节点；节点不支持批量请求或限制批量大小时自动降级
@@ -16,7 +16,15 @@ pnpm add @w3lib/solana-batch-call
 ## 快速上手
 
 ```ts
-import { NATIVE_MINT, getBalances, getNftOwners, getNfts, getOwnerNfts, getSolBalances, getTokens } from '@w3lib/solana-batch-call'
+import { NATIVE_MINT, getBalances, getNftOwners, getNfts, getOwnerNfts, getOwnerTokens, getSolBalances, getTokens } from '@w3lib/solana-batch-call'
+
+// 资产列表：持有人拥有的全部代币（SOL 在第一位，带 name / symbol；需要支持索引方法的节点）
+await getOwnerTokens(owner, { provider: 'https://my-rpc.example' })
+// [
+//   { token: NATIVE_MINT, native: true,  name: 'Solana',   symbol: 'SOL',  formatted: '1.5',  accounts: 1, … },
+//   { token: USDC,        native: false, name: 'USD Coin', symbol: 'USDC', formatted: '1235', accounts: 2, … },  // 2 个代币账户合计
+//   ...
+// ]
 
 // 余额：SOL + 代币，带 decimals 换算（不传 provider 时使用内置的 mainnet 公共节点）
 await getBalances(owner, [NATIVE_MINT, USDC, PYUSD], { symbol: true })
@@ -42,6 +50,7 @@ await getOwnerNfts(owner)    // 某地址持有的全部 NFT（需要支持索�
 | 函数 | SolanaClient 方法 | 说明 |
 | --- | --- | --- |
 | `getBalances(owner, mints?, opts)` | `balances` | SOL + SPL Token + Token-2022 余额；`symbol: true` 额外返回 symbol；不传 mints 返回全部持仓 |
+| `getOwnerTokens(owner, opts)` | `ownerTokens` | 持有人的全部代币（资产列表），带 name / symbol；默认不含 NFT 和余额为 0 的账户 |
 | `getSolBalances(addresses, opts)` | `solBalances` | 多个地址的 SOL 余额 |
 | `getTokens(mints, opts)` | `tokens` | 代币详情，`fields` 选择字段，结果类型随之收窄 |
 | `getNfts(mints, opts)` | `nfts` | NFT 元数据（Metaplex；Token-2022 NFT 取扩展） |
@@ -49,6 +58,19 @@ await getOwnerNfts(owner)    // 某地址持有的全部 NFT（需要支持索�
 | `getOwnerNfts(owner, opts)` | `ownerNfts` | 某地址持有的全部 NFT |
 | — | `accounts(addresses)` | 批量读原始账户（`AccountInfo \| null`） |
 | — | `request(method, params)` | 直接发 JSON-RPC（同样参与合并与故障切换） |
+
+## 资产列表
+
+`getOwnerTokens(owner)` 扫描持有人的全部代币账户（Token + Token-2022），同一代币的多个账户合计，返回：
+
+- 第一项是 SOL，之后是 SPL Token、Token-2022 的代币（各自按节点返回的顺序；库里没有价格信息，不按价值排序）
+- 每项带 `accounts`（代币账户数量）；默认还带 `name` / `symbol` / `metadataStatus`（`ok` 读到了、`missing` 确认没有元数据、`failed` 节点问题没读到），`metadata: false` 时不读元数据、不返回这三个字段
+- Wrapped SOL 代币账户单独列出（`token` 同样是 `So111…112`，`native: false`），与原生 SOL 那一项区分
+- 默认不含 NFT 和余额为 0 的代币账户（已清空的 ATA），用 `includeNfts` / `includeZero` 打开；`includeNative: false` 不返回 SOL。NFT 的判断按 mint 汇总：精度 0、合计数量 1（与 `getOwnerNfts` 一致）
+
+持仓很多时读元数据较慢：读取账户最多同时 3 个请求、每个 100 个地址，以避免限频（实测 4000 个代币在官方节点上约 80 秒，不读元数据约 4 秒）。可以先用 `metadata: false` 拿到列表，再对需要展示的代币调用 `getTokens`。元数据读取遇到限频等节点问题时不再继续请求，对应代币的 `metadataStatus` 为 `failed`、`name` / `symbol` 为 `null`，余额列表照常返回；之后可以对这些代币单独重查。
+
+需要支持 `getTokenAccountsByOwner` 的节点，内置的免费公共节点大多不支持。
 
 ## 余额的两种模式
 

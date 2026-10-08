@@ -1,6 +1,6 @@
-import { SolanaClient, type BalancesOptions, type ClientConfig, type TokensOptions } from './client.js'
+import { SolanaClient, type BalancesOptions, type ClientConfig, type OwnerTokensOptions, type TokensOptions } from './client.js'
 import type { RpcSource } from './source.js'
-import type { DefaultTokenField, NftDetails, NftOwner, SolBalance, TokenBalance, TokenDetails, TokenField } from './types.js'
+import type { DefaultTokenField, NftDetails, NftOwner, OwnedToken, SolBalance, TokenBalance, TokenDetails, TokenField } from './types.js'
 
 /** 各函数共用的节点参数 */
 export interface ShortcutOptions extends ClientConfig {
@@ -144,6 +144,22 @@ export function getNftOwners(mints: readonly string[], options: ShortcutOptions 
 /** 查某地址持有的全部 NFT（需要支持 getTokenAccountsByOwner 的节点） */
 export function getOwnerNfts(owner: string, options: ShortcutOptions = {}): Promise<NftDetails[]> {
   return resolve(options).client.ownerNfts(owner)
+}
+
+export interface GetOwnerTokensOptions extends OwnerTokensOptions, ShortcutOptions {}
+
+/**
+ * 列出持有人拥有的全部代币（SOL 在第一位），带 name / symbol，适合做资产列表。
+ * 需要支持 getTokenAccountsByOwner 的节点。
+ *
+ * ```ts
+ * await getOwnerTokens(owner, { provider: 'https://my-rpc…' })
+ * // [{ token: NATIVE_MINT, native: true, name: 'Solana', symbol: 'SOL', formatted: '1.5', … }, { token: USDC, name: 'USD Coin', … }]
+ * ```
+ */
+export function getOwnerTokens(owner: string, options: GetOwnerTokensOptions = {}): Promise<OwnedToken[]> {
+  const { client, own } = resolve(options, ['metadata', 'includeNative', 'includeZero', 'includeNfts'])
+  return client.ownerTokens(owner, own)
 }
 
 /** 测试用：按参数取（或创建）客户端，用于验证缓存复用（不在包的公开导出里） */
