@@ -87,6 +87,10 @@ export interface MockOptions {
   maxCodeSize?: number
   /** 模拟会丢掉 revert 数据的钱包 / 中间层 */
   dropRevertData?: boolean
+  /** 模拟合约里读主币余额恒为 0 的链（getEthBalance / BALANCE 都返回 0，eth_getBalance 正常） */
+  zeroNativeInContract?: boolean
+  /** 节点当前的区块高度（默认 1 亿）；查询更高的区块时报 header not found */
+  blockNumber?: number | (() => number)
 }
 
 /**
@@ -104,15 +108,35 @@ export function createMockProvider(options: MockOptions = {}) {
 
   const calls: TransactionRequest[] = []
   const balanceCalls: string[] = []
+  const height = () => (typeof options.blockNumber === 'function' ? options.blockNumber() : (options.blockNumber ?? 100_000_000))
+  /** 本次请求读取的区块：指定了数字区块就是它，否则是当前高度 */
+  const currentBlock = (tag: unknown) => (typeof tag === 'number' || typeof tag === 'bigint' || (typeof tag === 'string' && /^0x/.test(tag)) ? Number(tag) : height())
+  let currentTag: unknown
+  const checkBlock = (tag: unknown) => {
+    if (currentBlock(tag) > height()) {
+      // 节点还没有这个区块（geth：header not found）；ethers 包装成 CALL_EXCEPTION，但不是执行错误
+      throw makeError('missing revert data', 'CALL_EXCEPTION', {
+        action: 'call',
+        data: null,
+        reason: null,
+        transaction: { to: null, data: '0x' },
+        invocation: null,
+        revert: null,
+        info: { error: { code: -32000, message: 'header not found' } },
+      })
+    }
+  }
 
   function exec(call3s: Call3[], multicallAddress: string | null) {
     return call3s.map((c) => {
       const target = c.target.toLowerCase()
       let result: { success: boolean; returnData: string }
       const balanceTarget = multicallAddress ?? MULTICALL3_ADDRESS.toLowerCase()
-      if (target === balanceTarget && c.callData.startsWith(multicall3Interface.getFunction('getEthBalance')!.selector)) {
+      if (target === balanceTarget && c.callData === multicall3Interface.encodeFunctionData('getBlockNumber')) {
+        result = { success: true, returnData: multicall3Interface.encodeFunctionResult('getBlockNumber', [BigInt(currentBlock(currentTag))]) }
+      } else if (target === balanceTarget && c.callData.startsWith(multicall3Interface.getFunction('getEthBalance')!.selector)) {
         const parsed = multicall3Interface.parseTransaction({ data: c.callData })
-        const balance = balances[String(parsed?.args[0]).toLowerCase()] ?? 0n
+        const balance = options.zeroNativeInContract ? 0n : (balances[String(parsed?.args[0]).toLowerCase()] ?? 0n)
         result = { success: true, returnData: multicall3Interface.encodeFunctionResult('getEthBalance', [balance]) }
       } else if (contracts[target]) {
         // multicall 内部调用时 msg.sender 是 multicall 合约
@@ -133,6 +157,8 @@ export function createMockProvider(options: MockOptions = {}) {
     balanceCalls,
     async call(tx: TransactionRequest): Promise<string> {
       calls.push(tx)
+      checkBlock(tx.blockTag)
+      currentTag = tx.blockTag
       dropRevertData = Boolean(options.dropRevertData)
       const data = String(tx.data)
       if (!tx.to) {
@@ -159,8 +185,9 @@ export function createMockProvider(options: MockOptions = {}) {
       const parsed = multicall3Interface.parseTransaction({ data })
       return multicall3Interface.encodeFunctionResult('aggregate3', [exec(parsed?.args[0] as Call3[], to)])
     },
-    async getBalance(address: string): Promise<bigint> {
+    async getBalance(address: string, blockTag?: unknown): Promise<bigint> {
       balanceCalls.push(address)
+      checkBlock(blockTag)
       return balances[address.toLowerCase()] ?? 0n
     },
   }

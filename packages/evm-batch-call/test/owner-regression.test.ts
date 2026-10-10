@@ -1,7 +1,8 @@
 /** getOwnerTokens code review 发现的问题的回归测试 */
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { MULTICALL3_ADDRESS, Provider, alchemy, clearTokenListCache, combine, staticTokens, toEvmAddress, tokenList, type PriceSource, type TokenSource } from '../src/index.js'
+import { MULTICALL3_ADDRESS, Provider, toEvmAddress } from '../src/index.js'
+import { alchemy, clearTokenListCache, combine, ownerTokens, type PriceSource, staticTokens, tokenList, type TokenSource } from '../src/subpaths/owner.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
 import { createMockProvider, fakeToken } from './mockProvider.js'
@@ -47,19 +48,19 @@ describe('getOwnerTokens 回归', () => {
   it('Tron 的 T 开头地址不会被过滤掉', async () => {
     const hex = toEvmAddress(TRON_USDT)
     const multi = provider(1, { [hex]: fakeToken('USDT', 6, { [USER]: 7_000_000n }) })
-    const list = await multi.ownerTokens(USER, { source: staticTokens([TRON_USDT]), includeNative: false })
+    const list = await ownerTokens(multi, USER, { source: staticTokens([TRON_USDT]), includeNative: false })
     expect(list.map((t) => [t.token, t.formatted])).toEqual([[TRON_USDT, '7']])
   })
 
   it('combine：单个来源出错不影响其他来源', async () => {
     const broken: TokenSource = { name: 'broken', discover: async () => Promise.reject(new Error('429')) }
-    const list = await provider().ownerTokens(USER, { source: combine(broken, staticTokens([B])), includeNative: false })
+    const list = await ownerTokens(provider(), USER, { source: combine(broken, staticTokens([B])), includeNative: false })
     expect(list.map((t) => t.symbol)).toEqual(['BBB'])
   })
 
   it('主币的 ERC20 映射地址（Polygon 0x…1010）和 nativeTokens 配置里的地址不会被重复计入', async () => {
     const multi = provider(137, { [POL_ALIAS]: fakeToken('POL', 18, { [USER]: 10n ** 18n }) }, { nativeTokens: [B] })
-    const list = await multi.ownerTokens(USER, { source: staticTokens([POL_ALIAS, B, A]) })
+    const list = await ownerTokens(multi, USER, { source: staticTokens([POL_ALIAS, B, A]) })
     expect(list.map((t) => [t.symbol, t.native])).toEqual([
       ['POL', true],
       ['AAA', false],
@@ -76,14 +77,14 @@ describe('getOwnerTokens 回归', () => {
       },
     }
     const multi = provider(999_999, {}, { nativeSymbol: 'XDAI', nativeName: 'xDai' })
-    const [native] = await multi.ownerTokens(USER, { source: staticTokens([A]), prices })
+    const [native] = await ownerTokens(multi, USER, { source: staticTokens([A]), prices })
     expect(native).toMatchObject({ symbol: 'XDAI', name: 'xDai', value: 2 })
     expect(seen).toBe('XDAI')
   })
 
   it('来源给错的 decimals 以链上为准；非法 decimals（NaN）当作未知', async () => {
     const multi = provider()
-    const list = await multi.ownerTokens(USER, {
+    const list = await ownerTokens(multi, USER, {
       source: staticTokens([
         { address: A, symbol: 'AAA', decimals: 18 }, // 列表说 18，链上是 6
         { address: B, symbol: 'BBB', decimals: Number.NaN },
@@ -106,10 +107,10 @@ describe('getOwnerTokens 回归', () => {
 
   it('只传 minUsd 时自动开启 DefiLlama 价格；与 prices: false 同时使用时报错', async () => {
     const { fn, calls } = mockFetch({ 'https://coins.llama.fi/': () => [200, { coins: { [`ethereum:${B.toLowerCase()}`]: { price: 5, confidence: 0.99 } } }] })
-    const list = await provider().ownerTokens(USER, { source: staticTokens([A, B]), minUsd: 1, includeNative: false, fetch: fn })
+    const list = await ownerTokens(provider(), USER, { source: staticTokens([A, B]), minUsd: 1, includeNative: false, fetch: fn })
     expect(list.map((t) => [t.symbol, t.value])).toEqual([['BBB', 5]])
     expect(calls.some((u) => u.startsWith('https://coins.llama.fi/'))).toBe(true)
-    await expect(provider().ownerTokens(USER, { source: staticTokens([A]), minUsd: 1, prices: false })).rejects.toThrow(/minUsd requires prices/)
+    await expect(ownerTokens(provider(), USER, { source: staticTokens([A]), minUsd: 1, prices: false })).rejects.toThrow(/minUsd requires prices/)
   })
 
   it('错误信息不泄露 Key（Key 在查询参数里也一样），公开列表的错误信息保留完整地址', async () => {

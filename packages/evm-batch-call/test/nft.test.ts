@@ -1,20 +1,18 @@
 import { Interface } from 'ethers'
 import { beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
 
+import { getAllowances, MAX_UINT256, MULTICALL3_ADDRESS, NATIVE_TOKEN, Provider } from '../src/index.js'
 import {
   ERC1155_ABI,
   ERC721_ABI,
-  MAX_UINT256,
-  MULTICALL3_ADDRESS,
-  NATIVE_TOKEN,
-  Provider,
-  getAllowances,
   getErc1155Balances,
   getNftBalances,
   getNftCollections,
   getNftOwners,
   getNftTokenUris,
-} from '../src/index.js'
+  nftCollections,
+  nftTokenUris,
+} from '../src/subpaths/nft.js'
 import { multicall3Interface, resetMulticallCache } from '../src/aggregate.js'
 import { clearChainIdCache } from '../src/detect.js'
 import { resetDecimalsCache } from '../src/erc20.js'
@@ -131,7 +129,7 @@ describe('allowances', () => {
 describe('NFT 集合信息', () => {
   it('通过 ERC165 识别标准，字段可选', async () => {
     const { multi } = setup()
-    const res = await multi.nftCollections([APE, ITEMS], { fields: ['standard', 'name', 'totalSupply'] })
+    const res = await nftCollections(multi, [APE, ITEMS], { fields: ['standard', 'name', 'totalSupply'] })
     expect(res[0]).toEqual({ address: APE, standard: 'ERC721', name: 'Ape Club', totalSupply: '10000', success: true })
     expect(res[1]).toMatchObject({ standard: 'ERC1155', name: null, success: false }) // ERC1155 通常没有 name
     expectTypeOf(res[0]!.standard).toEqualTypeOf<'ERC721' | 'ERC1155' | null>()
@@ -139,7 +137,7 @@ describe('NFT 集合信息', () => {
 
   it('没有 supportsInterface 的老合约 standard 为 null，其余字段正常', async () => {
     const { multi } = setup()
-    const [old] = await multi.nftCollections([OLD])
+    const [old] = await nftCollections(multi, [OLD])
     expect(old).toMatchObject({ standard: null, name: 'Old Punks', symbol: 'OLD' })
   })
 
@@ -211,13 +209,13 @@ describe('NFT 元数据地址', () => {
 
   it('不配 ipfsGateway 时保留 ipfs://', async () => {
     const { multi } = setup()
-    expect((await multi.nftTokenUris([{ contract: APE, tokenId: 3 }]))[0]?.uri).toBe('ipfs://QmApe/3')
+    expect((await nftTokenUris(multi, [{ contract: APE, tokenId: 3 }]))[0]?.uri).toBe('ipfs://QmApe/3')
   })
 
   it('已知集合标准时只发对应的调用', async () => {
     const { mock, multi } = setup()
-    await multi.nftCollections([APE], { fields: ['standard'] })
-    await multi.nftTokenUris([{ contract: APE, tokenId: 1 }])
+    await nftCollections(multi, [APE], { fields: ['standard'] })
+    await nftTokenUris(multi, [{ contract: APE, tokenId: 1 }])
     expect(subCalls(mock, 1)).toBe(1) // 只有 tokenURI，没有 uri
   })
 })

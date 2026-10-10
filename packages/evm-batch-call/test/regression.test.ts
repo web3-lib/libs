@@ -2,7 +2,7 @@
 import { AbiCoder, JsonRpcProvider, makeError, type TransactionRequest } from 'ethers'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { CallFailedError, ChainCheckedProvider, Contract, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID, TronProvider, isExecutionError, type Call } from '../src/index.js'
+import { CallFailedError, ChainCheckedProvider, Contract, FallbackRpc, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID, TronProvider, isExecutionError, type Call } from '../src/index.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { createMockProvider, fakeToken } from './mockProvider.js'
 
@@ -187,7 +187,7 @@ describe('timeout', () => {
     const multi = new Provider(56, [healthy(), healthy()], { fallback: { timeout: 0 } })
     expect(await multi.all([new Contract(TOKEN, ABI).symbol()])).toEqual(['AAA'])
     // URL 节点：FetchRequest 的 timeout 为 0 会让请求立即超时，应保持 ethers 默认值
-    const rpc = (new Provider(56, 'https://a.example', { fallback: { timeout: 0 } }).rpc as ChainCheckedProvider).inner as JsonRpcProvider
+    const rpc = ((new Provider(56, 'https://a.example', { fallback: { timeout: 0 } }).rpc as FallbackRpc).nodes[0] as ChainCheckedProvider).inner as JsonRpcProvider
     expect(rpc._getConnection().timeout).toBeGreaterThan(0)
   })
 })

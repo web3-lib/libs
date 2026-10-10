@@ -1,17 +1,31 @@
 import { type BigNumberish } from 'ethers'
 
-import { aggregate, type AggregateContext, type BlockTag, type CallOverrides, type EthersLikeProvider } from './aggregate.js'
+import { aggregate, type AggregateContext, type BlockTag, type CallOverrides, type EthersLikeProvider, type NativeBalanceMode } from './aggregate.js'
 import { Batcher, type BatchOptions } from './batcher.js'
-import { asStringOrBytes32, decodeCall, encodeCall, type BoundCall, type Call, type CallRequest, type FailableCall, type RawResult } from './call.js'
+import {
+  asStringOrBytes32,
+  decodeCall,
+  encodeCall,
+  settleResult,
+  type BoundCall,
+  type Call,
+  type CallRequest,
+  type FailableCall,
+  type FailureReason,
+  type RawResult,
+  type Settled,
+} from './call.js'
 import { Contract, bindCall, type ContractAbi, type ContractRunner } from './contract.js'
 import {
   DEFAULT_NATIVE_TOKENS,
   ERC20_ABI,
-  formatAmount,
+  formatUnits,
   getCachedTokenMeta,
   setCachedTokenMeta,
   type BalanceToken,
   type Erc20Contract,
+  type RawTokenAllowance,
+  type RawTokenBalance,
   type TokenBalance,
   type TokenAllowance,
   MAX_UINT256,
@@ -23,27 +37,10 @@ import {
 } from './erc20.js'
 import { CallFailedError, isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
-import { getNativeCurrency } from './chains.js'
-import { ownerTokens, type OwnedToken, type OwnerTokensOptions } from './owner.js'
-import {
-  erc1155Balances,
-  nftBalances,
-  nftCollections,
-  nftOwners,
-  nftTokenUris,
-  type DefaultNftCollectionField,
-  type Erc1155Balance,
-  type NftBalance,
-  type NftCollection,
-  type NftCollectionField,
-  type NftCollectionsOptions,
-  type NftItem,
-  type NftOwner,
-  type NftTokenUri,
-  type NftTokenUriOptions,
-} from './nft.js'
+import { getNativeBalanceMode, getNativeCurrency } from './chains.js'
 import { detectChainId } from './detect.js'
 import { isTronChain, resolveSource, type ProviderSource, type SourceOptions } from './source.js'
+import { withSignal } from './util.js'
 
 export type { ProviderSource }
 
@@ -63,9 +60,11 @@ export type StaticCallResult<T> = { success: true; data: T } | { success: false;
 export type CallInput = readonly Call[] | Readonly<Record<string, Call>>
 
 type ResultOf<C> = C extends Call<infer R> ? R : any
+/** C 是 any（如 `all<any>(calls)` 显式写了 any，会落到第一个重载上）时按 ethcall 的写法返回 any[] */
+type IsAny<T> = 0 extends 1 & T ? true : false
 /** 与输入同构的结果：数组 → 数组（元组保留各项类型），对象 → 同名字段 */
-export type CallResults<C> = { -readonly [K in keyof C]: ResultOf<C[K]> }
-export type TryCallResults<C> = { -readonly [K in keyof C]: ResultOf<C[K]> | null }
+export type CallResults<C> = IsAny<C> extends true ? any[] : { -readonly [K in keyof C]: ResultOf<C[K]> }
+export type TryCallResults<C> = IsAny<C> extends true ? any[] : { -readonly [K in keyof C]: ResultOf<C[K]> | null }
 
 export interface ProviderConfig extends SourceOptions {
   /** 自定义 Multicall3 地址；不填则查内置地址表，表里没有就走 deployless */
@@ -84,16 +83,48 @@ export interface ProviderConfig extends SourceOptions {
   nativeSymbol?: string
   /** 主币名称（tokens 用），默认按内置链信息表，表里没有时为 null */
   nativeName?: string
+  /**
+   * 主币余额的读取方式，默认按内置表 NATIVE_BALANCE_MODES，表里没有时为 'contract'：
+   * - 'contract'：和其他调用放在同一次 eth_call 里（Multicall3.getEthBalance / deployless 里的 BALANCE）
+   * - 'rpc'：单独用 eth_getBalance。有的链在合约里读主币余额恒为 0、不报错，需要用这个
+   * - `{ erc20: '0x…' }`：主币其实是一个 ERC20 合约，改调它的 balanceOf
+   */
+  nativeBalance?: NativeBalanceMode
 }
 
-export interface TokensOptions<F extends TokenField = DefaultTokenField> extends CallOverrides {
+/** balances / allowances / tokens 共用：结果带读取时的区块号 */
+export interface BlockOptions {
+  /**
+   * 每项结果带 blockNumber（读取时的区块号，与数据在同一次 eth_call 里读出）。传了 minBlock 时自动带上。
+   * 大批量拆成多次 eth_call 时为其中包含区块号查询的那一次
+   */
+  withBlock?: boolean
+}
+
+export interface TokensOptions<F extends TokenField = DefaultTokenField> extends CallOverrides, BlockOptions {
   /** 要返回的字段，默认 ['name', 'symbol', 'decimals'] */
   fields?: readonly F[]
 }
 
-export interface BalancesOptions extends CallOverrides {
+export interface BalancesOptions extends CallOverrides, BlockOptions {
   /** 同时返回 symbol（代币查一次后缓存；主币取 nativeSymbol / 内置链信息表）。默认 false */
   symbol?: boolean
+  /**
+   * 是否查 decimals 并返回 decimals / formatted。默认 true。
+   * false：只查余额（没有 decimals 的合约如 ERC721 也能拿到余额，冷启动时子调用数减半），结果里不带 decimals / formatted
+   */
+  decimals?: boolean
+}
+
+/** multiBalances / getMultiBalances 的单项查询 */
+export interface BalancesQuery {
+  owner: string
+  tokens: readonly BalanceToken[]
+}
+
+export interface AllowancesOptions extends CallOverrides, BlockOptions {
+  /** 是否查 decimals 并返回 decimals / formatted。默认 true；false 时只查额度，结果里不带 decimals / formatted */
+  decimals?: boolean
 }
 
 /** 构造参数第一个是 chainId 还是节点：数字、数字字符串、0x 十六进制视为 chainId，其余（URL、对象、数组）视为节点 */
@@ -107,6 +138,7 @@ function isChainIdArg(value: unknown): value is number | bigint | string {
 
 const ETH_BALANCE_INPUTS = [{ name: 'addr', type: 'address' }] as const
 const ETH_BALANCE_OUTPUTS = [{ name: 'balance', type: 'uint256' }] as const
+const BLOCK_NUMBER_OUTPUTS = [{ name: 'blockNumber', type: 'uint256' }] as const
 
 /**
  * Multicall Provider，API 与 ethcall 的 Provider 保持一致：
@@ -213,6 +245,7 @@ export class Provider implements ContractRunner {
       chainId,
       multicall: config.deployless ? null : resolveMulticall(chainId, config.multicall),
       chunkSize: config.chunkSize ?? 500,
+      nativeBalance: config.nativeBalance ?? getNativeBalanceMode(chainId),
     }
   }
 
@@ -266,8 +299,14 @@ export class Provider implements ContractRunner {
    * - decimals、symbol 查到一次后缓存，之后只查 balanceOf；也可以直接传 `{ address, decimals }`
    * - 单个代币失败（非合约地址、非法地址等）不影响其他代币，该项 success 为 false
    */
-  async balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions = {}): Promise<TokenBalance[]> {
-    const { symbol: withSymbol = false, ...overrides } = options
+  balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions & { decimals: false }): Promise<RawTokenBalance[]>
+  balances(owner: string, tokens: readonly BalanceToken[], options?: BalancesOptions): Promise<TokenBalance[]>
+  balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions = {}): Promise<Array<TokenBalance | RawTokenBalance>> {
+    return withSignal(options.signal, () => this.#balances(owner, tokens, options))
+  }
+
+  async #balances(owner: string, tokens: readonly BalanceToken[], options: BalancesOptions): Promise<Array<TokenBalance | RawTokenBalance>> {
+    const { symbol: withSymbol = false, decimals: withDecimals = true, ...overrides } = options
     const { chainId } = await this.#ensureReady()
     const nativeCurrency = this.#nativeCurrency(chainId)
     const items = tokens.map((token) => {
@@ -279,39 +318,63 @@ export class Provider implements ContractRunner {
     const calls: Call[] = []
     const plan = items.map(({ address, native, decimals, symbol }) => {
       const balanceIndex = calls.push(native ? this.getEthBalance(owner) : this.erc20(address).balanceOf(owner)) - 1
-      const decimalsIndex = decimals === undefined ? calls.push(this.erc20(address).decimals()) - 1 : -1
+      const decimalsIndex = withDecimals && decimals === undefined ? calls.push(this.erc20(address).decimals()) - 1 : -1
       const symbolIndex = withSymbol && !native && symbol === undefined ? calls.push(this.#symbolCall(address)) - 1 : -1
       return { balanceIndex, decimalsIndex, symbolIndex }
     })
-    const results = await this.tryAll(calls, overrides)
+    const blockIndex = this.#pushBlockNumber(calls, options)
+    const results = await this.#settleAll(calls, overrides)
+    const block = blockField(results, blockIndex)
 
     return items.map((item, i) => {
       const { balanceIndex, decimalsIndex, symbolIndex } = plan[i] as { balanceIndex: number; decimalsIndex: number; symbolIndex: number }
-      const balance = results[balanceIndex] as bigint | null
-      const fetchedDecimals = decimalsIndex === -1 ? null : (results[decimalsIndex] as bigint | null)
-      const fetchedSymbol = symbolIndex === -1 ? null : (results[symbolIndex] as string | null)
+      const balance = results[balanceIndex] as Settled<bigint>
+      const fetchedDecimals = valueOf<bigint>(results[decimalsIndex])
+      const fetchedSymbol = valueOf<string>(results[symbolIndex])
       if (!item.native && (fetchedDecimals !== null || fetchedSymbol !== null)) {
         setCachedTokenMeta(chainId, item.address, {
           ...(fetchedDecimals !== null ? { decimals: Number(fetchedDecimals) } : {}),
           ...(fetchedSymbol !== null ? { symbol: fetchedSymbol } : {}),
         })
       }
+      const extra = { ...(withSymbol ? { symbol: item.symbol ?? fetchedSymbol ?? null } : {}), ...block }
+      if (!withDecimals) {
+        return balance.ok
+          ? { token: item.address, native: item.native, balance: balance.value.toString(), ...extra, success: true }
+          : { token: item.address, native: item.native, balance: '0', ...extra, success: false, error: balance.reason, errorField: 'balance' as const }
+      }
       const decimals = item.decimals ?? (fetchedDecimals === null ? null : Number(fetchedDecimals))
-      const extra = withSymbol ? { symbol: item.symbol ?? fetchedSymbol ?? null } : {}
-      if (balance === null || decimals === null) {
-        return { token: item.address, native: item.native, balance: '0', decimals: decimals ?? 0, formatted: '0', ...extra, success: false }
+      if (!balance.ok || decimals === null) {
+        const failure = !balance.ok
+          ? { error: balance.reason, errorField: 'balance' as const }
+          : { error: reasonOf(results[decimalsIndex]), errorField: 'decimals' as const }
+        return { token: item.address, native: item.native, balance: '0', decimals: decimals ?? 0, formatted: '0', ...extra, success: false, ...failure }
       }
       // 结果全是字符串 / 数字 / 布尔 / null，可以直接 JSON.stringify
       return {
         token: item.address,
         native: item.native,
-        balance: balance.toString(),
+        balance: balance.value.toString(),
         decimals,
-        formatted: formatAmount(balance, decimals),
+        formatted: formatUnits(balance.value, decimals),
         ...extra,
         success: true,
       }
     })
+  }
+
+  /**
+   * 多个钱包一次查：同一条链上所有钱包的余额合成一次 multicall（与 balances 选项相同），结果与 queries 一一对应。
+   *
+   * ```ts
+   * const [a, b] = await multi.multiBalances([{ owner: walletA, tokens: [NATIVE_TOKEN, USDT] }, { owner: walletB, tokens: [USDT] }])
+   * ```
+   */
+  multiBalances(queries: readonly BalancesQuery[], options: BalancesOptions & { decimals: false }): Promise<RawTokenBalance[][]>
+  multiBalances(queries: readonly BalancesQuery[], options?: BalancesOptions): Promise<TokenBalance[][]>
+  multiBalances(queries: readonly BalancesQuery[], options: BalancesOptions = {}): Promise<Array<Array<TokenBalance | RawTokenBalance>>> {
+    // 各钱包的子调用在同一 tick 进入合并队列，合成一次 eth_call（相同的 decimals / 区块号查询只发一次）
+    return withSignal(options.signal, () => Promise.all(queries.map((query) => this.#balances(query.owner, query.tokens, options))))
   }
 
   /**
@@ -325,85 +388,88 @@ export class Provider implements ContractRunner {
    * - 主币不需要授权：native 为 true，额度视为 MaxUint256、unlimited 为 true，不发请求
    * - decimals 与 balances / tokens 共用缓存；也可以直接传 `{ address, decimals }`
    */
-  async allowances(
+  allowances(owner: string, spender: string, tokens: readonly BalanceToken[], options: AllowancesOptions & { decimals: false }): Promise<RawTokenAllowance[]>
+  allowances(owner: string, spender: string, tokens: readonly BalanceToken[], options?: AllowancesOptions): Promise<TokenAllowance[]>
+  allowances(
     owner: string,
     spender: string,
     tokens: readonly BalanceToken[],
-    overrides?: CallOverrides,
-  ): Promise<TokenAllowance[]> {
+    options: AllowancesOptions = {},
+  ): Promise<Array<TokenAllowance | RawTokenAllowance>> {
+    return withSignal(options.signal, () => this.#allowances(owner, spender, tokens, options))
+  }
+
+  async #allowances(owner: string, spender: string, tokens: readonly BalanceToken[], options: AllowancesOptions): Promise<Array<TokenAllowance | RawTokenAllowance>> {
+    const { decimals: withDecimals = true, ...overrides } = options
     const { chainId } = await this.#ensureReady()
     const nativeDecimals = this.#nativeCurrency(chainId).decimals
     const calls: Call[] = []
     const plan = tokens.map((token) => {
       const { address, native, decimals } = this.#resolveToken(chainId, token, nativeDecimals)
       const allowanceIndex = native ? -1 : calls.push(this.erc20(address).allowance(owner, spender)) - 1
-      const decimalsIndex = native || decimals !== undefined ? -1 : calls.push(this.erc20(address).decimals()) - 1
+      const decimalsIndex = native || !withDecimals || decimals !== undefined ? -1 : calls.push(this.erc20(address).decimals()) - 1
       return { address, native, decimals, allowanceIndex, decimalsIndex }
     })
-    const results = calls.length ? await this.tryAll(calls, overrides) : []
+    const blockIndex = this.#pushBlockNumber(calls, options)
+    const results = await this.#settleAll(calls, overrides)
+    const block = blockField(results, blockIndex)
 
     return plan.map(({ address, native, decimals: known, allowanceIndex, decimalsIndex }) => {
-      const allowance = native ? MAX_UINT256 : ((results[allowanceIndex] as bigint | null) ?? null)
-      const fetched = decimalsIndex === -1 ? null : ((results[decimalsIndex] as bigint | null) ?? null)
+      const settled: Settled<bigint> = native ? { ok: true, value: MAX_UINT256 } : (results[allowanceIndex] as Settled<bigint>)
+      const fetched = valueOf<bigint>(results[decimalsIndex])
       if (fetched !== null) {
         setCachedTokenMeta(chainId, address, { decimals: Number(fetched) })
       }
+      if (!withDecimals) {
+        return settled.ok
+          ? { token: address, spender, native, allowance: settled.value.toString(), unlimited: settled.value >= UNLIMITED_ALLOWANCE_THRESHOLD, ...block, success: true }
+          : { token: address, spender, native, allowance: '0', unlimited: false, ...block, success: false, error: settled.reason, errorField: 'allowance' as const }
+      }
       const decimals = known ?? (fetched === null ? null : Number(fetched))
-      if (allowance === null || decimals === null) {
-        return { token: address, spender, native, allowance: '0', decimals: decimals ?? 0, formatted: '0', unlimited: false, success: false }
+      if (!settled.ok || decimals === null) {
+        const failure = !settled.ok
+          ? { error: settled.reason, errorField: 'allowance' as const }
+          : { error: reasonOf(results[decimalsIndex]), errorField: 'decimals' as const }
+        return { token: address, spender, native, allowance: '0', decimals: decimals ?? 0, formatted: '0', unlimited: false, ...block, success: false, ...failure }
       }
       return {
         token: address,
         spender,
         native,
-        allowance: allowance.toString(),
+        allowance: settled.value.toString(),
         decimals,
-        formatted: formatAmount(allowance, decimals),
-        unlimited: allowance >= UNLIMITED_ALLOWANCE_THRESHOLD,
+        formatted: formatUnits(settled.value, decimals),
+        unlimited: settled.value >= UNLIMITED_ALLOWANCE_THRESHOLD,
+        ...block,
         success: true,
       }
     })
   }
 
   /**
-   * 列出持有人拥有的代币（资产列表）：从代币来源拿候选代币，再用 multicall 在链上核对余额。
-   * 默认来源是公开代币列表，**只能发现列表里的代币**，局限性见 README「资产列表」一节。
-   *
-   * @deprecated 不推荐使用：EVM 链上无法只靠节点可靠地列出地址持有的全部代币，这个方法只是尽力而为——
-   * 默认来源只能发现公开列表里的代币，依赖第三方免费服务（可能限流、改格式或停止服务），要查几千个代币的余额、耗时数秒，
-   * 价格也不一定可信；传 `alchemy` / `nodereal` 来源能查全，但同样受第三方服务的额度和可用性约束。
-   * 已知要查哪些代币时请用 `getBalances`；需要可靠的完整持仓请直接接入索引服务的接口或自己的索引。局限性详见 README「资产列表」。
+   * balances / tokens / allowances 的子调用进自动合并队列：与同一时刻其他组件发起的查询合并成一次 multicall。
+   * 逐条返回值或失败原因；节点错误照常抛出
    */
-  ownerTokens(owner: string, options?: OwnerTokensOptions): Promise<OwnedToken[]> {
-    return ownerTokens(this, owner, options)
+  #settleAll(calls: readonly Call[], overrides: CallOverrides = {}): Promise<Settled[]> {
+    return this.#batcher.loadSettled(calls, { blockTag: overrides.blockTag, from: overrides.from, minBlock: overrides.minBlock, signal: overrides.signal })
   }
 
-  /** 批量查 NFT 集合信息（标准 / name / symbol / totalSupply），字段可选 */
-  nftCollections<const F extends NftCollectionField = DefaultNftCollectionField>(
-    collections: readonly string[],
-    options?: NftCollectionsOptions<F>,
-  ): Promise<NftCollection<F>[]> {
-    return nftCollections<F>(this, collections, options)
-  }
-
-  /** 批量查 ERC721 持有数量（balanceOf） */
-  nftBalances(owner: string, collections: readonly string[], overrides?: CallOverrides): Promise<NftBalance[]> {
-    return nftBalances(this, owner, collections, overrides)
-  }
-
-  /** 批量查 ERC721 持有人（ownerOf），可混合多个集合 */
-  nftOwners(items: readonly NftItem[], overrides?: CallOverrides): Promise<NftOwner[]> {
-    return nftOwners(this, items, overrides)
-  }
-
-  /** 批量查 NFT 元数据地址：兼容 ERC721 tokenURI 与 ERC1155 uri（{id} 按规范替换），可转换 ipfs:// */
-  nftTokenUris(items: readonly NftItem[], options?: NftTokenUriOptions): Promise<NftTokenUri[]> {
-    return nftTokenUris(this, items, options)
-  }
-
-  /** 批量查 ERC1155 余额 */
-  erc1155Balances(owner: string, items: readonly NftItem[], overrides?: CallOverrides): Promise<Erc1155Balance[]> {
-    return erc1155Balances(this, owner, items, overrides)
+  /** withBlock / minBlock 时在同一批里加一条区块号查询，返回它的下标（不需要时为 -1） */
+  #pushBlockNumber(calls: Call[], options: BlockOptions & CallOverrides): number {
+    if (!options.withBlock && options.minBlock === undefined) {
+      return -1
+    }
+    return (
+      calls.push({
+        // 地址只用于展示：执行时换成实际的 multicall 地址，deployless 时由合约内部处理
+        contract: { address: MULTICALL3_ADDRESS },
+        name: 'getBlockNumber',
+        inputs: [],
+        outputs: BLOCK_NUMBER_OUTPUTS,
+        params: [],
+        kind: 'blockNumber',
+      }) - 1
+    )
   }
 
   /** symbol() 调用：string 解码失败时按 bytes32 解析（MKR 等老代币） */
@@ -434,10 +500,11 @@ export class Provider implements ContractRunner {
    * - symbol / name 兼容返回 bytes32 的老代币（MKR 等）
    * - 读取失败的字段为 null；请求的字段都读到时 success 为 true
    */
-  async tokens<const F extends TokenField = DefaultTokenField>(
-    tokens: readonly string[],
-    options: TokensOptions<F> = {},
-  ): Promise<TokenDetails<F>[]> {
+  tokens<const F extends TokenField = DefaultTokenField>(tokens: readonly string[], options: TokensOptions<F> = {}): Promise<TokenDetails<F>[]> {
+    return withSignal(options.signal, () => this.#tokens<F>(tokens, options))
+  }
+
+  async #tokens<F extends TokenField>(tokens: readonly string[], options: TokensOptions<F>): Promise<TokenDetails<F>[]> {
     const { fields = DEFAULT_TOKEN_FIELDS as unknown as readonly F[], ...overrides } = options
     const wanted = new Set<TokenField>(fields)
     const needDecimals = wanted.has('decimals') || wanted.has('totalSupply')
@@ -468,8 +535,10 @@ export class Provider implements ContractRunner {
       }
       return { address, native, meta, index }
     })
-    const results = calls.length ? await this.tryAll(calls, overrides) : []
-    const read = <T>(i: number | undefined): T | null => (i === undefined ? null : ((results[i] as T | null) ?? null))
+    const blockIndex = this.#pushBlockNumber(calls, options)
+    const results = await this.#settleAll(calls, overrides)
+    const block = blockField(results, blockIndex)
+    const read = <T>(i: number | undefined): T | null => (i === undefined ? null : valueOf<T>(results[i]))
 
     return plan.map(({ address, native, meta, index }) => {
       const name = meta.name ?? read<string>(index.name)
@@ -492,18 +561,25 @@ export class Provider implements ContractRunner {
         totalSupply: totalSupply === null ? null : totalSupply.toString(),
       }
       const out: Record<string, unknown> = { address, native }
-      let success = true
+      let failedField: TokenField | null = null
       for (const field of fields) {
         out[field] = values[field]
         // 主币没有 totalSupply，不算失败
         if (values[field] === null && !(native && field === 'totalSupply')) {
-          success = false
+          failedField ??= field
         }
       }
       if (wanted.has('totalSupply')) {
-        out.totalSupplyFormatted = totalSupply === null || decimals === null ? null : formatAmount(totalSupply, decimals)
+        out.totalSupplyFormatted = totalSupply === null || decimals === null ? null : formatUnits(totalSupply, decimals)
       }
-      out.success = success
+      Object.assign(out, block)
+      out.success = failedField === null
+      if (failedField !== null) {
+        // 没发请求的字段（主币信息不在内置表、也没有配置）不是调用失败
+        const callIndex = index[failedField]
+        out.error = callIndex === undefined ? 'not-configured' : reasonOf(results[callIndex])
+        out.errorField = failedField
+      }
       return out as TokenDetails<F>
     })
   }
@@ -531,10 +607,12 @@ export class Provider implements ContractRunner {
    */
   all<const C extends CallInput>(calls: C, overrides?: CallOverrides): Promise<CallResults<C>>
   all<T = any>(calls: readonly Call[], overrides?: CallOverrides): Promise<T[]>
-  async all(calls: CallInput, overrides?: CallOverrides): Promise<unknown> {
-    const [list, pack] = unpack(calls)
-    const results = await this.#aggregate(list.map((call) => encodeCall(call, false)), overrides)
-    return pack(list.map((call, i) => decodeCall(call, (results[i] as RawResult).returnData)))
+  all(calls: CallInput, overrides?: CallOverrides): Promise<unknown> {
+    return withSignal(overrides?.signal, async () => {
+      const [list, pack] = unpack(calls)
+      const results = await this.#aggregate(list.map((call) => encodeCall(call, false)), overrides)
+      return pack(list.map((call, i) => decodeCall(call, (results[i] as RawResult).returnData)))
+    })
   }
 
   /**
@@ -551,7 +629,11 @@ export class Provider implements ContractRunner {
   /**
    * 逐条指定是否允许失败：允许失败的位置返回 null，不允许失败的一旦失败整体抛错。
    */
-  async tryEach<T = any>(calls: readonly Call[], canFail: readonly boolean[], overrides?: CallOverrides): Promise<(T | null)[]> {
+  tryEach<T = any>(calls: readonly Call[], canFail: readonly boolean[], overrides?: CallOverrides): Promise<(T | null)[]> {
+    return withSignal(overrides?.signal, () => this.#tryEach<T>(calls, canFail, overrides))
+  }
+
+  async #tryEach<T>(calls: readonly Call[], canFail: readonly boolean[], overrides?: CallOverrides): Promise<(T | null)[]> {
     // 允许失败的条目编码出错（如后端给的脏地址）只让该条为 null，不拖垮整批
     const requests: Array<CallRequest | null> = calls.map((call, i) => {
       const callCanFail = canFail[i]
@@ -580,7 +662,12 @@ export class Provider implements ContractRunner {
    */
   call<T = any>(call: Call, overrides?: CallOverrides): Promise<T> {
     const own = call.overrides
-    return this.#batcher.load<T>(call, merge({ blockTag: own?.blockTag, from: own?.from }, overrides))
+    return withSignal(overrides?.signal, () =>
+      this.#batcher.load<T>(
+        call,
+        merge({ blockTag: own?.blockTag, from: own?.from }, { blockTag: overrides?.blockTag, from: overrides?.from, minBlock: overrides?.minBlock, signal: overrides?.signal }),
+      ),
+    )
   }
 
   /**
@@ -592,12 +679,14 @@ export class Provider implements ContractRunner {
    *
    * overrides 优先级：参数 overrides > Call 上的 overrides（`contract.swap(params, { value })`）。
    */
-  async staticCall<T = any>(call: Call, overrides: StaticCallOverrides = {}): Promise<T> {
-    const result = await this.#staticCall<T>(call, overrides)
-    if (!result.success) {
-      throw result.error
-    }
-    return result.data
+  staticCall<T = any>(call: Call, overrides: StaticCallOverrides = {}): Promise<T> {
+    return withSignal(overrides.signal, async () => {
+      const result = await this.#staticCall<T>(call, overrides)
+      if (!result.success) {
+        throw result.error
+      }
+      return result.data
+    })
   }
 
   /**
@@ -607,10 +696,11 @@ export class Provider implements ContractRunner {
    * @param items Call，或 `{ call, overrides }` 以便每条带不同的 value / from
    * @param overrides 所有条目共享的 overrides，优先级最低
    */
-  async staticCallAll<T = any>(
-    items: ReadonlyArray<Call | StaticCallItem>,
-    overrides: StaticCallOverrides = {},
-  ): Promise<StaticCallResult<T>[]> {
+  staticCallAll<T = any>(items: ReadonlyArray<Call | StaticCallItem>, overrides: StaticCallOverrides = {}): Promise<StaticCallResult<T>[]> {
+    return withSignal(overrides.signal, () => this.#staticCallAll<T>(items, overrides))
+  }
+
+  #staticCallAll<T>(items: ReadonlyArray<Call | StaticCallItem>, overrides: StaticCallOverrides): Promise<StaticCallResult<T>[]> {
     return Promise.all(
       items.map((item) =>
         'call' in item && 'contract' in item.call
@@ -629,7 +719,10 @@ export class Provider implements ContractRunner {
     const merged: StaticCallOverrides = merge(merge({ ...shared }, call.overrides), explicit)
     if (call.kind === 'ethBalance') {
       try {
-        const { provider } = await this.#ensureReady()
+        const { provider, nativeBalance } = await this.#ensureReady()
+        if (typeof nativeBalance === 'object') {
+          return await this.#staticCall<T>(this.erc20(nativeBalance.erc20).balanceOf(call.params[0]), explicit, shared)
+        }
         return { success: true, data: (await provider.getBalance(call.params[0], merged.blockTag)) as T }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err : new Error(String(err)) }
@@ -737,18 +830,26 @@ function unpack(calls: CallInput): [readonly Call[], (results: unknown[]) => unk
 }
 
 function decodeTry<T>(calls: ReadonlyArray<Call | FailableCall>, results: RawResult[]): (T | null)[] {
-  return calls.map((call, i) => {
-    const result = results[i] as RawResult
-    if (!result.success) {
-      return null
-    }
-    try {
-      return decodeCall<T>(call, result.returnData)
-    } catch {
-      // 解码失败：多半是目标地址没有合约
-      return null
-    }
-  })
+  return calls.map((call, i) => valueOf<T>(settleResult<T>(call, results[i] as RawResult)))
+}
+
+/** withBlock 时每项结果附带的 { blockNumber }（区块号查询失败时为 null）；不需要时为空对象 */
+function blockField(results: readonly Settled[], index: number): { blockNumber?: number | null } {
+  if (index === -1) {
+    return {}
+  }
+  const value = valueOf<bigint>(results[index])
+  return { blockNumber: value === null ? null : Number(value) }
+}
+
+/** 成功的值；失败或没有这一项（下标为 -1）时为 null */
+function valueOf<T>(settled: Settled | undefined): T | null {
+  return settled?.ok ? (settled.value as T) : null
+}
+
+/** 失败原因；没有对应的调用时（不应发生）按 decode-failed */
+function reasonOf(settled: Settled | undefined): FailureReason {
+  return settled && !settled.ok ? settled.reason : 'decode-failed'
 }
 
 export default Provider

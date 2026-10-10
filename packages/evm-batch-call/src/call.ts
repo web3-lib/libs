@@ -32,9 +32,10 @@ export interface Call<T = any> {
   /**
    * 内部标记：
    * - ethBalance：原生币余额查询（见 Provider.getEthBalance）
+   * - blockNumber：当前区块号（Multicall3.getBlockNumber；deployless 合约里直接返回 block.number）
    * - stringOrBytes32：string 返回值，解码失败时按 bytes32 解析（MKR 等老代币的 symbol / name）
    */
-  kind?: 'ethBalance' | 'stringOrBytes32'
+  kind?: 'ethBalance' | 'blockNumber' | 'stringOrBytes32'
   /** 仅用于类型推断 */
   readonly __result?: T
 }
@@ -52,13 +53,51 @@ export interface RawResult {
   returnData: string
 }
 
+/**
+ * 单条调用的失败原因：
+ * - invalid-address：合约地址或参数里的地址非法
+ * - invalid-argument：其他参数编码失败（个数不对、数值超出范围等）
+ * - no-contract：调用成功但返回空数据，多半是目标地址上没有合约
+ * - reverted：执行 revert
+ * - decode-failed：有返回数据但无法按 ABI 解码（如合约不是预期的标准）
+ * - not-configured：没有发请求的信息缺失，如主币不在内置链信息表里、也没有配置 nativeName / nativeSymbol
+ */
+export type FailureReason = 'invalid-address' | 'invalid-argument' | 'no-contract' | 'reverted' | 'decode-failed' | 'not-configured'
+
+/** 单条调用的结果：成功的值，或失败原因 */
+export type Settled<T = any> = { ok: true; value: T } | { ok: false; reason: FailureReason }
+
+/** 按 multicall 的原始结果判断成功 / 失败原因 */
+export function settleResult<T>(call: Call, result: RawResult): Settled<T> {
+  if (!result.success) {
+    return { ok: false, reason: 'reverted' }
+  }
+  // 没有返回值的函数成功时本来就返回空数据，照常解码；有返回值却拿到空数据，多半是地址上没有合约
+  if ((!result.returnData || result.returnData === '0x') && call.outputs.length > 0) {
+    return { ok: false, reason: 'no-contract' }
+  }
+  try {
+    return { ok: true, value: decodeCall<T>(call, result.returnData) }
+  } catch {
+    return { ok: false, reason: 'decode-failed' }
+  }
+}
+
+/** 参数编码失败的原因：地址非法，还是其他参数问题 */
+export function encodeFailureReason(err: unknown): FailureReason {
+  const e = err as { code?: unknown; argument?: unknown; message?: unknown } | null
+  return /address/i.test(String(e?.argument ?? '')) || /address/i.test(String(e?.message ?? '')) ? 'invalid-address' : 'invalid-argument'
+}
+
 /** 发给 aggregate3 前的单条请求 */
 export interface CallRequest {
   target: string
   allowFailure: boolean
   callData: string
-  /** 原生币余额查询：有 multicall 合约时走 getEthBalance，deployless 时改走 eth_getBalance */
+  /** 原生币余额查询：默认有 multicall 合约时走 getEthBalance、deployless 时用 BALANCE；其他读取方式见 NativeBalanceMode */
   ethBalanceOf?: string
+  /** 区块号查询：目标换成实际的 multicall 地址（deployless 时由合约内部处理） */
+  blockNumber?: boolean
 }
 
 // inputs → name → outputs → Interface。同一份 ABI 生成的 Call 共享 inputs/outputs 数组（见 contract.ts 的 ABI 缓存），
@@ -100,6 +139,7 @@ export function encodeCall(call: Call, allowFailure: boolean): CallRequest {
     allowFailure,
     callData: iface.encodeFunctionData(fragment, params),
     ethBalanceOf: call.kind === 'ethBalance' ? toEvmAddress(params[0] as string) : undefined,
+    blockNumber: call.kind === 'blockNumber' ? true : undefined,
   }
 }
 

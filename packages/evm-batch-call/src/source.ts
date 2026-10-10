@@ -2,9 +2,9 @@ import { BrowserProvider, FetchRequest, JsonRpcProvider, makeError, type Eip1193
 
 import type { EthersLikeProvider } from './aggregate.js'
 import { canDetectChainId, detectChainId, detectChainIdCached } from './detect.js'
-import { FallbackRpc, type FallbackOptions } from './fallback.js'
+import { FallbackRpc, type FallbackNodeInfo, type FallbackOptions } from './fallback.js'
 import { DEFAULT_RPC_URLS, DEFAULT_TRON_HOSTS } from './rpcNodes.js'
-import { TRON_CHAIN_ID, TronProvider, type TronProviderOptions, type TronWebLike } from './tron.js'
+import { TRON_CHAIN_ID, TronProvider, isTronChain, type TronProviderOptions, type TronWebLike } from './tron.js'
 
 /**
  * 可传给 Provider 的底层连接（也可以传数组，按顺序作为主节点 + 备用节点）：
@@ -22,11 +22,7 @@ export interface SourceOptions {
   tron?: Omit<TronProviderOptions, 'fullHost' | 'request'>
 }
 
-const TRON_CHAIN_IDS = new Set<number>(Object.values(TRON_CHAIN_ID))
-
-export function isTronChain(chainId: number): boolean {
-  return TRON_CHAIN_IDS.has(chainId)
-}
+export { isTronChain }
 
 /** 链的默认节点：EVM 用内置公共节点表，Tron 主网用内置全节点列表 */
 export function getDefaultRpcUrls(chainId: number): readonly string[] {
@@ -57,7 +53,38 @@ export function resolveSource(
     // 内置公共节点本来就是按 chainId 选出来的，不需要再校验
     return source === undefined ? node : withChainCheck(chainId, item, node, timeout)
   })
-  return multiple ? new FallbackRpc(nodes, options.fallback) : (nodes[0] as EthersLikeProvider)
+  const info: FallbackNodeInfo[] = list.map((item) => ({ label: nodeLabel(item), key: item as string | object }))
+  // 单节点也经过 FallbackRpc（统一触发 onRequest 事件、抛原始错误）。外层超时只对单个 EVM URL 节点加（FetchRequest 本来就有同样的超时）；
+  // 钱包等对象节点、Tron URL（TronProvider 有自己的超时和 429 退避、限流队列，外层超时会把排队 / 退避中的请求截断）不传 timeout 时不加，与原来一致
+  const singleEvmUrl = typeof list[0] === 'string' && !isTronChain(chainId)
+  const fallback = multiple || singleEvmUrl || options.fallback?.timeout !== undefined ? options.fallback : { ...options.fallback, timeout: 0 }
+  return new FallbackRpc(nodes, fallback, info)
+}
+
+/** 节点标识（错误信息、onRequest 事件用）：URL 只取 host，不含 path / query（常带 API Key） */
+export function nodeLabel(source: ProviderSource): string {
+  if (typeof source === 'string') {
+    try {
+      return new URL(source).host || 'url'
+    } catch {
+      return 'url'
+    }
+  }
+  const value = source as Partial<EthersLikeProvider & Eip1193Provider & TronWebLike>
+  if (value instanceof JsonRpcProvider) {
+    try {
+      return new URL(value._getConnection().url).host || 'provider'
+    } catch {
+      return 'provider'
+    }
+  }
+  if (value.fullNode) {
+    return 'tronWeb'
+  }
+  if (typeof value.call !== 'function' && typeof value.request === 'function') {
+    return 'wallet'
+  }
+  return 'provider'
 }
 
 /** 识别失败后多久内不再重试识别（期间请求照常发出，不做校验） */

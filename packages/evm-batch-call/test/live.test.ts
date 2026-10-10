@@ -5,23 +5,9 @@
 import { FetchRequest, JsonRpcProvider } from 'ethers'
 import { describe, expect, it } from 'vitest'
 
-import {
-  CallFailedError,
-  Contract,
-  NATIVE_TOKEN,
-  Provider,
-  TRON_CHAIN_ID,
-  TronProvider,
-  getAllowances,
-  getBalances,
-  getNftCollections,
-  getNftOwners,
-  getNftTokenUris,
-  getOwnerTokens,
-  getTokens,
-  getTransferScanState,
-  memoryScanStorage,
-} from '../src/index.js'
+import { CallFailedError, Contract, getAllowances, getBalances, getTokens, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, TronProvider } from '../src/index.js'
+import { getNftCollections, getNftOwners, getNftTokenUris } from '../src/subpaths/nft.js'
+import { getOwnerTokens, getTransferScanState, memoryScanStorage } from '../src/subpaths/owner.js'
 
 const live = process.env.LIVE ? describe : describe.skip
 

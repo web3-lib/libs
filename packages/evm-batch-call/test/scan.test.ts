@@ -1,11 +1,8 @@
 import type { Log } from 'ethers'
 import { beforeEach, describe, expect, it } from 'vitest'
 
+import { FallbackRpc, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID } from '../src/index.js'
 import {
-  FallbackRpc,
-  MULTICALL3_ADDRESS,
-  Provider,
-  TRON_CHAIN_ID,
   clearTokenListCache,
   getOwnerTokens,
   getTransferScanState,
@@ -15,7 +12,7 @@ import {
   transferScan,
   type TransferScanOptions,
   type TransferScanStorage,
-} from '../src/index.js'
+} from '../src/subpaths/owner.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
 import { resetBalancesProviderCache } from '../src/shortcuts.js'

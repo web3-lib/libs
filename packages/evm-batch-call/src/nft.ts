@@ -118,6 +118,7 @@ function expandUri(uri: string, tokenId: bigint, gateway?: string): string {
   return expanded
 }
 
+/** 批量查 ERC721 持有人（ownerOf），可混合多个集合：`await nftOwners(multi, [{ contract: BAYC, tokenId: 1 }])` */
 export async function nftOwners(provider: Provider, items: readonly NftItem[], overrides?: CallOverrides): Promise<NftOwner[]> {
   // Tron 上返回 T 开头的地址，方便与 tronWeb.defaultAddress.base58 等直接比较
   const tron = isTronChain(await provider.getChainId())
@@ -132,6 +133,7 @@ export async function nftOwners(provider: Provider, items: readonly NftItem[], o
   })
 }
 
+/** 批量查 ERC721 持有数量（balanceOf）：`await nftBalances(multi, user, [BAYC, MAYC])` */
 export async function nftBalances(
   provider: Provider,
   owner: string,
@@ -146,6 +148,7 @@ export async function nftBalances(
   })
 }
 
+/** 批量查 ERC1155 余额：`await erc1155Balances(multi, user, [{ contract, tokenId: 1 }])` */
 export async function erc1155Balances(
   provider: Provider,
   owner: string,
@@ -169,6 +172,7 @@ export async function erc1155Balances(
   })
 }
 
+/** 批量查 NFT 元数据地址：兼容 ERC721 tokenURI 与 ERC1155 uri（{id} 按规范替换），可转换 ipfs:// */
 export async function nftTokenUris(provider: Provider, items: readonly NftItem[], options: NftTokenUriOptions = {}): Promise<NftTokenUri[]> {
   const { ipfsGateway, ...overrides } = options
   const chainId = await provider.getChainId()
@@ -227,6 +231,7 @@ export async function nftTokenUris(provider: Provider, items: readonly NftItem[]
   })
 }
 
+/** 批量查 NFT 集合信息（标准 / name / symbol / totalSupply），字段可选 */
 export async function nftCollections<F extends NftCollectionField = DefaultNftCollectionField>(
   provider: Provider,
   collections: readonly string[],

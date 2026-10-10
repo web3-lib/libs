@@ -111,15 +111,16 @@ describe('Provider.tokens', () => {
     // TOKEN_A 的模拟合约没有 name()：只请求它支持的字段
     const { multi } = setup()
     const res = await multi.tokens([NO_CODE, TOKEN_A, 'bad-address'], { fields: ['symbol', 'decimals'] })
-    expect(res[0]).toEqual({ address: NO_CODE, native: false, symbol: null, decimals: null, success: false })
+    expect(res[0]).toEqual({ address: NO_CODE, native: false, symbol: null, decimals: null, success: false, error: 'no-contract', errorField: 'symbol' })
     expect(res[1]).toMatchObject({ symbol: 'AAA', decimals: 18, success: true })
-    expect(res[2]?.success).toBe(false)
+    expect(res[1]).not.toHaveProperty('error')
+    expect(res[2]).toMatchObject({ success: false, error: 'invalid-address', errorField: 'symbol' })
   })
 
   it('部分字段读取失败：该字段为 null，success 为 false', async () => {
     const { multi } = setup()
     const [a] = await multi.tokens([TOKEN_A]) // 没有 name()
-    expect(a).toMatchObject({ name: null, symbol: 'AAA', decimals: 18, success: false })
+    expect(a).toMatchObject({ name: null, symbol: 'AAA', decimals: 18, success: false, error: 'reverted', errorField: 'name' })
   })
 })
 

@@ -2,7 +2,8 @@
 import { BrowserProvider, Interface } from 'ethers'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { ERC721_ABI, MULTICALL3_ADDRESS, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, TronProvider, clearChainIdCache, getBalances, toTronAddress } from '../src/index.js'
+import { clearChainIdCache, getBalances, MULTICALL3_ADDRESS, NATIVE_TOKEN, Provider, toTronAddress, TRON_CHAIN_ID, TronProvider } from '../src/index.js'
+import { ERC721_ABI, nftOwners } from '../src/subpaths/nft.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
 import { resetBalancesProviderCache, resolveProviderForTest } from '../src/shortcuts.js'
@@ -155,7 +156,7 @@ describe('其他', () => {
       multicallAddresses: [MULTICALL3_ADDRESS],
     })
     const multi = new Provider(TRON_CHAIN_ID.mainnet, mock, { multicall: { address: MULTICALL3_ADDRESS } })
-    const [owner] = await multi.nftOwners([{ contract: NFT, tokenId: 1 }])
+    const [owner] = await nftOwners(multi, [{ contract: NFT, tokenId: 1 }])
     expect(owner?.owner).toBe(toTronAddress(USER))
   })
 

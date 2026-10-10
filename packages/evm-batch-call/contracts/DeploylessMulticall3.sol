@@ -7,6 +7,7 @@ pragma solidity 0.8.30;
  * 与 ethcall 自带的 deployless 字节码相比：
  * - 对 `MULTICALL3.getEthBalance(addr)` 的调用在构造函数里直接用 BALANCE 读取，
  *   主币余额和合约调用在同一次 eth_call 里完成（链上没有 Multicall3 时也一样）
+ * - 对 `MULTICALL3.getBlockNumber()` 的调用直接返回 block.number（与 Multicall3 相同），用于确认读取时的区块
  * - 结果超过 EIP-170 的 24KB 时，合约创建会因 "max code size exceeded" 失败，
  *   此时改为通过 revert Aggregate3Result(...) 带回（revert 数据没有大小限制）
  *
@@ -28,6 +29,8 @@ contract DeploylessMulticall3 {
     address private constant MULTICALL3 = 0xcA11bde05977b3631167028862bE2a173976CA11;
     /// getEthBalance(address)
     bytes4 private constant GET_ETH_BALANCE = 0x4d2301cc;
+    /// getBlockNumber()
+    bytes4 private constant GET_BLOCK_NUMBER = 0x42cbb15c;
     /// EIP-170
     uint256 private constant MAX_CODE_SIZE = 24576;
 
@@ -46,6 +49,8 @@ contract DeploylessMulticall3 {
                     account := and(mload(add(data, 36)), 0xffffffffffffffffffffffffffffffffffffffff)
                 }
                 results[i] = Result(true, abi.encode(account.balance));
+            } else if (c.target == MULTICALL3 && data.length == 4 && bytes4(data) == GET_BLOCK_NUMBER) {
+                results[i] = Result(true, abi.encode(block.number));
             } else {
                 (bool success, bytes memory ret) = c.target.call(data);
                 if (!success && !c.allowFailure) {

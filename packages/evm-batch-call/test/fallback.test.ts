@@ -132,8 +132,72 @@ describe('节点来源', () => {
     // 传入的 URL 节点外面套了一层链校验；内置公共节点不校验
     const inner = (node: unknown) => (node as ChainCheckedProvider).inner
     expect(inner((evm.rpc as FallbackRpc).nodes[0])).toBeInstanceOf(JsonRpcProvider)
-    expect(inner(new Provider(TRON_CHAIN_ID.mainnet, 'https://api.trongrid.io').rpc)).toBeInstanceOf(TronProvider)
+    // 单节点同样经过 FallbackRpc（统一触发 onRequest 事件），节点在 nodes[0]
+    expect(inner((new Provider(TRON_CHAIN_ID.mainnet, 'https://api.trongrid.io').rpc as FallbackRpc).nodes[0])).toBeInstanceOf(TronProvider)
     expect((new Provider(TRON_CHAIN_ID.mainnet).rpc as FallbackRpc).nodes[0]).toBeInstanceOf(TronProvider)
     expect((new Provider(56).rpc as FallbackRpc).nodes[0]).toBeInstanceOf(JsonRpcProvider)
+  })
+})
+
+describe('FallbackRpc stallTimeout', () => {
+  /** 延迟 ms 后返回的节点 */
+  function slow(ms: number, value: bigint, log: string[], name: string) {
+    return {
+      async call(): Promise<string> {
+        throw new Error('unused')
+      },
+      async getBalance(): Promise<bigint> {
+        log.push(`${name}:start`)
+        await new Promise((r) => setTimeout(r, ms))
+        log.push(`${name}:done`)
+        return value
+      },
+    }
+  }
+
+  it('当前节点超过 stallTimeout 未返回时同时请求下一个，先返回的胜出；原请求不取消', async () => {
+    const log: string[] = []
+    const rpc = new FallbackRpc([slow(200, 1n, log, 'a'), slow(10, 2n, log, 'b')], { stallTimeout: 30 })
+    const started = Date.now()
+    expect(await rpc.getBalance(USER)).toBe(2n)
+    expect(Date.now() - started).toBeLessThan(150)
+    await new Promise((r) => setTimeout(r, 250))
+    expect(log).toEqual(['a:start', 'b:start', 'b:done', 'a:done'])
+  })
+
+  it('慢节点只要在 stallTimeout 内返回就不会请求下一个', async () => {
+    const log: string[] = []
+    const rpc = new FallbackRpc([slow(10, 1n, log, 'a'), slow(10, 2n, log, 'b')], { stallTimeout: 100 })
+    expect(await rpc.getBalance(USER)).toBe(1n)
+    expect(log).toEqual(['a:start', 'a:done'])
+  })
+
+  it('不设 stallTimeout 时保持原行为：慢节点等到返回，不并发', async () => {
+    const log: string[] = []
+    const rpc = new FallbackRpc([slow(80, 1n, log, 'a'), slow(10, 2n, log, 'b')])
+    expect(await rpc.getBalance(USER)).toBe(1n)
+    expect(log).toEqual(['a:start', 'a:done'])
+  })
+
+  it('并发中先出错的节点不影响另一个；全部失败时抛最后一个错误；超时仍按 timeout 放弃', async () => {
+    const log: string[] = []
+    const failing = broken(serverError)
+    const rpc = new FallbackRpc([slow(60, 1n, log, 'a'), failing], { stallTimeout: 10 })
+    expect(await rpc.getBalance(USER)).toBe(1n)
+
+    const allBad = new FallbackRpc([broken(serverError), broken(() => new Error('second'))], { stallTimeout: 10 })
+    await expect(allBad.getBalance(USER)).rejects.toThrow('second')
+
+    const timedOut = new FallbackRpc([slow(200, 1n, log, 'c')], { stallTimeout: 10, timeout: 30 })
+    await expect(timedOut.getBalance(USER)).rejects.toThrow(/timed out/)
+  })
+
+  it('确定性错误（revert）直接抛出，不等其他节点', async () => {
+    const reverted = () =>
+      makeError('execution reverted', 'CALL_EXCEPTION', { action: 'call', data: '0x08c379a0', reason: null, transaction: { to: null, data: '0x' }, invocation: null, revert: null })
+    const log: string[] = []
+    const rpc = new FallbackRpc([broken(reverted), slow(50, 1n, log, 'b')], { stallTimeout: 10 })
+    await expect(rpc.getBalance(USER)).rejects.toMatchObject({ code: 'CALL_EXCEPTION' })
+    expect(log).toEqual([])
   })
 })

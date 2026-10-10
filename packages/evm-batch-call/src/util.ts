@@ -18,3 +18,30 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
     }),
   ]).finally(() => clearTimeout(timer))
 }
+
+/**
+ * 支持 AbortSignal：已取消时直接 reject（不执行 work，不发请求）；执行中取消时立即 reject（reason 为 signal.reason），
+ * 底层请求不中断（可能与其他调用合并在同一个请求里），结果丢弃
+ */
+export function withSignal<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+  if (!signal) {
+    return work()
+  }
+  if (signal.aborted) {
+    return Promise.reject(signal.reason)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener('abort', onAbort, { once: true })
+    work().then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      },
+    )
+  })
+}

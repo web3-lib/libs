@@ -1,80 +1,33 @@
 export { Contract, bindCall, type BoundMethod, type ContractAbi, type ContractRunner } from './contract.js'
-export {
-  getTransferScanState,
-  keyValueScanStorage,
-  memoryScanStorage,
-  transferScan,
-  type TransferScanOptions,
-  type TransferScanState,
-  type TransferScanStorage,
-} from './scan.js'
 export { GetLogsError } from './fallback.js'
-export {
-  ALCHEMY_NETWORKS,
-  COINGECKO_PLATFORMS,
-  DEFILLAMA_CHAINS,
-  alchemy,
-  clearTokenListCache,
-  coingeckoTokenList,
-  combine,
-  defaultTokenSource,
-  defillamaPrices,
-  firstAvailable,
-  metamaskTokenList,
-  nodereal,
-  staticTokens,
-  tokenList,
-  type DiscoveredToken,
-  type OwnedToken,
-  type OwnerTokensOptions,
-  type PriceSource,
-  type PriceSourceContext,
-  type TokenSource,
-  type TokenSourceContext,
-} from './owner.js'
 export {
   getAllowances,
   getBalances,
-  getErc1155Balances,
-  getNftBalances,
-  getNftCollections,
-  getNftOwners,
-  getNftTokenUris,
-  getOwnerTokens,
+  getMultiBalances,
   getTokens,
+  type GetAllowancesOptions,
   type GetBalancesOptions,
-  type GetNftCollectionsOptions,
-  type GetNftTokenUrisOptions,
-  type GetOwnerTokensOptions,
   type GetTokensOptions,
   type ShortcutOptions,
   type ShortcutProviderOptions,
 } from './shortcuts.js'
-export {
-  DEFAULT_NFT_COLLECTION_FIELDS,
-  ERC1155_ABI,
-  ERC721_ABI,
-  type DefaultNftCollectionField,
-  type Erc1155Balance,
-  type NftBalance,
-  type NftCollection,
-  type NftCollectionField,
-  type NftCollectionsOptions,
-  type NftItem,
-  type NftOwner,
-  type NftStandard,
-  type NftTokenUri,
-  type NftTokenUriOptions,
-} from './nft.js'
-export { NATIVE_CURRENCIES, getNativeCurrency, type NativeCurrency } from './chains.js'
+export { NATIVE_BALANCE_MODES, NATIVE_CURRENCIES, getNativeBalanceMode, getNativeCurrency, type NativeCurrency } from './chains.js'
 export { clearChainIdCache, detectChainId } from './detect.js'
 export {
   DEFAULT_NATIVE_TOKENS,
   ERC20_ABI,
   NATIVE_TOKEN,
+  exportTokenMetaCache,
   formatAmount,
+  formatUnits,
+  importTokenMetaCache,
+  persistTokenMetaCache,
+  type TokenMetaSnapshot,
+  type TokenMetaStore,
   type BalanceToken,
   type Erc20Contract,
+  type RawTokenAllowance,
+  type RawTokenBalance,
   type TokenBalance,
   type TokenAllowance,
   MAX_UINT256,
@@ -86,7 +39,10 @@ export {
 } from './erc20.js'
 export {
   Provider,
+  type AllowancesOptions,
   type BalancesOptions,
+  type BalancesQuery,
+  type BlockOptions,
   type CallInput,
   type CallResults,
   type ProviderConfig,
@@ -108,10 +64,12 @@ export {
   type TronWebLike,
 } from './tron.js'
 export { CallFailedError, decodeRevertReason, isExecutionError } from './errors.js'
-export { FallbackRpc, type FallbackOptions } from './fallback.js'
+export { AllNodesFailedError, FallbackRpc, type FallbackNodeInfo, type FallbackOptions } from './fallback.js'
+export { onRequest, type RequestEvent, type RequestListener } from './events.js'
+export { watchBalances, type WatchBalancesOptions } from './watch.js'
 export { ChainCheckedProvider, getDefaultRpcUrls, isTronChain, type SourceOptions } from './source.js'
 export { DEFAULT_RPC_URLS, DEFAULT_TRON_HOSTS } from './rpcNodes.js'
 export { MULTICALL3_ADDRESS, getMulticall3, type Multicall } from './multicall.js'
-export type { BlockTag, CallOverrides, EthersLikeProvider } from './aggregate.js'
+export type { BlockTag, CallOverrides, EthersLikeProvider, NativeBalanceMode } from './aggregate.js'
 export type { BatchOptions } from './batcher.js'
-export type { BoundCall, Call, FailableCall, Params, RawResult } from './call.js'
+export type { BoundCall, Call, FailableCall, FailureReason, Params, RawResult, Settled } from './call.js'

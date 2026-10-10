@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 
+import { MULTICALL3_ADDRESS, Provider } from '../src/index.js'
 import {
-  MULTICALL3_ADDRESS,
-  Provider,
   alchemy,
   clearTokenListCache,
   coingeckoTokenList,
@@ -12,10 +11,11 @@ import {
   getOwnerTokens,
   metamaskTokenList,
   nodereal,
+  ownerTokens,
+  type PriceSource,
   staticTokens,
   tokenList,
-  type PriceSource,
-} from '../src/index.js'
+} from '../src/subpaths/owner.js'
 import { resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
 import { resetBalancesProviderCache } from '../src/shortcuts.js'
@@ -212,7 +212,7 @@ describe('ownerTokens', () => {
 
   it('主币在第一位；只返回有余额的代币；余额在链上核对', async () => {
     const { multi } = chain()
-    const list = await multi.ownerTokens(USER, { source: staticTokens([{ address: A, symbol: 'AAA', decimals: 18, logo: 'L' }, B, C, NOT_ERC20, 'bad']) })
+    const list = await ownerTokens(multi, USER, { source: staticTokens([{ address: A, symbol: 'AAA', decimals: 18, logo: 'L' }, B, C, NOT_ERC20, 'bad']) })
     expect(list.map((t) => [t.symbol, t.formatted, t.source])).toEqual([
       ['ETH', '2', 'native'],
       ['AAA', '100', 'static'],
@@ -224,7 +224,7 @@ describe('ownerTokens', () => {
 
   it('来源给的 decimals 直接使用，不再上链查', async () => {
     const { mock, multi } = chain()
-    await multi.ownerTokens(USER, { source: staticTokens([{ address: A, symbol: 'AAA', name: 'A', decimals: 18 }]), includeNative: false })
+    await ownerTokens(multi, USER, { source: staticTokens([{ address: A, symbol: 'AAA', name: 'A', decimals: 18 }]), includeNative: false })
     const { multicall3Interface } = await import('../src/aggregate.js')
     const parsed = multicall3Interface.parseTransaction({ data: String(mock.calls[0]?.data) })
     expect((parsed?.args[0] as unknown[]).length).toBe(1) // 只有 balanceOf
@@ -233,24 +233,24 @@ describe('ownerTokens', () => {
   it('prices：计算美元价值并按价值排序；minUsd 过滤代币但保留主币', async () => {
     const { multi } = chain()
     const source = staticTokens([A, B])
-    const list = await multi.ownerTokens(USER, { source, prices })
+    const list = await ownerTokens(multi, USER, { source, prices })
     expect(list.map((t) => [t.symbol, t.value])).toEqual([
       ['ETH', 6000],
       ['BBB', 50],
       ['AAA', 1],
     ])
-    const filtered = await multi.ownerTokens(USER, { source, prices, minUsd: 10 })
+    const filtered = await ownerTokens(multi, USER, { source, prices, minUsd: 10 })
     expect(filtered.map((t) => t.symbol)).toEqual(['ETH', 'BBB'])
   })
 
   it('includeNative: false', async () => {
     const { multi } = chain()
-    expect((await multi.ownerTokens(USER, { source: staticTokens([A]), includeNative: false })).map((t) => t.symbol)).toEqual(['AAA'])
+    expect((await ownerTokens(multi, USER, { source: staticTokens([A]), includeNative: false })).map((t) => t.symbol)).toEqual(['AAA'])
   })
 
   it('没有来源支持这条链时报错，并提示可以传 source', async () => {
     const { multi } = chain()
-    await expect(multi.ownerTokens(USER, { source: staticTokens([]) })).rejects.toThrow(/No token source supports chain 1/)
+    await expect(ownerTokens(multi, USER, { source: staticTokens([]) })).rejects.toThrow(/No token source supports chain 1/)
   })
 
   it('getOwnerTokens：节点参数与其他函数相同，source / prices / fetch 透传', async () => {

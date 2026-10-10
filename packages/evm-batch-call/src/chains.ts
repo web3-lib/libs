@@ -1,3 +1,5 @@
+import type { NativeBalanceMode } from './aggregate.js'
+
 /**
  * 内置链的主币信息（balances() / tokens() 里主币的 name / symbol / 精度）。
  * 来源：https://chainid.network/chains.json 的 nativeCurrency；999 在该表里与 Wanchain 测试网撞号，
@@ -43,4 +45,17 @@ export const NATIVE_CURRENCIES: Readonly<Record<number, NativeCurrency>> = {
 
 export function getNativeCurrency(chainId: number): NativeCurrency | undefined {
   return NATIVE_CURRENCIES[chainId]
+}
+
+/**
+ * 合约里读主币余额不可靠的链，以及应改用的读取方式（ProviderConfig.nativeBalance 的默认值）。
+ * 新链可用 `pnpm check:rpc` 比对“合约里读到的主币余额”和 eth_getBalance 来发现。
+ */
+export const NATIVE_BALANCE_MODES: Readonly<Record<number, NativeBalanceMode>> = {
+  // Anubis：Multicall3.getEthBalance 和 deployless 里的 BALANCE 对任何地址都返回 0，eth_getBalance 正常
+  6714: 'rpc',
+}
+
+export function getNativeBalanceMode(chainId: number): NativeBalanceMode {
+  return NATIVE_BALANCE_MODES[chainId] ?? 'contract'
 }

@@ -2,7 +2,8 @@
 import { Interface } from 'ethers'
 import { beforeEach, describe, expect, it } from 'vitest'
 
-import { ERC721_ABI, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID, clearChainIdCache, detectChainId, getBalances } from '../src/index.js'
+import { clearChainIdCache, detectChainId, getBalances, MULTICALL3_ADDRESS, Provider, TRON_CHAIN_ID } from '../src/index.js'
+import { ERC721_ABI, nftTokenUris } from '../src/subpaths/nft.js'
 import { multicall3Interface, resetMulticallCache } from '../src/aggregate.js'
 import { resetDecimalsCache } from '../src/erc20.js'
 import { resetBalancesProviderCache, resolveProviderForTest } from '../src/shortcuts.js'
@@ -158,14 +159,14 @@ describe('nftTokenUris', () => {
 
   it('空字符串的 tokenURI 是有效结果（如尚未设置 baseURI），不算失败', async () => {
     const multi = new Provider(1, nftNode(''))
-    expect((await multi.nftTokenUris([{ contract: NFT, tokenId: 1 }]))[0]).toMatchObject({ uri: '', success: true })
+    expect((await nftTokenUris(multi, [{ contract: NFT, tokenId: 1 }]))[0]).toMatchObject({ uri: '', success: true })
   })
 
   it('第一次查询顺带识别并缓存标准，之后只发 tokenURI', async () => {
     const mock = nftNode('ipfs://Qm/1')
     const multi = new Provider(1, mock)
-    await multi.nftTokenUris([{ contract: NFT, tokenId: 1 }, { contract: NFT, tokenId: 2 }])
-    await multi.nftTokenUris([{ contract: NFT, tokenId: 1 }])
+    await nftTokenUris(multi, [{ contract: NFT, tokenId: 1 }, { contract: NFT, tokenId: 2 }])
+    await nftTokenUris(multi, [{ contract: NFT, tokenId: 1 }])
     const count = (i: number) => (multicall3Interface.parseTransaction({ data: String(mock.calls[i]?.data) })?.args[0] as unknown[]).length
     expect(count(0)).toBe(6) // 2 次 supportsInterface（每个集合一次）+ 2 × (tokenURI + uri)
     expect(count(1)).toBe(1)

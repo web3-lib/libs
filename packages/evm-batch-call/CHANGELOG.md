@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### 不兼容的改动
+
+- 代币信息缓存与 solana-batch-call 对齐：最多 5 万个代币（超出淘汰最早的），name / symbol 缓存 1 小时后重查（可升级合约可能改名）；decimals 仍永久缓存
+- 单节点也经过 `FallbackRpc`（统一触发 onRequest 事件），`provider.rpc` 始终是 `FallbackRpc`，底层节点在 `rpc.nodes[0]`；错误仍是节点的原始错误
+- NFT 查询和资产列表移到子路径，不用时打包不再带上（拆出后约少 15KB；只用 `getBalances` 时 minify 后约 44KB，含本版本新增功能，不含 ethers）：
+  - `@w3lib/evm-batch-call/nft`：`getNftCollections` / `getNftBalances` / `getNftOwners` / `getNftTokenUris` / `getErc1155Balances`、`ERC721_ABI` / `ERC1155_ABI` 及相关类型
+  - `@w3lib/evm-batch-call/owner`：`getOwnerTokens`、代币来源（`metamaskTokenList` / `alchemy` / `combine` …）、`defillamaPrices`、`transferScan` / `keyValueScanStorage` 等
+  - 删除 `Provider` 上的 `nftCollections` / `nftBalances` / `nftOwners` / `nftTokenUris` / `erc1155Balances` / `ownerTokens` 方法，改用子路径里接收 Provider 的同名函数：`multi.nftOwners(items)` → `nftOwners(multi, items)`
+- `balances` / `tokens` / `allowances` 的子调用改走自动合并队列（见下），与同一时刻的其他查询合并成一次 `eth_call`；结果不变，但请求会推迟到 `batch.wait` 收集窗口结束（默认同一 tick）
+
+### 新增
+
+- `nativeBalance` 配置：`'contract'`（默认）| `'rpc'`（主币单独走 `eth_getBalance`）| `{ erc20 }`（主币改调 ERC20 的 `balanceOf`），对 `balances`、`getEthBalance`、`all` / `call` / `staticCall` 都生效；内置表 `NATIVE_BALANCE_MODES` 收录合约里读主币余额恒为 0 的链（Anubis 6714 默认 `'rpc'`）
+- `pnpm check:rpc` 比对每条链“合约里读到的主币余额”（Multicall3 / deployless）与 `eth_getBalance`，不一致且没有配置时报错
+- `balances` / `allowances`（及 `getBalances` / `getAllowances`）的 `decimals: false` 选项：只查余额 / 额度，结果不带 `decimals` / `formatted`（返回类型 `RawTokenBalance` / `RawTokenAllowance`）；没有 `decimals` 的合约（ERC721）也能拿到余额
+- `balances` / `tokens` / `allowances` 的失败项带 `error`（`invalid-address` / `invalid-argument` / `no-contract` / `reverted` / `decode-failed` / `not-configured`）和 `errorField`（哪一项没读到）
+- `balances` / `tokens` / `allowances` 参与自动合并：不同组件同时发起的查询、单条 `await` 调用合成一次 `eth_call` 并去重；一次调用的子调用不会被 `batch.maxSize` 拆开
+- `fallback.stallTimeout`：当前节点超过这个时间未返回时同时请求下一个节点，先成功的胜出（与 ethers `FallbackProvider` 的 stallTimeout 相同，没有首次请求前的全节点同步）；默认 0 不启用
+- 快捷函数：`[window.ethereum, ...urls]` 这类钱包 + URL 混合列表也复用 Provider 实例；`provider` 参数可以直接传 `Provider` 实例
+- 所有节点都失败时抛 `AllNodesFailedError`，带每个节点的标识（URL 只取 host）和失败原因；单节点时仍抛原始错误
+- 超时与出错分开计：超时只换节点、不冷却，同一节点连续 3 次超时才冷却；节点冷却状态按节点（URL / 对象）全局共享，Provider 重建后仍有效
+- `onRequest(listener)`：订阅所有节点请求（节点、方法、耗时、成败、第几个节点），用于观察故障切换和耗时
+- 所有查询支持 `signal`（AbortSignal）：已取消时不发请求，查询中取消立即 reject
+- `withBlock`：`balances` / `tokens` / `allowances` 的结果带读取时的区块号（同一次 `eth_call` 里读出；deployless 合约新增对 `getBlockNumber()` 的支持）
+- `minBlock`：节点落后于指定区块时按该区块重查、自动换节点（落后不进入冷却），所有节点都落后时稍等重试（约 10 秒，可用 signal 取消），用于交易刚确认后刷新余额；Tron 上等节点跟上后查最新状态
+- `getMultiBalances` / `multiBalances`：多个钱包一次查，同一条链上合成一次 multicall
+- `watchBalances`：轮询余额，多处订阅同一份数据时合并成一份轮询，只在余额变化时通知
+- 代币信息缓存可持久化：`persistTokenMetaCache(localStorage)`、`exportTokenMetaCache` / `importTokenMetaCache`
+- `formatUnits`（与 ethers 同名）；`formatAmount` 保留为别名并标记 deprecated
+
+- Multicall3 地址表补充 23 条链（2026-10 逐条在链上实测 aggregate3 可用）：Cronos、Velas、Unichain、Monad、opBNB、Boba、KCC、Astar、Stable、HyperEVM、Core、Morph、Robinhood Chain、IoTeX、Plasma、Mode、Ink、Linea、Berachain、Scroll、Winchain、Oasis Emerald、Aurora。其中 Oasis Emerald、Aurora 不支持 deployless，原来在这两条链上批量查询会失败
+- `pnpm check:rpc` 检查每条链的批量调用方式：内置表里的 Multicall3 能否调用 aggregate3、deployless 能否执行，两种都不可用时报错
+
+### 修复
+
+- Mantle、Blast 的 Multicall3 地址（来自 ethcall 的表）调用 aggregate3 会 revert，改为标准地址（原来会自动退回 deployless，结果正确但多一次失败的请求）
+- Arbitrum 系的链（Arbitrum One、Robinhood Chain 等）在合约里 `block.number` 是 L1 区块号：`withBlock` / `minBlock` 改为读 ArbSys 的 `arbBlockNumber()`，得到 L2 区块号
+- `all<any>(calls)` / `tryAll<any>(calls)` 显式写 any 时返回 `any[]`，可以按数组解构（原来命中第一个重载，返回值不能解构）
+
+### 文档
+
+- 零地址默认按主币处理，在 README 中单独醒目说明，并给出只保留 `0xeeee…eeee` 的配置
+
 ## 0.3.0
 
 ### 新增

@@ -1,9 +1,10 @@
 import { AbiCoder, Interface, concat, dataSlice, id, isError, type Provider as EthersProvider } from 'ethers'
 
-import type { CallRequest, RawResult } from './call.js'
+import { encodeUint256, type CallRequest, type RawResult } from './call.js'
 import { DEPLOYLESS_MULTICALL3_BYTECODE } from './deployless.js'
 import { isExecutionError } from './errors.js'
 import { MULTICALL3_ADDRESS, type Multicall } from './multicall.js'
+import { isTronChain } from './tron.js'
 
 /**
  * 只用到 ethers Provider 的这几个方法：必需 call / getBalance；getLogs / getBlockNumber 可选（只有增量扫描 Transfer 事件时用到）。
@@ -16,12 +17,54 @@ export type BlockTag = number | bigint | string
 export interface CallOverrides {
   blockTag?: BlockTag
   from?: string
+  /**
+   * 最低区块：节点落后于这个区块时（如交易刚确认、公共节点还没跟上）不用它的结果——
+   * 改为按这个区块重查（落后的节点会报错、自动换节点），所有节点都落后时稍等重试，最多约 10 秒。
+   * 只对最新状态的查询生效（指定了 blockTag 时忽略）
+   */
+  minBlock?: number
+  /** 取消查询：已取消时不发请求；执行中取消时立即 reject（合并在一起的底层请求继续完成，结果丢弃） */
+  signal?: AbortSignal
 }
+
+/**
+ * 主币余额的读取方式：
+ * - 'contract'：和其他调用放在同一次 eth_call 里（Multicall3.getEthBalance / deployless 合约里的 BALANCE）
+ * - 'rpc'：单独用 eth_getBalance（与 eth_call 同时发出）。用于合约里读主币余额不可靠的链（如 BALANCE 恒为 0）
+ * - { erc20 }：主币其实是一个 ERC20 合约，改调它的 balanceOf
+ */
+export type NativeBalanceMode = 'contract' | 'rpc' | { erc20: string }
+
+const balanceOfInterface = new Interface(['function balanceOf(address owner) view returns (uint256)'])
 
 export const multicall3Interface = new Interface([
   'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)',
   'function getEthBalance(address addr) view returns (uint256 balance)',
+  'function getBlockNumber() view returns (uint256 blockNumber)',
 ])
+
+/** 区块号查询（minBlock 检查用）：目标在执行时换成 multicall 地址 */
+const BLOCK_NUMBER_REQUEST: CallRequest = {
+  target: MULTICALL3_ADDRESS,
+  allowFailure: true,
+  callData: multicall3Interface.encodeFunctionData('getBlockNumber'),
+  blockNumber: true,
+}
+
+/**
+ * Arbitrum 系的链（Arbitrum One / Nova、Orbit 链如 Robinhood Chain）在合约里 block.number 是 L1 区块号，
+ * L2 区块号要从 ArbSys 预编译合约（0x64）的 arbBlockNumber() 读。区块号查询时顺带读它：有返回值就用它，
+ * 其他链上 0x64 没有代码、返回空数据，忽略
+ */
+const ARB_BLOCK_NUMBER_REQUEST: CallRequest = {
+  target: '0x0000000000000000000000000000000000000064',
+  allowFailure: true,
+  callData: '0xa3b1b31d', // arbBlockNumber()
+}
+
+/** minBlock：所有节点都落后时的重试间隔和总时长 */
+const MIN_BLOCK_RETRY_INTERVAL = 1000
+const MIN_BLOCK_DEADLINE = 10_000
 
 const CALL3_TUPLE = 'tuple(address target, bool allowFailure, bytes callData)[]'
 const RESULT_TUPLE = 'tuple(bool success, bytes returnData)[]'
@@ -40,6 +83,8 @@ export interface AggregateContext {
   /** null 表示直接走 deployless */
   multicall: Multicall | null
   chunkSize: number
+  /** 主币余额的读取方式，默认 'contract' */
+  nativeBalance?: NativeBalanceMode
 }
 
 /**
@@ -55,19 +100,139 @@ export async function aggregate(
   if (requests.length === 0) {
     return []
   }
+  const mode = ctx.nativeBalance ?? 'contract'
+  if (mode !== 'contract' && requests.some((req) => req.ethBalanceOf !== undefined)) {
+    return typeof mode === 'object' ? aggregate(ctx, requests.map((req) => toErc20Balance(req, mode.erc20)), overrides) : aggregateWithRpcBalances(ctx, requests, overrides)
+  }
   const size = Math.max(1, ctx.chunkSize)
+  const run = overrides.minBlock !== undefined && isLatest(overrides.blockTag) ? aggregateChunkAtLeast : aggregateChunk
   if (requests.length <= size) {
-    return aggregateChunk(ctx, requests, overrides)
+    return run(ctx, requests, overrides)
   }
   const chunks: CallRequest[][] = []
   for (let i = 0; i < requests.length; i += size) {
     chunks.push(requests.slice(i, i + size))
   }
-  const results = await Promise.all(chunks.map((chunk) => aggregateChunk(ctx, chunk, overrides)))
+  const results = await Promise.all(chunks.map((chunk) => run(ctx, chunk, overrides)))
   return results.flat()
 }
 
-async function aggregateChunk(
+/**
+ * minBlock：先按最新状态查，同一次 eth_call 里顺带读区块号；节点落后时按 minBlock 指定区块重查——
+ * 落后的节点对未来区块报 “header not found” 等错误，FallbackRpc 换节点（不冷却）；所有节点都落后时稍等重试。
+ * 重查得到的是 minBlock 那个区块的状态（已包含刚确认的交易）。Tron 只能查最新状态，落后时等节点跟上再查。
+ * overrides.signal 取消后不再重试
+ */
+async function aggregateChunkAtLeast(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides): Promise<RawResult[]> {
+  const minBlock = overrides.minBlock as number
+  // Tron 节点只能查最新状态（不支持按区块号查询）
+  const canPinBlock = !isTronChain(ctx.chainId)
+  return retryUntilCaughtUp(overrides, async () => {
+    const results = await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], overrides)
+    if ((blockOf(results[results.length - 1]) ?? -1n) >= BigInt(minBlock)) {
+      return results.slice(0, -1)
+    }
+    if (canPinBlock) {
+      return aggregateChunk(ctx, requests, { ...overrides, blockTag: minBlock })
+    }
+    throw new Error(`Node is behind minBlock ${minBlock}`)
+  })
+}
+
+/** 节点落后时的重试：确定性错误（合约执行结果）直接抛；其余错误每秒重试，最多约 10 秒；signal 取消后停止 */
+async function retryUntilCaughtUp<T>(overrides: CallOverrides, run: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + MIN_BLOCK_DEADLINE
+  for (;;) {
+    overrides.signal?.throwIfAborted()
+    try {
+      return await run()
+    } catch (err) {
+      if (isExecutionError(err) || Date.now() + MIN_BLOCK_RETRY_INTERVAL > deadline) {
+        throw err
+      }
+    }
+    await sleep(MIN_BLOCK_RETRY_INTERVAL, overrides.signal)
+  }
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** 区块号查询的结果；失败时为 null */
+function blockOf(result: RawResult | undefined): bigint | null {
+  return result?.success && result.returnData !== '0x' ? BigInt(result.returnData) : null
+}
+
+/** 主币余额请求改成主币 ERC20 合约的 balanceOf（返回值同样是 uint256，解码方式不变） */
+function toErc20Balance(req: CallRequest, erc20: string): CallRequest {
+  if (req.ethBalanceOf === undefined) {
+    return req
+  }
+  return { target: erc20, allowFailure: req.allowFailure, callData: balanceOfInterface.encodeFunctionData('balanceOf', [req.ethBalanceOf]) }
+}
+
+/**
+ * 主币余额单独走 eth_getBalance，结果按原顺序合并；节点错误照常抛出。
+ * 需要区块号（withBlock / minBlock）时，先执行其余请求并读出实际区块号，再在这个区块上读主币余额——
+ * 主币和代币余额、blockNumber 一致，minBlock 的等待 / 换节点也由其余请求负责；否则两者同时发出
+ */
+async function aggregateWithRpcBalances(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides): Promise<RawResult[]> {
+  const others = requests.filter((req) => req.ethBalanceOf === undefined)
+  const owners = requests.filter((req) => req.ethBalanceOf !== undefined).map((req) => req.ethBalanceOf as string)
+  const contractCtx: AggregateContext = { ...ctx, nativeBalance: 'contract' }
+  let otherResults: RawResult[]
+  let balances: bigint[]
+  // Tron 节点只能查最新状态，不能按区块号读余额
+  if (isLatest(overrides.blockTag) && !isTronChain(ctx.chainId) && (overrides.minBlock !== undefined || others.some((req) => req.blockNumber))) {
+    const results = await aggregate(contractCtx, [...others, BLOCK_NUMBER_REQUEST], overrides)
+    const block = blockOf(results.pop())
+    otherResults = results
+    const blockTag = block === null ? overrides.blockTag : Number(block)
+    const read = () => Promise.all(owners.map((owner) => ctx.provider.getBalance(owner, blockTag)))
+    // 只有 minBlock 才等待重试（读的区块可能来自比当前节点更新的节点）；只要 withBlock 时出错照常抛出
+    balances = await (overrides.minBlock !== undefined ? retryUntilCaughtUp(overrides, read) : read())
+  } else {
+    ;[otherResults, balances] = await Promise.all([
+      aggregate(contractCtx, others, overrides),
+      Promise.all(owners.map((owner) => ctx.provider.getBalance(owner, overrides.blockTag))),
+    ])
+  }
+  let i = 0
+  let j = 0
+  return requests.map((req) =>
+    req.ethBalanceOf === undefined ? (otherResults[i++] as RawResult) : { success: true, returnData: encodeUint256(balances[j++] as bigint) },
+  )
+}
+
+/** 执行一批请求；其中有区块号查询时顺带读 Arbitrum 的 L2 区块号，并用它替换（见 ARB_BLOCK_NUMBER_REQUEST） */
+async function aggregateChunk(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides): Promise<RawResult[]> {
+  if (!requests.some((req) => req.blockNumber)) {
+    return aggregateRawChunk(ctx, requests, overrides)
+  }
+  const results = await aggregateRawChunk(ctx, [...requests, ARB_BLOCK_NUMBER_REQUEST], overrides)
+  const arb = results.pop() as RawResult
+  if (arb.success && arb.returnData.length === 66) {
+    requests.forEach((req, i) => {
+      if (req.blockNumber) {
+        results[i] = arb
+      }
+    })
+  }
+  return results
+}
+
+async function aggregateRawChunk(
   ctx: AggregateContext,
   requests: CallRequest[],
   overrides: CallOverrides,
@@ -100,7 +265,7 @@ async function callContract(
   overrides: CallOverrides,
 ): Promise<RawResult[] | 'invalid' | 'reverted'> {
   const calls = requests.map((req) => ({
-    target: req.ethBalanceOf ? multicall.address : req.target,
+    target: req.ethBalanceOf || req.blockNumber ? multicall.address : req.target,
     allowFailure: req.allowFailure,
     callData: req.callData,
   }))
@@ -157,8 +322,8 @@ async function callDeploylessChunk(
   const args = AbiCoder.defaultAbiCoder().encode(
     [CALL3_TUPLE],
     [
-      requests.map(({ target, allowFailure, callData, ethBalanceOf }) => ({
-        target: ethBalanceOf ? MULTICALL3_ADDRESS : target,
+      requests.map(({ target, allowFailure, callData, ethBalanceOf, blockNumber }) => ({
+        target: ethBalanceOf || blockNumber ? MULTICALL3_ADDRESS : target,
         allowFailure,
         callData,
       })),

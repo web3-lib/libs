@@ -20,6 +20,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./nft": {
+      "types": "./dist/subpaths/nft.d.ts",
+      "import": "./dist/subpaths/nft.js"
+    },
+    "./owner": {
+      "types": "./dist/subpaths/owner.d.ts",
+      "import": "./dist/subpaths/owner.js"
     }
   },
   "files": [

@@ -19,6 +19,13 @@ export const TRON_CHAIN_ID = {
   nile: 3448148188,
 } as const
 
+const TRON_CHAIN_IDS = new Set<number>(Object.values(TRON_CHAIN_ID))
+
+/** 是否是 Tron 链（主网 / 测试网）：只能查最新状态，地址区分大小写 */
+export function isTronChain(chainId: number): boolean {
+  return TRON_CHAIN_IDS.has(chainId)
+}
+
 const TRON_ADDRESS_RE = /^T[1-9A-HJ-NP-Za-km-z]{33}$/
 
 export function isTronAddress(value: unknown): boolean {

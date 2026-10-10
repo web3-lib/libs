@@ -1,4 +1,4 @@
-import { decodeCall, encodeCall, type Call, type CallRequest, type RawResult } from './call.js'
+import { decodeCall, encodeCall, encodeFailureReason, settleResult, type Call, type CallRequest, type RawResult, type Settled } from './call.js'
 import type { CallOverrides } from './aggregate.js'
 import { CallFailedError } from './errors.js'
 
@@ -13,6 +13,10 @@ type Runner = (requests: CallRequest[], overrides: CallOverrides) => Promise<Raw
 
 interface Pending {
   call: Call
+  /** 调用方的 signal（没有时这个调用方不会取消，整批请求不能中断） */
+  signal?: AbortSignal
+  /** true：失败时 resolve 失败原因（Settled），不 reject；节点错误照常 reject */
+  settle: boolean
   resolve: (value: unknown) => void
   reject: (reason: unknown) => void
 }
@@ -21,6 +25,26 @@ interface Queue {
   overrides: CallOverrides
   entries: Pending[]
   timer: ReturnType<typeof setTimeout> | null
+}
+
+/**
+ * 整批请求的 signal：所有调用方都传了 signal、并且都取消后才取消（如 minBlock 的等待重试随之停止）；
+ * 有调用方没传 signal 时返回 undefined（整批照常完成）
+ */
+function combinedSignal(entries: readonly Pending[]): AbortSignal | undefined {
+  const signals = [...new Set(entries.map((entry) => entry.signal))]
+  if (!signals.length || signals.some((signal) => signal === undefined)) {
+    return undefined
+  }
+  const controller = new AbortController()
+  const check = () => {
+    if (signals.every((signal) => signal?.aborted)) {
+      controller.abort(signals[0]?.reason)
+    }
+  }
+  signals.forEach((signal) => signal?.addEventListener('abort', check, { once: true }))
+  check()
+  return controller.signal
 }
 
 /**
@@ -41,21 +65,49 @@ export class Batcher {
   }
 
   load<T>(call: Call, overrides: CallOverrides = {}): Promise<T> {
-    const key = `${String(overrides.blockTag ?? 'latest')}|${overrides.from ?? ''}`
+    const [key, queue] = this.#queue(overrides)
+    const promise = new Promise<T>((resolve, reject) => {
+      queue.entries.push({ call, signal: overrides.signal, settle: false, resolve: resolve as (value: unknown) => void, reject })
+    })
+    this.#schedule(key, queue)
+    return promise
+  }
+
+  /**
+   * 一组调用一起入队（不会被 maxSize 拆到不同批次），逐条返回成功的值或失败原因；
+   * 只有节点错误（整批失败）时 reject。balances / tokens / allowances 用它参与自动合并。
+   */
+  loadSettled(calls: readonly Call[], overrides: CallOverrides = {}): Promise<Settled[]> {
+    if (!calls.length) {
+      return Promise.resolve([])
+    }
+    const [key, queue] = this.#queue(overrides)
+    const promises = calls.map(
+      (call) =>
+        new Promise<Settled>((resolve, reject) => {
+          queue.entries.push({ call, signal: overrides.signal, settle: true, resolve: resolve as (value: unknown) => void, reject })
+        }),
+    )
+    this.#schedule(key, queue)
+    return Promise.all(promises)
+  }
+
+  #queue(overrides: CallOverrides): [string, Queue] {
+    const key = `${String(overrides.blockTag ?? 'latest')}|${overrides.from ?? ''}|${overrides.minBlock ?? ''}`
     let queue = this.#queues.get(key)
     if (!queue) {
       queue = { overrides, entries: [], timer: null }
       this.#queues.set(key, queue)
     }
-    const promise = new Promise<T>((resolve, reject) => {
-      queue.entries.push({ call, resolve: resolve as (value: unknown) => void, reject })
-    })
+    return [key, queue]
+  }
+
+  #schedule(key: string, queue: Queue): void {
     if (queue.entries.length >= this.#maxSize) {
       this.#flush(key)
     } else if (!queue.timer) {
       queue.timer = setTimeout(() => this.#flush(key), this.#wait)
     }
-    return promise
   }
 
   #flush(key: string): void {
@@ -80,11 +132,15 @@ export class Batcher {
       try {
         request = encodeCall(entry.call, true)
       } catch (err) {
-        entry.reject(err)
+        if (entry.settle) {
+          entry.resolve({ ok: false, reason: encodeFailureReason(err) } satisfies Settled)
+        } else {
+          entry.reject(err)
+        }
         requestIndex.push(-1)
         continue
       }
-      const dedupeKey = `${request.ethBalanceOf ? 'eth' : request.target.toLowerCase()}|${request.callData}`
+      const dedupeKey = `${request.ethBalanceOf ? 'eth' : request.blockNumber ? 'block' : request.target.toLowerCase()}|${request.callData}`
       let index = indexByKey.get(dedupeKey)
       if (index === undefined) {
         index = requests.push(request) - 1
@@ -99,7 +155,7 @@ export class Batcher {
 
     let results: RawResult[]
     try {
-      results = await this.#run(requests, overrides)
+      results = await this.#run(requests, { ...overrides, signal: combinedSignal(entries) })
     } catch (err) {
       entries.forEach((entry, i) => requestIndex[i] !== -1 && entry.reject(err))
       return
@@ -111,6 +167,10 @@ export class Batcher {
         return
       }
       const result = results[index] as RawResult
+      if (entry.settle) {
+        entry.resolve(settleResult(entry.call, result))
+        return
+      }
       if (!result.success) {
         entry.reject(new CallFailedError(entry.call, result.returnData))
         return
