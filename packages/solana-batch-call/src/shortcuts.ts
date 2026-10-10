@@ -38,11 +38,24 @@ function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
   }
 }
 
+// 配置里的函数（如自定义 fetch）按对象编号参与缓存键：同一个函数对象复用同一个客户端（WeakMap 不阻止回收）
+const functionIds = new WeakMap<object, number>()
+let nextFunctionId = 0
+
+/** 配置的缓存键：对象的键按字母排序（写法顺序不同视为同一份配置），函数按对象编号；无法序列化时返回 null（不缓存） */
 function configKey(config: ClientConfig): string | null {
   try {
     return JSON.stringify(config, (_key, value: unknown) => {
       if (typeof value === 'function') {
-        throw new Error('not comparable')
+        let id = functionIds.get(value)
+        if (id === undefined) {
+          id = ++nextFunctionId
+          functionIds.set(value, id)
+        }
+        return `function#${id}`
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
       }
       return value
     })

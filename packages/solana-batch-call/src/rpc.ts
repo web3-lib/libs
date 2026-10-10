@@ -24,9 +24,13 @@ export class RpcError extends Error {
       // 节点高度没到 minContextSlot：换节点可能成功
       code === MIN_CONTEXT_SLOT_NOT_REACHED ||
       /minimum context slot/i.test(message) ||
-      /forbidden|blocked|personal token|api.?key|rate.?limit|too many|not allowed|unauthori[sz]ed|limit exceeded|disabled|not available|not supported/i.test(message)
+      (/forbidden|blocked|personal token|api.?key|rate.?limit|too many|not allowed|unauthori[sz]ed|limit exceeded|disabled|not available|not supported/i.test(message) &&
+        !TOO_MANY_ACCOUNTS.test(message))
   }
 }
+
+/** 节点限制单次 getMultipleAccounts 的账户数（如 “Too many accounts requested”）：缩小每次的账户数后重试，不是节点故障 */
+const TOO_MANY_ACCOUNTS = /too many accounts/i
 
 /** HTTP 层错误（非 2xx、网络错误、超时） */
 export class HttpError extends Error {
@@ -118,6 +122,9 @@ let nextId = 1
 /** 批量请求被拒绝、可以降级为逐条请求的 HTTP 状态 */
 const BATCH_REJECTED_STATUS = new Set([400, 404, 405, 415, 422])
 
+/** 节点不支持批量时，多久后重新尝试批量 */
+const BATCH_RETRY_AFTER = 10 * 60 * 1000
+
 function isBatchLimitError(message: string | undefined): boolean {
   return !!message && /batch/i.test(message) && /more than \d+|too (large|many|big)|not (allowed|supported)|exceed/i.test(message)
 }
@@ -136,7 +143,14 @@ export class HttpRpc implements RpcTransport {
   readonly #retries: number
   readonly #fetch: typeof fetch
   #maxBatchSize: number
-  #batch: boolean
+  /** 节点对单个方法在一个批量里的数量限制（如 publicnode：getMultipleAccounts 最多 1 个），从报错里学到 */
+  readonly #methodLimits = new Map<string, number>()
+  /** options.batch：调用方是否允许批量 */
+  readonly #batchOption: boolean
+  /** 节点明确表示不支持批量时，在这之前逐条请求（之后重新尝试批量） */
+  #batchDisabledUntil = 0
+  /** 节点限制单次 getMultipleAccounts 的账户数时学到的上限 */
+  #maxAccounts: number | undefined
   #queue: Pending[] = []
   #timer: ReturnType<typeof setTimeout> | null = null
 
@@ -146,13 +160,59 @@ export class HttpRpc implements RpcTransport {
     this.#timeout = options.timeout ?? 10_000
     this.#headers = { 'content-type': 'application/json', ...options.headers }
     this.#maxBatchSize = Math.max(1, options.maxBatchSize ?? 20)
-    this.#batch = options.batch ?? true
+    this.#batchOption = options.batch ?? true
     this.#batchWait = options.batchWait ?? 0
     this.#retries = Math.max(0, options.retries ?? 2)
     this.#fetch = options.fetch ?? ((...args) => fetch(...args))
   }
 
   request<T = unknown>(method: string, params: readonly unknown[] = []): Promise<T> {
+    if (method === 'getMultipleAccounts' && Array.isArray(params[0])) {
+      return this.#getMultipleAccounts(params) as Promise<T>
+    }
+    return this.#enqueue<T>(method, params)
+  }
+
+  /**
+   * getMultipleAccounts：节点限制单次账户数时（“Too many accounts requested”），减半后分多次请求、合并结果，
+   * 并记下上限，之后直接按上限拆分。合并后 context.slot 取最小值
+   */
+  async #getMultipleAccounts(params: readonly unknown[]): Promise<unknown> {
+    const [addresses, ...rest] = params as [unknown[], ...unknown[]]
+    const max = this.#maxAccounts
+    if (max !== undefined && addresses.length > max) {
+      const parts: unknown[][] = []
+      for (let i = 0; i < addresses.length; i += max) {
+        parts.push(addresses.slice(i, i + max))
+      }
+      const results = (await Promise.all(parts.map((part) => this.#getMultipleAccounts([part, ...rest])))) as Array<{
+        context?: { slot?: number }
+        value?: unknown[]
+      }>
+      const slots = results.map((r) => r?.context?.slot).filter((slot): slot is number => typeof slot === 'number')
+      return {
+        ...results[0],
+        context: { ...results[0]?.context, ...(slots.length ? { slot: Math.min(...slots) } : {}) },
+        value: results.flatMap((r) => r?.value ?? []),
+      }
+    }
+    try {
+      return await this.#enqueue('getMultipleAccounts', params)
+    } catch (err) {
+      if (err instanceof RpcError && TOO_MANY_ACCOUNTS.test(err.message) && addresses.length > 1) {
+        this.#maxAccounts = Math.max(1, Math.min(this.#maxAccounts ?? Number.POSITIVE_INFINITY, Math.floor(addresses.length / 2)))
+        return this.#getMultipleAccounts(params)
+      }
+      throw err
+    }
+  }
+
+  /** 是否合并成批量请求：调用方允许，且不在 “节点不支持批量” 的冷却期内 */
+  get #batch(): boolean {
+    return this.#batchOption && Date.now() >= this.#batchDisabledUntil
+  }
+
+  #enqueue<T>(method: string, params: readonly unknown[]): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.#queue.push({ method, params, resolve: resolve as (value: unknown) => void, reject })
       if (!this.#batch || this.#queue.length >= this.#maxBatchSize) {
@@ -170,9 +230,47 @@ export class HttpRpc implements RpcTransport {
     }
     const queue = this.#queue
     this.#queue = []
-    for (let i = 0; i < queue.length; i += this.#maxBatchSize) {
-      void this.#dispatch(queue.slice(i, i + this.#maxBatchSize))
+    for (const chunk of this.#split(queue)) {
+      void this.#dispatch(chunk)
     }
+  }
+
+  /** 按 maxBatchSize 和各方法的数量限制分批（保持顺序；不受限的方法照常合并） */
+  #split(items: readonly Pending[]): Pending[][] {
+    const chunks: Pending[][] = []
+    let current: Pending[] = []
+    let counts = new Map<string, number>()
+    for (const item of items) {
+      const limit = this.#methodLimits.get(item.method)
+      const count = counts.get(item.method) ?? 0
+      if (current.length >= this.#maxBatchSize || (limit !== undefined && count >= limit)) {
+        chunks.push(current)
+        current = []
+        counts = new Map()
+      }
+      current.push(item)
+      counts.set(item.method, (counts.get(item.method) ?? 0) + 1)
+    }
+    if (current.length) {
+      chunks.push(current)
+    }
+    return chunks
+  }
+
+  /**
+   * 报错是 “某方法在批量里的数量超限” 时（如 “Maximum number of 'getMultipleAccounts' calls in a batch request is 1”），
+   * 记下限制并按限制重新分批，返回 true；限制解析不出或这批本来就没超限（避免无限重发）时返回 false
+   */
+  async #retryWithMethodLimit(items: Pending[], message: string | undefined): Promise<boolean> {
+    const match = /maximum number of '([^']+)' calls in a batch request is (\d+)/i.exec(message ?? '')
+    const method = match?.[1]
+    const limit = Number(match?.[2])
+    if (!method || !Number.isFinite(limit) || limit < 1 || items.filter((item) => item.method === method).length <= limit) {
+      return false
+    }
+    this.#methodLimits.set(method, limit)
+    await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
+    return true
   }
 
   async #dispatch(items: Pending[]): Promise<void> {
@@ -203,18 +301,31 @@ export class HttpRpc implements RpcTransport {
     }
     if (!Array.isArray(body)) {
       const error = (body as RpcResponse)?.error
+      // 单个方法在批量里的数量超限（整批被拒）：按限制重新分批，不当成节点问题
+      if (await this.#retryWithMethodLimit(items, error?.message)) {
+        return
+      }
       const rpcError = new RpcError(error?.message ?? 'Invalid JSON-RPC batch response', error?.code, error?.data)
       // 限频 / 鉴权等节点问题：原样报错，不降级（降级成逐条请求只会让限频更严重）
       if (rpcError.nodeFault) {
         items.forEach((item) => item.reject(rpcError))
         return
       }
-      // 其他（如 -32600 invalid request）：节点不支持批量，降级为逐条请求
-      this.#disableBatch()
+      // 整批被拒（不是账户数超限）：节点多半不支持批量（各家错误码不同：-32600 / -32601 / -32700 …），
+      // 一段时间内改为逐条请求（10 分钟后重新尝试批量，偶发的错误不会永久关闭）；不关的话每批都要先失败一次再逐条重发。
+      // 账户数超限只把这一批逐条重发（由 HTTP 层按节点缩小单次读取数量）
+      if (!TOO_MANY_ACCOUNTS.test(error?.message ?? '')) {
+        this.#disableBatch()
+      }
       await Promise.all(items.map((item) => this.#single(item)))
       return
     }
     const byId = new Map((body as RpcResponse[]).map((res) => [res.id, res]))
+    // 有的节点把 “方法数量超限” 放在批量结果的某一项里
+    const methodLimited = (body as RpcResponse[]).find((res) => /maximum number of '[^']+' calls in a batch/i.test(res.error?.message ?? ''))
+    if (methodLimited && (await this.#retryWithMethodLimit(items, methodLimited.error?.message))) {
+      return
+    }
     const limited = (body as RpcResponse[]).find((res) => isBatchLimitError(res.error?.message))
     if (limited) {
       // 如 “Batch of more than 3 requests are not allowed”：按限制缩小批量后重发；
@@ -229,11 +340,13 @@ export class HttpRpc implements RpcTransport {
       }
       return
     }
-    // 批量里个别调用被限频（JSON-RPC 429）：只把这些调用退避后单独重试
+    // 批量里个别调用被限频（JSON-RPC 429）：只把这些调用退避后单独重试一次（不再叠加 #post 的重试）；
+    // 整批都是 429 时 #post 已经退避重试过整批，不再逐条重试——否则请求数会成倍放大
+    const allLimited = isRateLimited(body)
     const limitedItems: Pending[] = []
     items.forEach((item, i) => {
       const response = byId.get(ids[i])
-      if (response?.error?.code === 429 && this.#retries > 0) {
+      if (response?.error?.code === 429 && this.#retries > 0 && !allLimited) {
         limitedItems.push(item)
       } else {
         settle(item, response)
@@ -241,34 +354,30 @@ export class HttpRpc implements RpcTransport {
     })
     if (limitedItems.length) {
       await new Promise((r) => setTimeout(r, 500))
-      await Promise.all(limitedItems.map((item) => this.#single(item)))
+      await Promise.all(limitedItems.map((item) => this.#single(item, 0)))
     }
   }
 
   /** 按当前的 maxBatchSize 重新分批发送（每批都比原来小，不会无限循环） */
   async #redispatch(items: Pending[]): Promise<void> {
-    const size = this.#maxBatchSize
-    const chunks: Pending[][] = []
-    for (let i = 0; i < items.length; i += size) {
-      chunks.push(items.slice(i, i + size))
-    }
-    await Promise.all(chunks.map((chunk) => this.#dispatch(chunk)))
+    await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
   }
 
-  async #single(item: Pending): Promise<void> {
+  async #single(item: Pending, retries = this.#retries): Promise<void> {
     try {
-      const body = (await this.#post({ jsonrpc: '2.0', id: nextId++, method: item.method, params: item.params })) as RpcResponse
+      const body = (await this.#post({ jsonrpc: '2.0', id: nextId++, method: item.method, params: item.params }, retries)) as RpcResponse
       settle(item, body)
     } catch (err) {
       item.reject(err)
     }
   }
 
+  /** 节点明确表示不支持批量：10 分钟内逐条请求，之后重新尝试批量（节点可能只是临时出错或已经升级） */
   #disableBatch(): void {
-    this.#batch = false
+    this.#batchDisabledUntil = Date.now() + BATCH_RETRY_AFTER
   }
 
-  async #post(payload: unknown): Promise<unknown> {
+  async #post(payload: unknown, retries = this.#retries): Promise<unknown> {
     for (let attempt = 0; ; attempt++) {
       let response: Response
       try {
@@ -283,11 +392,18 @@ export class HttpRpc implements RpcTransport {
         const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
         throw new HttpError(`Request to ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, undefined, timeout)
       }
-      if (response.status === 429 && attempt < this.#retries) {
+      if (response.status === 429 && attempt < retries) {
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
         continue
       }
-      const text = await response.text()
+      let text: string
+      try {
+        text = await response.text()
+      } catch (err) {
+        // 读响应体时超时或连接中断：同样包装成 HttpError（原生 DOMException / TypeError 不会被当成可恢复的节点问题）
+        const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
+        throw new HttpError(`Reading response from ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, response.status, timeout)
+      }
       let body: unknown
       try {
         body = parseJson(text)
@@ -299,7 +415,7 @@ export class HttpRpc implements RpcTransport {
         throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}`, response.status)
       }
       // 有的节点限频时返回 HTTP 200 + JSON-RPC 错误码 429：同样退避重试
-      if (attempt < this.#retries && isRateLimited(body)) {
+      if (attempt < retries && isRateLimited(body)) {
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
         continue
       }
@@ -326,7 +442,17 @@ function parseJson(text: string): unknown {
       typeof value === 'number' && !Number.isSafeInteger(value) && Number.isInteger(value) && context?.source ? context.source : value,
     )
   }
-  return JSON.parse(text.replace(/([:[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"'))
+  return JSON.parse(quoteBigIntegers(text))
+}
+
+/**
+ * 把 JSON 文本里数值位置上 16 位以上的整数改成字符串（不支持 source text access 的环境用）。
+ * 跳过字符串字面量：错误信息等字符串里的长数字不会被改动
+ */
+export function quoteBigIntegers(text: string): string {
+  return text.replace(/"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (token) =>
+    token[0] !== '"' && /^-?\d{16,}$/.test(token) ? `"${token}"` : token,
+  )
 }
 
 function safeOrigin(url: string): string {

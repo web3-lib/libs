@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- 只查主币余额时不再读回账户数据：`getSolBalances` 和单币模式（含 `getMultiBalances`）里的主币用 `getMultipleAccounts` + `dataSlice: { offset: 0, length: 0 }` 只取 lamports。原来钱包是数据很大的程序账户（如 105KB）时整份读回，并发查询会超时
+  - 单币模式下钱包账户第一次单独一组读；确认是普通钱包（系统账户或不存在，数据本来就为空）后，之后与 mint / ATA 账户放在同一个请求里，不多发请求、主币和代币来自同一个快照；程序账户等始终单独读
+  - 两组读取共用并发上限（同时最多 3 个 `getMultipleAccounts`），一个请求失败后不再发后面的批次
+- 修复：节点限制单个方法在一个批量请求里的数量时（如内置的 publicnode：`getMultipleAccounts` 最多 1 个，原来整批被拒、当成节点故障切换到下一个节点），按报错里的限制重新分批发送，之后的请求直接按限制分批。原来一次读取超过 100 个账户时就会碰到
+- 余额超过 2^53 lamports 时仍是精确值（新增回归测试，包括 HTTP 层对 JSON 大数的解析）
+- 修复：一次偶发的批量请求失败（如 -32603）就永久关闭 JSON-RPC 批量。现在整批被拒（HTTP 400 / 404 / 405 / 415 / 422，或返回整体错误、账户数超限除外）时这一批逐条重发，10 分钟内逐条请求，之后重新尝试批量
+- 修复：扫描模式和 `accounts: 'all'` 丢掉节点解析不了、退回 base64 的代币账户（如带新扩展的 Token-2022），余额被漏掉或算成 0。现在自己解析出 mint 和数量，decimals（以及节点没给的所属程序）读 mint 账户补上；补读不受 `minContextSlot` 约束、不计入 slot，读不到时只跳过这个代币
+- 修复：未初始化的 mint（创建和初始化之间读到）被当作 decimals = 0 并永久缓存，之后余额被放大
+- 修复：读响应体时超时或断连抛原生 `DOMException` / `TypeError`，单节点时 `ownerTokens` 读元数据的容错失效。现在同样包装成 `HttpError`（超时带 `timeout` 标记）
+- 修复：节点持续返回 JSON-RPC 429 时，批量重试之后又逐条重试，请求数放大约 20 倍。整批都是 429 时只在批量层重试；部分 429 时这些调用单独重试一次
+- 快捷函数的客户端缓存：配置的键顺序不同视为同一份；配置里有函数（如自定义 `fetch`）时按函数对象复用客户端（原来每次都新建）
+- 导入缓存（`importTokenMetaCache` / `persistTokenMetaCache`）：写入时间只接受有限值，晚于现在的截到现在（原来未来的时间会让 name / symbol 永不过期）；导入的所属程序第一次用时从链上确认（记错时 ATA 余额不再恒为 0）
+- 修复：不支持 `JSON.parse` 源文本访问的环境（Node 21 以下、老浏览器）里，大数兜底会改坏字符串里的长数字。现在跳过字符串字面量，只处理数值
+- 节点限制单次 `getMultipleAccounts` 的账户数（“Too many accounts requested”）时，减半后分多次请求并合并结果、记住上限，不再当成节点故障
+- `findProgramAddress` 检查种子：单个超过 32 字节、或超过 15 个（加上 bump 共 16 个）时抛错，与 web3.js 和链上一致
+
 ## 0.2.0
 
 - `getBalances` / `getOwnerTokens` 新增 `tokenPrograms`：按代币类型过滤，`['spl']` 不含 Token-2022（扫描时也不再请求 Token-2022 的代币账户），`['token-2022']` 反之；也可以传程序地址。不认识的值或空数组报错

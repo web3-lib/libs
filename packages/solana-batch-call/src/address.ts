@@ -92,14 +92,24 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return out
 }
 
+const MAX_SEED_LENGTH = 32
+const MAX_SEEDS = 16
+
 // PDA 推导是纯计算但要做多次 sha256 + 曲线判断，结果缓存
 const pdaCache = new Map<string, string>()
 
 /**
  * 推导 PDA（与 web3.js PublicKey.findProgramAddressSync 相同），返回地址。
- * seeds 每项不超过 32 字节。
+ * seeds 每项不超过 32 字节、最多 15 个（加上 bump 共 16 个，链上上限），超出时抛错。
  */
 export function findProgramAddress(seeds: Uint8Array[], programId: string): string {
+  // 与链上和 web3.js 一致：每个种子最多 32 字节；种子加上 bump 最多 16 个
+  if (seeds.some((seed) => seed.length > MAX_SEED_LENGTH)) {
+    throw new TypeError('Max seed length exceeded')
+  }
+  if (seeds.length + 1 > MAX_SEEDS) {
+    throw new TypeError('Max seeds exceeded')
+  }
   const key = `${programId}:${seeds.map((s) => encodeAddress(s)).join(',')}`
   const cached = pdaCache.get(key)
   if (cached) {

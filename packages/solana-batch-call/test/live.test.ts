@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from 'vitest'
 
-import { NATIVE_MINT, NetworkMismatchError, SolanaClient, TOKEN_2022_PROGRAM_ID, getBalances, getNftOwners, getNfts, getOwnerTokens, getTokens } from '../src/index.js'
+import { NATIVE_MINT, NetworkMismatchError, SolanaClient, TOKEN_2022_PROGRAM_ID, getBalances, getNftOwners, getNfts, getOwnerTokens, getSolBalances, getTokens } from '../src/index.js'
 
 const live = process.env.LIVE ? describe : describe.skip
 
@@ -23,6 +23,27 @@ live('内置公共节点（不需要索引方法）', () => {
     expect(usdc).toMatchObject({ decimals: 6, symbol: 'USDC', success: true })
     expect(pyusd).toMatchObject({ decimals: 6, symbol: 'PYUSD', tokenProgram: TOKEN_2022_PROGRAM_ID, success: true })
     expect(BigInt(usdc!.balance)).toBeGreaterThan(0n)
+  })
+
+  it('只查主币：余额超过 2^53 的大户也是精确值，与 getBalance 逐位一致', async () => {
+    const BIG = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM' // 交易所热钱包，余额变动频繁
+    const client = new SolanaClient() // commitment 默认 confirmed
+    // 三种方式都按 confirmed 读；钱包很活跃，三次读取之间余额可能变，不一致时重读（最多 5 次）
+    let readings: string[] = []
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const [[viaSol], [viaBalances], rpc] = await Promise.all([
+        client.solBalances([BIG]),
+        client.balances(BIG, [NATIVE_MINT]),
+        client.request<{ value: number | string }>('getBalance', [BIG, { commitment: 'confirmed' }]),
+      ])
+      readings = [viaSol!.balance, viaBalances!.balance, String(rpc.value)]
+      if (new Set(readings).size === 1) {
+        break
+      }
+    }
+    expect(BigInt(readings[0]!)).toBeGreaterThan(2n ** 53n)
+    // 精确字符串比较：按 number 解析会丢掉末几位
+    expect(new Set(readings).size).toBe(1)
   })
 
   it('getTokens：Metaplex 与 Token-2022 元数据', async () => {

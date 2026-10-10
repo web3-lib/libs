@@ -158,9 +158,15 @@ export function createMockNode(options: MockNodeOptions = {}) {
   const accounts = options.accounts ?? {}
   const calls: Array<{ method: string; params: readonly unknown[] }> = []
 
-  const raw = (address: string) => {
+  // 超过 2^53 的 lamports 按 HttpRpc 解析后的样子给字符串（真实节点返回 JSON 大数，由 HttpRpc 按原文取值）
+  const lamportsOf = (value: bigint) => (value > BigInt(Number.MAX_SAFE_INTEGER) ? value.toString() : Number(value))
+  /** dataSlice 与真实节点一致：只返回指定范围的账户数据 */
+  const raw = (address: string, slice?: { offset: number; length: number }) => {
     const a = accounts[address]
-    return a ? { lamports: Number(a.lamports ?? 0n), owner: a.owner, data: [base64.encode(a.data ?? new Uint8Array()), 'base64'], executable: false } : null
+    if (!a) return null
+    const data = a.data ?? new Uint8Array()
+    const sliced = slice ? data.slice(slice.offset, slice.offset + slice.length) : data
+    return { lamports: lamportsOf(a.lamports ?? 0n), owner: a.owner, data: [base64.encode(sliced), 'base64'], executable: false }
   }
 
   const parsedTokenAccounts = (owner: string, programId: string) =>
@@ -205,9 +211,12 @@ export function createMockNode(options: MockNodeOptions = {}) {
         case 'getGenesisHash':
           return (options.genesis ?? GENESIS_HASHES.mainnet) as T
         case 'getMultipleAccounts':
-          return { context: { slot: node.slot }, value: (params[0] as string[]).map(raw) } as T
+          return {
+            context: { slot: node.slot },
+            value: (params[0] as string[]).map((address) => raw(address, (params[1] as { dataSlice?: { offset: number; length: number } } | undefined)?.dataSlice)),
+          } as T
         case 'getBalance':
-          return { context: { slot: node.slot }, value: Number(accounts[params[0] as string]?.lamports ?? 0n) } as T
+          return { context: { slot: node.slot }, value: lamportsOf(accounts[params[0] as string]?.lamports ?? 0n) } as T
         case 'getTokenAccountsByOwner': {
           const filter = params[1] as { programId?: string; mint?: string }
           if (filter.mint !== undefined) {

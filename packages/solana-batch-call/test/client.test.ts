@@ -108,7 +108,7 @@ describe('accounts / solBalances', () => {
 })
 
 describe('balances（指定 mint：ATA 模式）', () => {
-  it('SOL + SPL Token + Token-2022 一次 getMultipleAccounts', async () => {
+  it('SOL + SPL Token + Token-2022：主币只读 lamports，代币账户另一组读数据（同一 tick 发出，合并成一个批量请求）', async () => {
     const { node, sol } = setup()
     const res = await sol.balances(OWNER, [NATIVE_MINT, USDC, PYUSD])
     expect(res).toEqual([
@@ -116,7 +116,13 @@ describe('balances（指定 mint：ATA 模式）', () => {
       { token: USDC, native: false, balance: '1234500000', decimals: 6, formatted: '1234.5', tokenProgram: TOKEN_PROGRAM_ID, success: true },
       { token: PYUSD, native: false, balance: '2000000', decimals: 6, formatted: '2', tokenProgram: TOKEN_2022_PROGRAM_ID, success: true },
     ])
-    expect(multipleAccountsCalls(node)).toHaveLength(1)
+    const calls = multipleAccountsCalls(node)
+    expect(calls).toHaveLength(2)
+    const sliced = calls.filter((c) => (c.params[1] as { dataSlice?: unknown }).dataSlice)
+    // 钱包账户（可能是数据很大的程序账户）单独一组、不读回数据；mint / ATA 那组照常读数据
+    expect(sliced.map((c) => c.params[0])).toEqual([[OWNER]])
+    expect((sliced[0]?.params[1] as { dataSlice: unknown }).dataSlice).toEqual({ offset: 0, length: 0 })
+    expect(calls.find((c) => c !== sliced[0])?.params[0]).not.toContain(OWNER)
     expect(node.calls.some((c) => c.method === 'getTokenAccountsByOwner')).toBe(false) // 免费节点也能用
   })
 
@@ -503,12 +509,17 @@ describe('独立函数', () => {
     expect(res[0]).toMatchObject({ balance: '1235000000', symbol: 'USDC' })
   })
 
-  it('客户端缓存：相同参数复用；undefined 配置项不影响；含函数的配置不复用', () => {
+  it('客户端缓存：相同参数复用；undefined 配置项不影响；键的顺序无关；同一个函数对象复用、不同函数不复用', () => {
     const node = createMockNode()
     const a = resolveClientForTest({ provider: node })
     expect(resolveClientForTest({ provider: node, commitment: undefined })).toBe(a)
     expect(resolveClientForTest({ provider: node, commitment: 'finalized' })).not.toBe(a)
-    const fetchFn = fetch
-    expect(resolveClientForTest({ provider: 'https://a.example', fetch: fetchFn })).not.toBe(resolveClientForTest({ provider: 'https://a.example', fetch: fetchFn }))
+    expect(resolveClientForTest({ provider: node, cluster: 'mainnet', commitment: 'finalized' })).toBe(
+      resolveClientForTest({ provider: node, commitment: 'finalized', cluster: 'mainnet' }),
+    )
+    const fetchFn = (...args: Parameters<typeof fetch>) => fetch(...args)
+    const withFetch = resolveClientForTest({ provider: 'https://a.example', fetch: fetchFn })
+    expect(resolveClientForTest({ provider: 'https://a.example', fetch: fetchFn })).toBe(withFetch)
+    expect(resolveClientForTest({ provider: 'https://a.example', fetch: (...args: Parameters<typeof fetch>) => fetch(...args) })).not.toBe(withFetch)
   })
 })

@@ -7,7 +7,8 @@ pnpm add @w3lib/solana-batch-call
 ```
 
 - **一次请求查一批**：账户读取用 `getMultipleAccounts`（自动去重、按 100 个一组拆分、最多同时 3 个请求）；同一 tick 内发起的 RPC 调用合并成一个 JSON-RPC 批量请求
-- **免费节点也能查余额**：指定代币时在本地推导关联代币账户（ATA）地址，和 SOL 账户、mint 账户一起一次读完，不需要 `getTokenAccountsByOwner` 这类索引方法
+- **免费节点也能查余额**：指定代币时在本地推导关联代币账户（ATA）地址，和 mint 账户一起用 `getMultipleAccounts` 读完，不需要 `getTokenAccountsByOwner` 这类索引方法
+- **只查主币不读账户数据**：SOL 余额（`getSolBalances`、单币模式里的主币）用带 `dataSlice` 的 `getMultipleAccounts` 只取 lamports，与代币账户分开两组、同一个批量请求发出——钱包是数据很大的程序账户时也不会拖慢或超时
 - **Token-2022**：余额、decimals、TokenMetadata 扩展里的 name / symbol / uri 都支持
 - **多节点故障切换**：限频、403、需要 API Key、不支持某方法等节点问题自动换下一个节点；节点不支持批量请求或限制批量大小时自动降级
 - **网络校验**：按创世区块哈希确认节点所在网络，不会把 devnet 的数据当成 mainnet 的返回
@@ -65,7 +66,7 @@ await getOwnerNfts(owner)    // 某地址持有的全部 NFT（需要支持索�
 | `getOwnerTokens(owner, opts)` | `ownerTokens` | 持有人的全部代币（资产列表），带 name / symbol；默认不含 NFT 和余额为 0 的账户；`tokenPrograms` 按代币类型过滤 |
 | `getMultiBalances(queries, opts)` | `multiBalances` | 多个钱包一次查，参数同 `getBalances` |
 | `watchBalances(owner, mints?, opts)` | — | 轮询余额，相同参数的订阅共用一份轮询，余额变化时才通知 `onChange`；返回取消函数 |
-| `getSolBalances(addresses, opts)` | `solBalances` | 多个地址的 SOL 余额 |
+| `getSolBalances(addresses, opts)` | `solBalances` | 多个地址的 SOL 余额（只读 lamports，不读回账户数据） |
 | `getTokens(mints, opts)` | `tokens` | 代币详情，`fields` 选择字段，结果类型随之收窄；`transferFee` 返回 Token-2022 转账手续费 |
 | `getNfts(mints, opts)` | `nfts` | NFT 元数据（Metaplex；Token-2022 NFT 取扩展） |
 | `getNftOwners(mints, opts)` | `nftOwners` | NFT 持有人 |

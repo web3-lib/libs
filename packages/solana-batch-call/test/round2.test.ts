@@ -295,7 +295,10 @@ describe('multiBalances', () => {
         [PYUSD, '4000000'],
       ],
     ])
-    expect(node.calls.filter((c) => c.method === 'getMultipleAccounts')).toHaveLength(1)
+    // 所有钱包的代币账户合成一组读数据，主币余额另一组只读 lamports
+    const calls = node.calls.filter((c) => c.method === 'getMultipleAccounts')
+    expect(calls).toHaveLength(2)
+    expect(calls.filter((c) => (c.params[1] as { dataSlice?: unknown }).dataSlice).map((c) => c.params[0])).toEqual([[OWNER]])
     expect(res.flat().every((r) => r.slot === 1)).toBe(true)
   })
 
@@ -324,7 +327,8 @@ describe('watchBalances', () => {
     const stopA = watchBalances(OWNER, [NATIVE_MINT, USDC], { provider: node, interval: 30, onChange: (list) => seenA.push(list.map((r) => r.balance)) })
     const stopB = watchBalances(OWNER, [USDC, NATIVE_MINT], { provider: node, interval: 30, onChange: (list) => seenB.push(list.map((r) => r.balance)) })
     await new Promise((r) => setTimeout(r, 100))
-    const requests = node.calls.filter((c) => c.method === 'getMultipleAccounts').length
+    // 每次轮询钱包账户正好出现在一个请求里（第一次单独带 dataSlice，确认是普通钱包后与代币账户同一个请求），按它数轮询次数
+    const requests = node.calls.filter((c) => c.method === 'getMultipleAccounts' && (c.params[0] as string[]).includes(OWNER)).length
     expect(requests).toBeGreaterThanOrEqual(2)
     expect(requests).toBeLessThanOrEqual(5) // 两个订阅共用一份轮询
     expect(seenA).toEqual([['1500000000', '1000000']]) // 余额没变，只通知第一次

@@ -241,6 +241,8 @@ const TOKEN_STANDARDS: readonly TokenStandard[] = [
 interface TokenMeta {
   decimals?: number
   tokenProgram?: string
+  /** tokenProgram 来自导入的缓存、还没从链上确认过：ATA 模式第一次用时按程序未知处理（推导两个程序的 ATA、读 mint 确认） */
+  programUnverified?: boolean
   /** null：确认没有元数据 */
   name?: string | null
   symbol?: string | null
@@ -257,6 +259,29 @@ const NAME_TTL = 60 * 60 * 1000
 const MAX_CACHED_TOKENS = 50_000
 const tokenMetaCache = new Map<string, CachedMeta>()
 
+// 已知数据为空的钱包账户（系统账户或不存在）：ATA 模式下和代币账户放在同一个请求里读，不必单独带 dataSlice 多发一个请求。
+// 按 scope + 地址记，最多 1 万个，超出淘汰最早的；读到不是系统账户（如程序账户）时移除
+const MAX_SMALL_OWNERS = 10_000
+const smallOwners = new Set<string>()
+
+function isSmallOwner(scope: string, owner: string): boolean {
+  return smallOwners.has(`${scope}:${owner}`)
+}
+
+/** 根据只读 lamports 的结果判断钱包账户是否“数据为空”（dataSlice 读不到数据长度，按所属程序判断：系统账户的数据为空） */
+function learnOwner(scope: string, owner: string, account: AccountInfo | null): void {
+  const key = `${scope}:${owner}`
+  if (account === null || account.owner === SYSTEM_PROGRAM_ID) {
+    smallOwners.delete(key)
+    smallOwners.add(key)
+    if (smallOwners.size > MAX_SMALL_OWNERS) {
+      smallOwners.delete(smallOwners.values().next().value as string)
+    }
+  } else {
+    smallOwners.delete(key)
+  }
+}
+
 let clientIds = 0
 
 /** 缓存写入监听（persistTokenMetaCache 用） */
@@ -264,6 +289,7 @@ const cacheWriteListeners = new Set<() => void>()
 
 /** 测试用：清空代币信息缓存 */
 export function resetTokenMetaCache(): void {
+  smallOwners.clear()
   tokenMetaCache.clear()
 }
 
@@ -285,7 +311,8 @@ export function exportTokenMetaCache(maxEntries = Number.POSITIVE_INFINITY): Tok
   const entries: TokenMetaSnapshot['entries'] = []
   for (const [key, meta] of tokenMetaCache) {
     if (SHARED_SCOPES.has(key.slice(0, key.indexOf(':')))) {
-      entries.push([key, { ...meta }])
+      const { programUnverified: _, ...exported } = meta
+      entries.push([key, exported])
     }
   }
   return { version: 1, entries: entries.slice(Math.max(0, entries.length - maxEntries)) }
@@ -319,11 +346,20 @@ function validMeta(entry: unknown): CachedMeta | null {
   }
   const meta: CachedMeta = {}
   if (typeof raw.decimals === 'number' && Number.isInteger(raw.decimals) && raw.decimals >= 0 && raw.decimals <= 255) meta.decimals = raw.decimals
-  if (raw.tokenProgram === TOKEN_PROGRAM_ID || raw.tokenProgram === TOKEN_2022_PROGRAM_ID) meta.tokenProgram = raw.tokenProgram
-  if (typeof raw.namesAt === 'number' && (typeof raw.name === 'string' || raw.name === null) && (typeof raw.symbol === 'string' || raw.symbol === null)) {
+  if (raw.tokenProgram === TOKEN_PROGRAM_ID || raw.tokenProgram === TOKEN_2022_PROGRAM_ID) {
+    meta.tokenProgram = raw.tokenProgram
+    meta.programUnverified = true
+  }
+  // 写入时间只接受有限值、且不晚于现在（留 1 分钟时钟误差）：未来的时间会让 name / symbol 永不过期，截到现在
+  if (
+    typeof raw.namesAt === 'number' &&
+    Number.isFinite(raw.namesAt) &&
+    (typeof raw.name === 'string' || raw.name === null) &&
+    (typeof raw.symbol === 'string' || raw.symbol === null)
+  ) {
     meta.name = raw.name
     meta.symbol = raw.symbol
-    meta.namesAt = raw.namesAt
+    meta.namesAt = Math.min(raw.namesAt, Date.now())
   }
   return Object.keys(meta).length ? meta : null
 }
@@ -395,7 +431,32 @@ interface Holding {
 
 interface ParsedTokenAccount {
   pubkey: string
-  account: { owner: string; data: { parsed?: { info?: { mint?: string; owner?: string; tokenAmount?: { amount?: string; decimals?: number } } } } }
+  account: {
+    owner: string
+    // 节点解析不了的账户（如 Token-2022 的新扩展）会退回 base64：["…", "base64"]
+    data: { parsed?: { info?: { mint?: string; owner?: string; tokenAmount?: { amount?: string; decimals?: number } } } } | [string, string] | string
+  }
+}
+
+/** jsonParsed 结果里的一个代币账户：节点解析好的直接取；退回 base64 的自己解析（这时没有 decimals，要从 mint 账户补） */
+function readTokenEntry(entry: ParsedTokenAccount): { mint: string; amount: bigint; decimals: number | undefined } | null {
+  const data = entry.account?.data
+  if (data && !Array.isArray(data) && typeof data === 'object') {
+    const info = data.parsed?.info
+    if (info?.mint && info.tokenAmount?.decimals !== undefined) {
+      return { mint: info.mint, amount: BigInt(info.tokenAmount.amount ?? '0'), decimals: info.tokenAmount.decimals }
+    }
+  }
+  const encoded = Array.isArray(data) ? (data[1] === 'base64' ? data[0] : undefined) : typeof data === 'string' ? data : undefined
+  if (encoded === undefined) {
+    return null
+  }
+  try {
+    const parsed = parseTokenAccount(base64.decode(encoded))
+    return { mint: parsed.mint, amount: parsed.amount, decimals: undefined }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -414,7 +475,8 @@ interface ParsedTokenAccount {
  */
 /** ATA 模式下单个代币的查询计划（multiBalances 时多个钱包共用一次 getMultipleAccounts） */
 type AtaItem =
-  | { kind: 'native'; mint: string; owner: number }
+  /** owner：钱包地址（主币余额按地址从两组结果里取） */
+  | { kind: 'native'; mint: string; owner: string }
   | { kind: 'invalid'; mint: string }
   | { kind: 'excluded'; mint: string }
   | { kind: 'token'; mint: string; mintIndex: number; metadataIndex: number; atas: Array<{ program: string; index: number }> }
@@ -497,58 +559,87 @@ export class SolanaClient {
   }
 
   /**
-   * getMultipleAccounts：去重、按 100 个一组，最多同时 3 组（避免大批量时触发节点限频）。
-   * tolerant 为 true 时，某组因节点问题（网络、限频等）失败不抛错：该组标记为 FAILED，并且不再发后面的组（节点已经在限频了）。
+   * 只读 lamports（主币余额）：getMultipleAccounts 带 dataSlice { offset: 0, length: 0 }，不读回账户数据——
+   * 钱包可能是数据很大的程序账户（上百 KB），整份读回会拖慢甚至超时。结果与 addresses 一一对应，账户不存在或地址非法时为 null
    */
+  async #lamports(addresses: readonly string[], ctx: QueryContext): Promise<(bigint | null)[]> {
+    const [fetched] = await this.#fetchGroups([{ addresses, lamportsOnly: true }], false, ctx)
+    return addresses.map((address) => (fetched?.get(address) as AccountInfo | null | undefined)?.lamports ?? null)
+  }
+
+  /** getMultipleAccounts（读账户数据）：见 #fetchGroups */
   async #fetchAccounts(addresses: readonly string[], tolerant: boolean, ctx: QueryContext): Promise<Map<string, AccountInfo | null | typeof FAILED>> {
-    const unique = [...new Set(addresses.filter((a) => isAddress(a)))]
-    const chunks: string[][] = []
-    for (let i = 0; i < unique.length; i += MAX_ACCOUNTS_PER_REQUEST) {
-      chunks.push(unique.slice(i, i + MAX_ACCOUNTS_PER_REQUEST))
-    }
-    const result = new Map<string, AccountInfo | null | typeof FAILED>()
+    const [fetched] = await this.#fetchGroups([{ addresses, lamportsOnly: false }], tolerant, ctx)
+    return fetched as Map<string, AccountInfo | null | typeof FAILED>
+  }
+
+  /**
+   * getMultipleAccounts：每组去重、按 100 个一组拆分，所有组的请求一起排队，最多同时 3 个（避免大批量时触发节点限频）。
+   * lamportsOnly 的组带 dataSlice（长度 0，对同一请求里的所有账户生效，所以只要 lamports 的账户要单独成组）。
+   * tolerant 为 true 时，某个请求因节点问题（网络、限频等）失败不抛错：该请求的账户标记为 FAILED，并且不再发后面的请求（节点已经在限频了）；
+   * 否则第一个错误抛出，后面的请求也不再发。结果按组返回
+   */
+  async #fetchGroups(
+    groups: ReadonlyArray<{ addresses: readonly string[]; lamportsOnly: boolean }>,
+    tolerant: boolean,
+    ctx: QueryContext,
+  ): Promise<Array<Map<string, AccountInfo | null | typeof FAILED>>> {
+    const chunks: Array<{ group: number; addresses: string[]; lamportsOnly: boolean }> = []
+    groups.forEach(({ addresses, lamportsOnly }, group) => {
+      const unique = [...new Set(addresses.filter((a) => isAddress(a)))]
+      for (let i = 0; i < unique.length; i += MAX_ACCOUNTS_PER_REQUEST) {
+        chunks.push({ group, addresses: unique.slice(i, i + MAX_ACCOUNTS_PER_REQUEST), lamportsOnly })
+      }
+    })
+    const results = groups.map(() => new Map<string, AccountInfo | null | typeof FAILED>())
     let aborted = false
     for (let i = 0; i < chunks.length; i += MAX_PARALLEL_ACCOUNT_REQUESTS) {
       const wave = chunks.slice(i, i + MAX_PARALLEL_ACCOUNT_REQUESTS)
-      // 已取消的查询不再发后面的组
+      // 已取消的查询不再发后面的请求
       if (ctx.signal?.aborted) {
         throw ctx.signal.reason
       }
       if (aborted) {
-        wave.flat().forEach((address) => result.set(address, FAILED))
+        wave.forEach((chunk) => chunk.addresses.forEach((address) => results[chunk.group]?.set(address, FAILED)))
         continue
       }
-      await Promise.all(
+      // 同一批里的请求同时发出（合并成一个 JSON-RPC 批量请求）；一个失败时等这一批都结束再抛，后面的批次不再发
+      const settled = await Promise.allSettled(
         wave.map(async (chunk) => {
+          const result = results[chunk.group] as Map<string, AccountInfo | null | typeof FAILED>
           try {
             const res = await this.#call<{ value: Array<RawAccount | null> }>(ctx, 'getMultipleAccounts', [
-              chunk,
-              { encoding: 'base64', commitment: this.#commitment },
+              chunk.addresses,
+              { encoding: 'base64', commitment: this.#commitment, ...(chunk.lamportsOnly ? { dataSlice: { offset: 0, length: 0 } } : {}) },
             ])
-            chunk.forEach((address, j) => result.set(address, toAccountInfo(address, res?.value?.[j] ?? null)))
+            chunk.addresses.forEach((address, j) => result.set(address, toAccountInfo(address, res?.value?.[j] ?? null)))
           } catch (err) {
             if (!tolerant || !isRecoverable(err)) {
               throw err
             }
             aborted = true
-            chunk.forEach((address) => result.set(address, FAILED))
+            chunk.addresses.forEach((address) => result.set(address, FAILED))
           }
         }),
       )
+      const failed = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected')
+      if (failed) {
+        throw failed.reason
+      }
     }
-    return result
+    return results
   }
 
-  /** 批量查多个地址的 SOL 余额（一次 getMultipleAccounts；账户不存在视为 0） */
+  /** 批量查多个地址的 SOL 余额（getMultipleAccounts 只读 lamports、不读回账户数据；账户不存在视为 0） */
   solBalances(addresses: readonly string[], options: SolBalancesOptions = {}): Promise<SolBalance[]> {
     return abortable(options.signal, async () => {
       const ctx = this.#context(options)
-      const accounts = await this.#accounts(addresses, ctx)
+      const balances = await this.#lamports(addresses, ctx)
       const list = addresses.map((address, i): SolBalance => {
         if (!isAddress(address)) {
           return { address, balance: '0', formatted: '0', success: false, error: 'invalid-address' }
         }
-        const lamports = accounts[i]?.lamports ?? 0n
+        const lamports = balances[i] ?? 0n
         return { address, balance: lamports.toString(), formatted: formatUnits(lamports, SOL_DECIMALS), success: true }
       })
       return this.#attachSlot(list, ctx, options)
@@ -562,7 +653,7 @@ export class SolanaClient {
   /**
    * 批量查余额（主币 SOL + SPL Token + Token-2022），返回原始余额、decimals 和换算后的数值。
    *
-   * - 传 mints：本地推导 ATA，与主币账户、mint 账户一起用 getMultipleAccounts 一次读完，免费节点也能用
+   * - 传 mints：本地推导 ATA，与 mint 账户一起用 getMultipleAccounts 读完，免费节点也能用；主币只读 lamports（dataSlice），另成一组同时发出
    * - 传 mints 且 accounts: 'all'：每个代币按 mint 过滤查 getTokenAccountsByOwner，统计全部代币账户（含非 ATA）
    * - 不传 mints（或 scan: true）：用 getTokenAccountsByOwner 扫描全部代币账户，返回所有余额大于 0 的代币
    * - 失败项（success: false）带 error：invalid-address（mint 地址非法）/ not-found（mint 不存在）/ not-token（不是代币 mint）
@@ -621,26 +712,49 @@ export class SolanaClient {
   /** ATA 模式：所有钱包的 主币账户 / mint / 元数据 / ATA 一起读，结果按钱包分组 */
   async #ataBalances(ctx: QueryContext, queries: readonly BalanceQuery[], withSymbol: boolean, allowed: readonly string[]): Promise<TokenBalance[][]> {
     const scope = this.#scope()
+    // 要数据的账户（mint、元数据、ATA）一组；钱包账户只要 lamports：已知是普通钱包（系统账户 / 不存在，数据为空）的
+    // 放进同一组（一个请求、同一个快照），其余（可能是数据很大的程序账户）单独一组带 dataSlice——同时发出，合并在同一个 JSON-RPC 批量请求里
     const addresses: string[] = []
-    const plans = queries.map(({ owner, mints }) => mints.map((mint) => this.#ataPlan(scope, owner, mint, withSymbol, allowed, addresses)))
-    const accounts = addresses.length ? await this.#accounts(addresses, ctx) : []
-    return plans.map((plan) => plan.flatMap((item) => this.#ataResult(scope, item, accounts, withSymbol, allowed)))
+    const owners: string[] = []
+    const plans = queries.map(({ owner, mints }) => mints.map((mint) => this.#ataPlan(scope, owner, mint, withSymbol, allowed, addresses, owners)))
+    const [dataMap, ownerMap] = await this.#fetchGroups(
+      [
+        { addresses, lamportsOnly: false },
+        { addresses: owners, lamportsOnly: true },
+      ],
+      false,
+      ctx,
+    )
+    // 记下钱包账户是否数据为空：单独读的按结果学习；已放进代币那组的，读到不再是系统账户（如被分配给程序）时移除，下次单独读
+    for (const owner of new Set(queries.map((q) => q.owner))) {
+      // null（账户不存在）也是结果，不能用 ?? 落到另一组
+      const account = ownerMap?.has(owner) ? ownerMap.get(owner) : dataMap?.get(owner)
+      if (account !== undefined && account !== FAILED) {
+        learnOwner(scope, owner, account)
+      }
+    }
+    const accounts = addresses.map((address) => (dataMap?.get(address) as AccountInfo | null | undefined) ?? null)
+    const lamportsOf = (owner: string) => ((ownerMap?.has(owner) ? ownerMap.get(owner) : dataMap?.get(owner)) as AccountInfo | null | undefined)?.lamports ?? 0n
+    return plans.map((plan) => plan.flatMap((item) => this.#ataResult(scope, item, accounts, lamportsOf, withSymbol, allowed)))
   }
 
-  #ataPlan(scope: string, owner: string, mint: string, withSymbol: boolean, allowed: readonly string[], addresses: string[]): AtaItem {
+  #ataPlan(scope: string, owner: string, mint: string, withSymbol: boolean, allowed: readonly string[], addresses: string[], owners: string[]): AtaItem {
     if (this.#nativeMints.has(mint)) {
-      return { kind: 'native', mint, owner: addresses.push(owner) - 1 }
+      ;(isSmallOwner(scope, owner) ? addresses : owners).push(owner)
+      return { kind: 'native', mint, owner }
     }
     if (!isAddress(mint)) {
       return { kind: 'invalid', mint }
     }
     const meta = getMeta(scope, mint)
-    if (isExcluded(meta.tokenProgram, allowed)) {
+    // 导入的缓存里的所属程序没确认过：按未知处理（记错时不会让余额恒为 0）
+    const program = meta.programUnverified ? undefined : meta.tokenProgram
+    if (isExcluded(program, allowed)) {
       return { kind: 'excluded', mint }
     }
-    const needMint = meta.decimals === undefined || meta.tokenProgram === undefined || (withSymbol && meta.symbol === undefined)
+    const needMint = meta.decimals === undefined || program === undefined || (withSymbol && meta.symbol === undefined)
     // 所属程序未知时只推导允许的程序的 ATA，读到 mint 账户后再确认
-    const programs = meta.tokenProgram ? [meta.tokenProgram] : allowed
+    const programs = program ? [program] : allowed
     return {
       kind: 'token',
       mint,
@@ -650,9 +764,16 @@ export class SolanaClient {
     }
   }
 
-  #ataResult(scope: string, item: AtaItem, accounts: readonly (AccountInfo | null)[], withSymbol: boolean, allowed: readonly string[]): TokenBalance[] {
+  #ataResult(
+    scope: string,
+    item: AtaItem,
+    accounts: readonly (AccountInfo | null)[],
+    lamportsOf: (owner: string) => bigint,
+    withSymbol: boolean,
+    allowed: readonly string[],
+  ): TokenBalance[] {
     if (item.kind === 'native') {
-      const lamports = accounts[item.owner]?.lamports ?? 0n
+      const lamports = lamportsOf(item.owner)
       return [
         withSymbolField(
           { token: item.mint, native: true, balance: lamports.toString(), decimals: SOL_DECIMALS, formatted: formatUnits(lamports, SOL_DECIMALS), tokenProgram: null, success: true },
@@ -675,21 +796,24 @@ export class SolanaClient {
       item.metadataIndex === -1 ? null : (accounts[item.metadataIndex] ?? null),
       item.metadataIndex !== -1 && item.mintIndex !== -1,
     )
-    // 代币账户由哪个程序持有就是哪个；mint 账户的 owner 也能确定程序
+    // 代币账户由哪个程序持有就是哪个；mint 账户的 owner 也能确定程序。
+    // 所属程序未知时推导了两个程序的 ATA，但一个 mint 只属于一个程序，另一个程序下不可能有这个 mint 的代币账户：找到就结束
     let amount = 0n
     for (const ata of item.atas) {
       const account = accounts[ata.index]
-      if (account && account.owner === ata.program) {
-        try {
-          amount = parseTokenAccount(account.data).amount
-          if (meta.tokenProgram === undefined) {
-            setMeta(scope, item.mint, { tokenProgram: ata.program })
-            meta.tokenProgram = ata.program
-          }
-        } catch {
-          // 不是代币账户
-        }
+      if (!account || account.owner !== ata.program) {
+        continue
       }
+      try {
+        amount = parseTokenAccount(account.data).amount
+      } catch {
+        continue // 不是代币账户
+      }
+      if (meta.tokenProgram === undefined) {
+        setMeta(scope, item.mint, { tokenProgram: ata.program })
+        meta.tokenProgram = ata.program
+      }
+      break
     }
     // 读到 mint 账户后才知道是不允许的程序
     if (isExcluded(meta.tokenProgram, allowed)) {
@@ -717,7 +841,12 @@ export class SolanaClient {
   }
 
   /** 扫描持有人的 SOL 余额和全部代币账户（默认 Token + Token-2022，只请求 programs 里的程序），同一代币的多个账户合计 */
-  async #scanHoldings(ctx: QueryContext, owner: string, programs: readonly string[] = TOKEN_PROGRAMS): Promise<{ sol: bigint; held: Map<string, Holding> }> {
+  async #scanHoldings(
+    ctx: QueryContext,
+    owner: string,
+    programs: readonly string[] = TOKEN_PROGRAMS,
+    withSymbol = false,
+  ): Promise<{ sol: bigint; held: Map<string, Holding> }> {
     const scope = this.#scope()
     const [lamports, ...results] = await Promise.all([
       this.#call<{ value: number | string }>(ctx, 'getBalance', [owner, { commitment: this.#commitment }]),
@@ -725,22 +854,47 @@ export class SolanaClient {
         this.#call<{ value: ParsedTokenAccount[] }>(ctx, 'getTokenAccountsByOwner', [owner, { programId }, { encoding: 'jsonParsed', commitment: this.#commitment }]),
       ),
     ])
-    const held = new Map<string, Holding>()
-    programs.forEach((program, i) => {
-      for (const entry of results[i]?.value ?? []) {
-        const info = entry.account?.data?.parsed?.info
-        const mint = info?.mint
-        const decimals = info?.tokenAmount?.decimals
-        if (!mint || decimals === undefined) {
-          continue
-        }
-        const prev = held.get(mint)
-        const amount = BigInt(info?.tokenAmount?.amount ?? '0')
-        held.set(mint, { amount: (prev?.amount ?? 0n) + amount, decimals, program, accounts: (prev?.accounts ?? 0) + 1 })
-        setMeta(scope, mint, { decimals, tokenProgram: program })
-      }
-    })
+    const entries = programs.flatMap((program, i) => (results[i]?.value ?? []).map((entry) => ({ program, entry })))
+    const held = await this.#collectHoldings(ctx, scope, entries, withSymbol)
     return { sol: BigInt(lamports.value), held }
+  }
+
+  /**
+   * 把 getTokenAccountsByOwner（jsonParsed）的结果按 mint 汇总。节点解析不了、退回 base64 的账户自己解析，
+   * decimals 读 mint 账户补上（不丢弃，也不会把余额算成 0）；mint 读不到 decimals 时才跳过
+   */
+  async #collectHoldings(
+    ctx: QueryContext,
+    scope: string,
+    entries: ReadonlyArray<{ program: string | undefined; entry: ParsedTokenAccount }>,
+    withSymbol = false,
+  ): Promise<Map<string, Holding>> {
+    const read = entries.flatMap(({ program, entry }) => {
+      const token = readTokenEntry(entry)
+      return token ? [{ ...token, program: entry.account?.owner || program }] : []
+    })
+    read.forEach(({ mint, decimals, program }) => decimals !== undefined && program !== undefined && setMeta(scope, mint, { decimals, tokenProgram: program }))
+    // 缺 decimals 或所属程序（节点没给账户 owner）的读 mint 账户补上；需要 symbol 时一起读，后面不必再读一遍
+    const unknown = [
+      ...new Set(read.filter((t) => getMeta(scope, t.mint).decimals === undefined || (t.program === undefined && getMeta(scope, t.mint).tokenProgram === undefined)).map((t) => t.mint)),
+    ]
+    if (unknown.length) {
+      // 补读 mint 不受 minContextSlot 约束、不计入扫描的 slot（decimals / 所属程序不会因为刚成交而变化）；
+      // 节点问题时不让整次扫描失败，读不到的代币跳过
+      await this.#loadMeta({ signal: ctx.signal }, scope, unknown, withSymbol, true)
+    }
+    const held = new Map<string, Holding>()
+    for (const { mint, amount, program: entryProgram } of read) {
+      const meta = getMeta(scope, mint)
+      const decimals = meta.decimals
+      const program = entryProgram ?? (meta.programUnverified ? undefined : meta.tokenProgram)
+      if (decimals === undefined || program === undefined) {
+        continue
+      }
+      const prev = held.get(mint)
+      held.set(mint, { amount: (prev?.amount ?? 0n) + amount, decimals, program, accounts: (prev?.accounts ?? 0) + 1 })
+    }
+    return held
   }
 
   /**
@@ -761,7 +915,7 @@ export class SolanaClient {
       const { metadata = true, includeNative = true, includeZero = false, includeNfts = false } = options
       const scope = this.#scope()
       const ctx = this.#context(options)
-      const { sol, held } = await this.#scanHoldings(ctx, owner, resolvePrograms(options.tokenPrograms))
+      const { sol, held } = await this.#scanHoldings(ctx, owner, resolvePrograms(options.tokenPrograms), metadata)
       const scanSlot = ctx.slot
       // Wrapped SOL 是独立的代币账户（需要 unwrap 才是 SOL），资产列表里单独列出（native: false）
       const tokens = [...held].filter(([, h]) => (includeZero || h.amount > 0n) && (includeNfts || !isNftHolding(h)))
@@ -797,7 +951,7 @@ export class SolanaClient {
   async #scanBalances(ctx: QueryContext, owner: string, mints: readonly string[] | undefined, withSymbol: boolean, allowed: readonly string[]): Promise<TokenBalance[]> {
     const scope = this.#scope()
     // held 里只有允许的程序的代币
-    const { sol, held } = await this.#scanHoldings(ctx, owner, allowed)
+    const { sol, held } = await this.#scanHoldings(ctx, owner, allowed, withSymbol)
 
     // Wrapped SOL（So111…112）默认按原生 SOL 处理：余额列表里只有一项 SOL，不再列出 wSOL 代币账户
     // 第一项是主币：用 nativeMints 里的地址（nativeMints 不含 So111…112 时 wSOL 作为普通代币列出，不能再拿它当 SOL）
@@ -834,7 +988,15 @@ export class SolanaClient {
    */
   async #mintAccountBalances(ctx: QueryContext, owner: string, mints: readonly string[], withSymbol: boolean, allowed: readonly string[]): Promise<TokenBalance[]> {
     const scope = this.#scope()
-    const queried = [...new Set(mints.filter((mint) => !this.#nativeMints.has(mint) && isAddress(mint) && !isExcluded(getMeta(scope, mint).tokenProgram, allowed)))]
+    // 导入的、未经链上确认的所属程序不用来排除代币（可能记错）：照常查询，从链上学到后再按程序过滤
+    const queried = [
+      ...new Set(
+        mints.filter((mint) => {
+          const meta = getMeta(scope, mint)
+          return !this.#nativeMints.has(mint) && isAddress(mint) && (meta.programUnverified || !isExcluded(meta.tokenProgram, allowed))
+        }),
+      ),
+    ]
     const [lamports, ...results] = await Promise.all([
       mints.some((mint) => this.#nativeMints.has(mint))
         ? this.#call<{ value: number | string }>(ctx, 'getBalance', [owner, { commitment: this.#commitment }])
@@ -849,20 +1011,12 @@ export class SolanaClient {
         ),
       ),
     ])
-    const held = new Map<string, Holding>()
-    queried.forEach((mint, i) => {
-      for (const entry of results[i]?.value ?? []) {
-        const decimals = entry.account?.data?.parsed?.info?.tokenAmount?.decimals
-        const program = entry.account?.owner
-        if (decimals === undefined || !program) {
-          continue
-        }
-        const prev = held.get(mint)
-        const amount = BigInt(entry.account.data.parsed?.info?.tokenAmount?.amount ?? '0')
-        held.set(mint, { amount: (prev?.amount ?? 0n) + amount, decimals, program, accounts: (prev?.accounts ?? 0) + 1 })
-        setMeta(scope, mint, { decimals, tokenProgram: program })
-      }
-    })
+    const held = await this.#collectHoldings(
+      ctx,
+      scope,
+      queried.flatMap((_, i) => (results[i]?.value ?? []).map((entry) => ({ program: entry.account?.owner, entry }))),
+      withSymbol,
+    )
     // 没持有的代币补 decimals（同时确认 mint 是否存在），需要时补 symbol
     const failures = await this.#loadMeta(ctx, scope, queried, withSymbol)
     const sol = BigInt(lamports?.value ?? 0)
@@ -1241,7 +1395,9 @@ function safeParseMint(account: AccountInfo): MintInfo | null {
     return null
   }
   try {
-    return parseMint(account.data)
+    const mint = parseMint(account.data)
+    // 未初始化的 mint（创建和初始化分在两笔交易里，恰好在中间读到）：decimals 还是 0，不能当真、更不能永久缓存
+    return mint.isInitialized ? mint : null
   } catch {
     return null
   }
@@ -1278,6 +1434,9 @@ function setMeta(scope: string, mint: string, meta: TokenMeta): void {
   }
   const key = `${scope}:${mint}`
   const merged = { ...tokenMetaCache.get(key), ...defined }
+  if ('tokenProgram' in defined && !defined.programUnverified) {
+    delete merged.programUnverified // 从链上学到了所属程序
+  }
   tokenMetaCache.delete(key) // 重新插入，保持“最近写入在后”的顺序
   tokenMetaCache.set(key, merged)
   if (tokenMetaCache.size > MAX_CACHED_TOKENS) {
