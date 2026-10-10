@@ -125,7 +125,7 @@ describe('06 钱包的健康状态按链分开记', () => {
   })
 })
 
-describe('07 各节点的“区块不存在”报错都只换节点、不冷却', () => {
+describe('07 各节点的“区块不存在”报错都只换节点、不冷却（几秒内排到后面，之后恢复）', () => {
   it.each([
     'unsupported block number 123',
     'block is out of range',
@@ -137,8 +137,14 @@ describe('07 各节点的“区块不存在”报错都只换节点、不冷却'
     const behind = scripted('behind', log, () => Promise.reject(makeError(message, 'SERVER_ERROR', { request: null as any, response: null as any })))
     const rpc = new FallbackRpc([behind, scripted('ok', log, async () => 1n)])
     await rpc.getBalance(USER)
-    await rpc.getBalance(USER)
-    expect(log).toEqual(['behind', 'ok', 'behind', 'ok'])
+    await rpc.getBalance(USER) // 几秒内先问别的节点
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6_000)
+    try {
+      await rpc.getBalance(USER) // 不是 30 秒的冷却：几秒后又先问它
+    } finally {
+      clock.mockRestore()
+    }
+    expect(log).toEqual(['behind', 'ok', 'ok', 'behind', 'ok'])
   })
 })
 
@@ -234,5 +240,155 @@ describe('review 修复（第二轮）', () => {
     await flaky.getBalance(USER)
     await flaky.getBalance(USER)
     expect(log).toEqual(['flaky', 'ok', 'flaky']) // 返回过 null 的节点没被冷却，下次仍排第一
+  })
+})
+
+describe('minBlock：落后但不报错的节点（返回较旧区块）时换节点，不在它身上反复重试', () => {
+  it('第一个节点落后、第二个已跟上：只问第一个节点一次就换到第二个，立即返回', async () => {
+    const mk = (height: number) =>
+      createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) }, multicallAddresses: [MULTICALL3_ADDRESS], blockNumber: height, ignoreFutureBlock: true })
+    for (const deployless of [false, true]) {
+      resetNodeHealth()
+      resetMulticallCache()
+      const behind = mk(100)
+      const ahead = mk(110)
+      const started = Date.now()
+      const [r] = await new Provider(56, [behind, ahead], { deployless }).balances(USER, [TOKEN], { minBlock: 105 })
+      expect(r?.blockNumber).toBe(110)
+      expect(Date.now() - started).toBeLessThan(500)
+      expect(behind.calls).toHaveLength(1)
+    }
+  })
+
+  it('所有节点都落后时等待，跟上后返回；不会把落后误判成 Multicall3 不可用', async () => {
+    const started = Date.now()
+    // 区块高度要晚于 BSC 上 Multicall3 的部署区块（15921452），否则按区块号重查时本来就该走 deployless
+    const height = () => (Date.now() - started > 500 ? 30_000_006 : 30_000_000)
+    const mk = () => createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) }, multicallAddresses: [MULTICALL3_ADDRESS], blockNumber: height, ignoreFutureBlock: true })
+    const [a, b] = [mk(), mk()]
+    const multi = new Provider(56, [a, b])
+    const [r] = await multi.balances(USER, [TOKEN], { minBlock: 30_000_005 })
+    expect(r?.blockNumber).toBeGreaterThanOrEqual(30_000_005)
+    await multi.balances(USER, [TOKEN])
+    expect([...a.calls, ...b.calls].every((c) => c.to)).toBe(true) // 始终用合约，没有退回 deployless
+  })
+
+  it('Arbitrum 系：用 L2 区块号判断是否落后（block.number 是 L1 区块号，不能拿来比较）', async () => {
+    const arbSys = (height: number) => () => ({ success: true, returnData: '0x' + BigInt(height).toString(16).padStart(64, '0') })
+    const mk = (l2: number) =>
+      createMockProvider({
+        contracts: { '0x0000000000000000000000000000000000000064': arbSys(l2), [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) },
+        multicallAddresses: [MULTICALL3_ADDRESS],
+        blockNumber: 20_000_000, // L1 区块号
+        ignoreFutureBlock: true,
+      })
+    const behind = mk(5000)
+    const ahead = mk(5100)
+    const [r] = await new Provider(42161, [behind, ahead]).balances(USER, [TOKEN], { minBlock: 5050 })
+    expect(r?.blockNumber).toBe(5100)
+  })
+})
+
+describe('minBlock（第三轮 review）', () => {
+  const tokenAddr = (i: number) => '0x' + (0x2000 + i).toString(16).padStart(40, '0')
+
+  it('deployless 拆成多片时每片都校验区块号：落后节点的旧数据不会混进结果', async () => {
+    const tokens = Array.from({ length: 600 }, (_, i) => tokenAddr(i))
+    const mk = (height: number, balance: bigint) =>
+      createMockProvider({
+        contracts: Object.fromEntries(tokens.map((t) => [t, fakeToken('T', 6, { [USER]: balance })])),
+        blockNumber: height,
+        ignoreFutureBlock: true,
+      })
+    const behind = mk(30_000_000, 1n) // 旧状态
+    const ahead = mk(30_000_010, 2n) // 新状态
+    const res = await new Provider(56, [behind, ahead], { deployless: true }).balances(USER, tokens, { minBlock: 30_000_005, decimals: false })
+    expect(behind.calls.length + ahead.calls.length).toBeGreaterThan(2) // 确实拆成了多片
+    expect(res.every((r) => r.balance === '2')).toBe(true)
+    expect(res.every((r) => r.blockNumber === 30_000_010)).toBe(true)
+  })
+
+  it('所有节点都落后时按区块号重查只做一轮，之后只等最新状态', async () => {
+    const started = Date.now()
+    const height = () => (Date.now() - started > 2200 ? 30_000_006 : 30_000_000)
+    const mk = () => createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) }, multicallAddresses: [MULTICALL3_ADDRESS], blockNumber: height })
+    const [a, b] = [mk(), mk()]
+    const [r] = await new Provider(56, [a, b]).balances(USER, [TOKEN], { minBlock: 30_000_005 })
+    expect(r?.blockNumber).toBeGreaterThanOrEqual(30_000_005)
+    const pinnedCalls = [...a.calls, ...b.calls].filter((c) => typeof c.blockTag === 'number')
+    expect(pinnedCalls.length).toBeLessThanOrEqual(2) // 每个节点最多一次
+  })
+
+  it('落后的节点排到后面：下次查询先问已跟上的节点', async () => {
+    const mk = (height: number) =>
+      createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) }, multicallAddresses: [MULTICALL3_ADDRESS], blockNumber: height, ignoreFutureBlock: true })
+    const behind = mk(30_000_000)
+    const ahead = mk(30_000_010)
+    const multi = new Provider(56, [behind, ahead])
+    await multi.balances(USER, [TOKEN], { minBlock: 30_000_005 })
+    expect(behind.calls).toHaveLength(1)
+    await multi.balances(USER, [TOKEN], { minBlock: 30_000_005 })
+    expect(behind.calls).toHaveLength(1) // 第二次直接问 ahead
+  })
+})
+
+describe('minBlock（第四轮 review）', () => {
+  it('deployless 结果过大、通过 revert 带回时，同样识别落后节点并换节点', async () => {
+    const mk = (height: number, balance: bigint) =>
+      createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: balance }) }, blockNumber: height, ignoreFutureBlock: true, maxCodeSize: 64 })
+    const behind = mk(30_000_000, 1n)
+    const ahead = mk(30_000_010, 2n)
+    const [r] = await new Provider(56, [behind, ahead], { deployless: true }).balances(USER, [TOKEN], { minBlock: 30_000_005, decimals: false })
+    expect(r).toMatchObject({ balance: '2', blockNumber: 30_000_010 })
+  })
+
+  it('落后的节点只在几秒内排到后面，之后恢复原来的顺序', async () => {
+    const mk = (height: number) =>
+      createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6, { [USER]: 7n }) }, multicallAddresses: [MULTICALL3_ADDRESS], blockNumber: height, ignoreFutureBlock: true })
+    const behind = mk(30_000_000)
+    const ahead = mk(30_000_010)
+    const multi = new Provider(56, [behind, ahead])
+    await multi.balances(USER, [TOKEN], { minBlock: 30_000_005 })
+    const now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 6_000)
+    try {
+      await multi.balances(USER, [TOKEN]) // 不带 minBlock 的普通查询：6 秒后又先问第一个节点
+      expect(behind.calls).toHaveLength(2)
+    } finally {
+      clock.mockRestore()
+    }
+  })
+})
+
+describe('第五轮 review', () => {
+  it('曾经落后的节点一旦成功给出结果，立即恢复原来的顺序', async () => {
+    const log: string[] = []
+    let aCalls = 0
+    const a = scripted('a', log, () => (aCalls++ === 0 ? Promise.reject(makeError('header not found', 'SERVER_ERROR', { request: null as any, response: null as any })) : Promise.resolve(1n)))
+    let bCalls = 0
+    const b = scripted('b', log, () => (bCalls++ === 1 ? Promise.reject(makeError('server response 503', 'SERVER_ERROR', { request: null as any, response: null as any })) : Promise.resolve(2n)))
+    const rpc = new FallbackRpc([a, b])
+    await rpc.getBalance(USER) // a 落后 → b
+    await rpc.getBalance(USER) // a 被排到后面：先问 b（这次 b 出错）→ a 成功
+    await rpc.getBalance(USER) // a 已恢复：先问 a
+    expect(log).toEqual(['a', 'b', 'b', 'a', 'a'])
+  })
+
+  it('没有 minBlock 时：一个节点合约调用返回 0x、另一个报“区块不存在”，照常退回 deployless', async () => {
+    const empty = createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6) } }) // 没有部署 multicall
+    const lagging = createMockProvider({ contracts: { [TOKEN]: fakeToken('AAA', 6) }, multicallAddresses: [MULTICALL3_ADDRESS] })
+    lagging.call = async () => {
+      throw makeError('missing revert data', 'CALL_EXCEPTION', {
+        action: 'call',
+        data: null,
+        reason: null,
+        transaction: { to: null, data: '0x' },
+        invocation: null,
+        revert: null,
+        info: { error: { code: -32000, message: 'header not found' } },
+      })
+    }
+    const multi = new Provider(56, [empty, lagging])
+    expect((await multi.tokens([TOKEN], { fields: ['symbol'] }))[0]?.symbol).toBe('AAA')
   })
 })

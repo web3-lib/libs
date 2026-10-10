@@ -37,6 +37,22 @@ export interface CallValidation {
    * 不必把所有节点挨个试一遍——链上确实没有合约时，每个节点都会这样）
    */
   maxInvalid?: number
+  /**
+   * 检查节点返回的错误：可以抛出别的错误替换它（如 deployless 结果过大时通过 revert 带回的结果，
+   * 校验出节点落后时抛 NodeBehindError，这样也能换节点，而不是当成确定性的合约错误直接返回）
+   */
+  inspectError?: (err: unknown) => void
+}
+
+/** 节点的结果早于要求的区块（minBlock）：节点落后，换下一个节点，不冷却（节点是健康的，只是慢几个块） */
+export class NodeBehindError extends Error {
+  constructor(
+    readonly minBlock: bigint,
+    readonly block: bigint,
+  ) {
+    super(`Node is behind: block ${block} < minBlock ${minBlock}`)
+    this.name = 'NodeBehindError'
+  }
 }
 
 /** 节点返回的结果没通过校验（如 eth_call 返回 0x / 无法解码）：换节点，不冷却（可能是合约确实不存在，所有节点都会这样） */
@@ -54,7 +70,12 @@ interface Health {
   timeouts: number
   /** 开了 stallTimeout 时，在并发竞争中输给后发节点的时间（慢但没出错）：冷却期内排在健康节点之后 */
   slowAt: number
+  /** minBlock 校验发现节点落后的时间：短时间内（BEHIND_DEMOTE）排在健康节点之后——出块只要几秒，不必像故障那样冷却 30 秒 */
+  behindAt: number
 }
+
+/** 落后的节点排到后面的时长：通常几秒内就会跟上，不长期影响其他查询的节点顺序 */
+const BEHIND_DEMOTE = 5_000
 
 /** 连续超时多少次后才冷却（偶尔慢不算坏节点） */
 const TIMEOUTS_BEFORE_COOLDOWN = 3
@@ -67,7 +88,7 @@ function healthOf(key: string | object, scope?: number): Health {
   if (typeof key === 'string') {
     let health = healthByUrl.get(key)
     if (!health) {
-      health = { failedAt: 0, timeouts: 0, slowAt: 0 }
+      health = { failedAt: 0, timeouts: 0, slowAt: 0, behindAt: 0 }
       healthByUrl.set(key, health)
       if (healthByUrl.size > MAX_TRACKED_URLS) {
         healthByUrl.delete(healthByUrl.keys().next().value as string)
@@ -82,7 +103,7 @@ function healthOf(key: string | object, scope?: number): Health {
   }
   let health = byScope.get(scope)
   if (!health) {
-    health = { failedAt: 0, timeouts: 0, slowAt: 0 }
+    health = { failedAt: 0, timeouts: 0, slowAt: 0, behindAt: 0 }
     byScope.set(scope, health)
   }
   return health
@@ -150,12 +171,18 @@ export class FallbackRpc implements EthersLikeProvider {
     return this.#run(
       'call',
       (node) =>
-        node.call(tx).then((result) => {
-          if (accept && !accept(result)) {
-            throw new InvalidResultError(result)
-          }
-          return result
-        }),
+        node.call(tx).then(
+          (result) => {
+            if (accept && !accept(result)) {
+              throw new InvalidResultError(result)
+            }
+            return result
+          },
+          (err: unknown) => {
+            validation?.inspectError?.(err)
+            throw err
+          },
+        ),
       accept ? (validation?.maxInvalid ?? 2) : Number.POSITIVE_INFINITY,
     )
   }
@@ -324,6 +351,7 @@ export class FallbackRpc implements EthersLikeProvider {
             done(index)
             health.failedAt = 0
             health.timeouts = 0
+            health.behindAt = 0 // 已经能给出结果：不再因为之前落后而排到后面
             if (!settled) {
               health.slowAt = 0
               // 先发出却还没返回的节点输掉了竞争：记一次慢，冷却期内排在健康节点之后（之后返回成功也不清除）
@@ -340,7 +368,11 @@ export class FallbackRpc implements EthersLikeProvider {
                 health.failedAt = Date.now()
                 health.timeouts = 0
               }
-            } else if (!deterministic && !isBehind(err) && !(err instanceof InvalidResultError) && !isNullResult(err)) {
+            } else if (err instanceof NodeBehindError || isBehind(err)) {
+              // 落后（结果早于 minBlock，或对按区块号的查询报“区块不存在”）不算故障、不冷却，
+              // 只在几秒内排到健康节点之后：紧接着的查询先问别的节点
+              health.behindAt = Date.now()
+            } else if (!deterministic && !(err instanceof InvalidResultError) && !isNullResult(err)) {
               health.failedAt = Date.now()
             }
             if (settled) {
@@ -378,7 +410,11 @@ export class FallbackRpc implements EthersLikeProvider {
     failed.forEach((at, i) => {
       if (at && now - at < this.#cooldown) {
         cooling.push(i)
-      } else if (!failedAt && (health[i] as Health).slowAt && now - (health[i] as Health).slowAt < this.#cooldown) {
+      } else if (
+        !failedAt &&
+        (((health[i] as Health).slowAt && now - (health[i] as Health).slowAt < this.#cooldown) ||
+          ((health[i] as Health).behindAt && now - (health[i] as Health).behindAt < BEHIND_DEMOTE))
+      ) {
         slow.push(i)
       } else {
         healthy.push(i)
@@ -433,7 +469,7 @@ function isRateLimited(err: unknown): boolean {
 /**
  * 节点还没有请求的区块（minBlock 按指定区块重查时，落后的节点会这样报错）：只换节点、不冷却——节点本身是健康的，只是慢一两个块
  */
-function isBehind(err: unknown): boolean {
+export function isBehind(err: unknown): boolean {
   return BEHIND_RE.test(errorText(err))
 }
 

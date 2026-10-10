@@ -251,16 +251,16 @@ describe('withBlock / minBlock', () => {
     }
   })
 
-  it('minBlock：第一个节点落后时按 minBlock 重查，自动换到跟上的节点', async () => {
+  it('minBlock：第一个节点落后时直接换到已经跟上的节点，拿最新状态（不必按区块号重查）', async () => {
     const behind = mockAt(100)
     const ahead = mockAt(105)
     const multi = new Provider(56, [behind, ahead])
     const res = await multi.balances(USER, [NATIVE_TOKEN, TOKEN], { minBlock: 103 })
     expect(res.map((r) => [r.balance, r.blockNumber])).toEqual([
-      ['5', 103],
-      ['7', 103],
+      ['5', 105],
+      ['7', 105],
     ])
-    expect(ahead.calls.at(-1)?.blockTag).toBe(103)
+    expect(ahead.calls.at(-1)?.blockTag).toBeUndefined()
   })
 
   it('minBlock：节点已经跟上时不重查，结果是最新区块', async () => {
@@ -450,8 +450,14 @@ describe('review 修复', () => {
     }
     const rpc = new FallbackRpc([behind, node('b', log, () => 'ok')])
     await rpc.getBalance(USER)
-    await rpc.getBalance(USER)
-    expect(log).toEqual(['behind', 'b', 'behind', 'b'])
+    await rpc.getBalance(USER) // 几秒内先问别的节点
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 6_000)
+    try {
+      await rpc.getBalance(USER) // 不是 30 秒的冷却：几秒后又先问它
+    } finally {
+      clock.mockRestore()
+    }
+    expect(log).toEqual(['behind', 'b', 'b', 'behind', 'b'])
   })
 
   it('minBlock 等待重试期间取消：立即 reject，之后不再发请求', async () => {

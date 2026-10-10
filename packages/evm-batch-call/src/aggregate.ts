@@ -3,7 +3,7 @@ import { AbiCoder, Interface, concat, dataSlice, id, isError, type Provider as E
 import { encodeUint256, type CallRequest, type RawResult } from './call.js'
 import { DEPLOYLESS_MULTICALL3_BYTECODE } from './deployless.js'
 import { isExecutionError } from './errors.js'
-import { AllNodesFailedError, FallbackRpc, InvalidResultError } from './fallback.js'
+import { AllNodesFailedError, FallbackRpc, InvalidResultError, NodeBehindError, isBehind } from './fallback.js'
 import { MULTICALL3_ADDRESS, type Multicall } from './multicall.js'
 import { isTronChain } from './tron.js'
 
@@ -87,21 +87,100 @@ const invalidStrikes = new Map<string, number>()
  * eth_call 并解码 aggregate3 的结果：通过 FallbackRpc 时空数据 / 无法解码的结果换下一个节点（解码只做一次，结果复用）；
  * 其他 Provider 不支持校验参数，取到结果后自己校验
  */
-async function callAggregate3(provider: EthersLikeProvider, tx: Parameters<EthersLikeProvider['call']>[0]): Promise<RawResult[]> {
+async function callAggregate3(
+  provider: EthersLikeProvider,
+  tx: Parameters<EthersLikeProvider['call']>[0],
+  requests: readonly CallRequest[],
+  atLeast?: bigint,
+): Promise<RawResult[]> {
   const decoded = new Map<string, RawResult[]>()
+  // deployless 结果超过 24KB 时通过 revert Aggregate3Result 带回：同样校验区块号，落后时换成 NodeBehindError（FallbackRpc 换节点）
+  const inspectError = (err: unknown) => {
+    const results = atLeast === undefined ? null : revertedResults(err)
+    if (results) {
+      assertAtLeast(requests, results, atLeast as bigint)
+    }
+  }
   const accept = (data: string) => {
     const results = decodeAggregate3Data(data)
-    if (results) {
-      decoded.set(data, results)
+    if (!results) {
+      return false
     }
-    return results !== null
+    // minBlock：结果里的区块号早于要求时节点落后，抛 NodeBehindError 让 FallbackRpc 换下一个节点
+    if (atLeast !== undefined) {
+      assertAtLeast(requests, results, atLeast)
+    }
+    decoded.set(data, results)
+    return true
   }
-  const data = provider instanceof FallbackRpc ? await provider.call(tx, { accept }) : await provider.call(tx)
+  let data: string
+  if (provider instanceof FallbackRpc) {
+    data = await provider.call(tx, { accept, inspectError })
+  } else {
+    // 其他 Provider 不支持校验参数：取到结果后自己校验（同样包括区块号）
+    try {
+      data = await provider.call(tx)
+    } catch (err) {
+      inspectError(err)
+      throw err
+    }
+    if (!accept(data)) {
+      throw new InvalidResultError(data)
+    }
+  }
   const results = decoded.get(data) ?? decodeAggregate3Data(data)
   if (!results) {
     throw new InvalidResultError(data)
   }
   return results
+}
+
+/** 已解析过的 revert 结果（同一个错误在 inspectError 和 callDeploylessChunk 里各用一次，只解析一次） */
+const revertedCache = new WeakMap<object, RawResult[] | null>()
+
+/** deployless 通过 revert Aggregate3Result(...) 带回的结果；不是这种 revert、或数据无法解码时为 null（保留原来的错误） */
+function revertedResults(err: unknown): RawResult[] | null {
+  const revertData = (err as { data?: string | null } | null)?.data
+  if (!isError(err, 'CALL_EXCEPTION') || !revertData?.startsWith(AGGREGATE3_RESULT_SELECTOR)) {
+    return null
+  }
+  const cached = revertedCache.get(err)
+  if (cached !== undefined) {
+    return cached
+  }
+  let results: RawResult[] | null
+  try {
+    results = decodeAggregate3(AbiCoder.defaultAbiCoder().decode([RESULT_TUPLE], dataSlice(revertData, 4))[0])
+  } catch {
+    results = null
+  }
+  revertedCache.set(err, results)
+  return results
+}
+
+/** ArbSys.arbBlockNumber() 的结果（Arbitrum 系的 L2 区块号）；其他链上 0x64 没有代码、返回空数据，为 null */
+function l2BlockOf(result: RawResult | undefined): bigint | null {
+  return result?.success && result.returnData.length === 66 ? BigInt(result.returnData) : null
+}
+
+/**
+ * minBlock 校验：这次 eth_call 里附带的区块号查询（BLOCK_NUMBER_REQUEST，Arbitrum 上用一起附带的 L2 区块号）早于要求时，
+ * 抛 NodeBehindError（FallbackRpc 换下一个节点）。每次 eth_call 都附带了这两条（deployless 切片时每片各自附带）
+ */
+function assertAtLeast(requests: readonly CallRequest[], results: readonly RawResult[], atLeast: bigint): void {
+  const blockIndex = requests.lastIndexOf(BLOCK_NUMBER_REQUEST)
+  if (blockIndex === -1) {
+    return
+  }
+  const arbIndex = requests.lastIndexOf(ARB_BLOCK_NUMBER_REQUEST)
+  assertBlock((arbIndex === -1 ? null : l2BlockOf(results[arbIndex])) ?? blockOf(results[blockIndex]), atLeast)
+}
+
+/** 区块号不早于 minBlock，否则节点落后（读不到区块号也按落后处理） */
+function assertBlock(block: bigint | null, atLeast: bigint): void {
+  if (block === null || block < atLeast) {
+    throw new NodeBehindError(atLeast, block ?? -1n)
+  }
 }
 
 /** aggregate3 返回数据的解码结果；空数据或无法解码时为 null */
@@ -166,20 +245,52 @@ async function aggregateChunkAtLeast(ctx: AggregateContext, requests: CallReques
   const minBlock = overrides.minBlock as number
   // Tron 节点只能查最新状态（不支持按区块号查询）
   const canPinBlock = !isTronChain(ctx.chainId)
+  const atLeast = BigInt(minBlock)
+  let pinned = false
   return retryUntilCaughtUp(overrides, async () => {
-    const results = await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], overrides)
-    if ((blockOf(results[results.length - 1]) ?? -1n) >= BigInt(minBlock)) {
-      return results.slice(0, -1)
-    }
-    if (canPinBlock) {
-      // 按区块号重查时同样带上区块号并校验：有的节点对未来区块不报错、直接返回最新状态（如 HyperEVM），不能当成 minBlock 的结果
-      const pinned = await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], { ...overrides, blockTag: minBlock })
-      if ((blockOf(pinned[pinned.length - 1]) ?? -1n) >= BigInt(minBlock)) {
-        return pinned.slice(0, -1)
+    // 区块号校验在 FallbackRpc 里做：落后的节点（结果的区块号早于 minBlock）当场换下一个节点，跟上的节点直接给出最新状态
+    try {
+      return withoutBlock(await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], overrides, atLeast))
+    } catch (err) {
+      // 有节点落后（其余节点可能因限频、超时等失败）时，按区块号重查一次；之后只等最新状态跟上，避免每秒把所有节点问两遍
+      if (!canPinBlock || pinned || !isBehindFailure(err)) {
+        throw err
       }
     }
-    throw new Error(`Node is behind minBlock ${minBlock}`)
+    // 按区块号重查：落后的节点对未来区块报错或返回较旧区块，同样校验区块号、换节点；仍然都落后时由 retryUntilCaughtUp 稍等重试。
+    // 确认节点都落后后不再重查（只等最新状态跟上）；因限频、超时等失败时下次照常重查
+    try {
+      return withoutBlock(await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], { ...overrides, blockTag: minBlock }, atLeast))
+    } catch (err) {
+      // 所有节点都落后才不再重查；有节点只是限频、超时等失败时下次照常重查
+      if (isAllBehind(err)) {
+        pinned = true
+      }
+      throw err
+    }
   })
+}
+
+/** 去掉附带的区块号查询（区块号已在每次 eth_call 时由 assertAtLeast 校验过） */
+function withoutBlock(results: RawResult[]): RawResult[] {
+  return results.slice(0, -1)
+}
+
+/**
+ * 是否有节点落后：结果早于 minBlock（NodeBehindError），或对按区块号的查询报“区块不存在”（header not found 等）；
+ * 多节点时其中有节点是这样（其余可能是限频、超时等）
+ */
+function isBehindFailure(err: unknown): boolean {
+  return isBehindError(err) || (err instanceof AllNodesFailedError && err.errors.some((e) => isBehindError(e.error)))
+}
+
+/** 所有节点都落后（单节点时就是它落后） */
+function isAllBehind(err: unknown): boolean {
+  return isBehindError(err) || (err instanceof AllNodesFailedError && err.errors.every((e) => isBehindError(e.error)))
+}
+
+function isBehindError(err: unknown): boolean {
+  return err instanceof NodeBehindError || isBehind(err)
 }
 
 /** 节点落后时的重试：确定性错误（合约执行结果）直接抛；其余错误每秒重试，最多约 10 秒；signal 取消后停止 */
@@ -242,6 +353,8 @@ async function aggregateWithRpcBalances(ctx: AggregateContext, requests: CallReq
     const block = blockOf(results.pop())
     otherResults = results
     const blockTag = block === null ? overrides.blockTag : Number(block)
+    // 已知限制：eth_getBalance 不返回区块号，没法校验。读余额的节点如果忽略区块参数、又比给出 blockTag 的节点落后，
+    // 主币余额可能比代币余额早几个块（仍不早于 minBlock 的节点才会给出 blockTag 之后的区块）
     const read = () => Promise.all(owners.map((owner) => ctx.provider.getBalance(owner, blockTag)))
     // 只有 minBlock 才等待重试（读的区块可能来自比当前节点更新的节点）；只要 withBlock 时出错照常抛出
     balances = await (overrides.minBlock !== undefined ? retryUntilCaughtUp(overrides, read) : read())
@@ -259,13 +372,13 @@ async function aggregateWithRpcBalances(ctx: AggregateContext, requests: CallReq
 }
 
 /** 执行一批请求；其中有区块号查询时顺带读 Arbitrum 的 L2 区块号，并用它替换（见 ARB_BLOCK_NUMBER_REQUEST） */
-async function aggregateChunk(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides): Promise<RawResult[]> {
+async function aggregateChunk(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides, atLeast?: bigint): Promise<RawResult[]> {
   if (!requests.some((req) => req.blockNumber)) {
-    return aggregateRawChunk(ctx, requests, overrides)
+    return aggregateRawChunk(ctx, requests, overrides, atLeast)
   }
-  const results = await aggregateRawChunk(ctx, [...requests, ARB_BLOCK_NUMBER_REQUEST], overrides)
+  const results = await aggregateRawChunk(ctx, [...requests, ARB_BLOCK_NUMBER_REQUEST], overrides, atLeast)
   const arb = results.pop() as RawResult
-  if (arb.success && arb.returnData.length === 66) {
+  if (l2BlockOf(arb) !== null) {
     requests.forEach((req, i) => {
       if (req.blockNumber) {
         results[i] = arb
@@ -279,11 +392,12 @@ async function aggregateRawChunk(
   ctx: AggregateContext,
   requests: CallRequest[],
   overrides: CallOverrides,
+  atLeast?: bigint,
 ): Promise<RawResult[]> {
   const multicall = ctx.multicall
   if (multicall && isUsable(ctx.chainId, multicall, overrides.blockTag)) {
     const key = cacheKey(ctx.chainId, multicall.address)
-    const results = await callContract(ctx, multicall, requests, overrides)
+    const results = await callContract(ctx, multicall, requests, overrides, atLeast)
     if (Array.isArray(results)) {
       invalidStrikes.delete(key)
       return results
@@ -303,7 +417,7 @@ async function aggregateRawChunk(
       }
     }
   }
-  return callDeployless(ctx, requests, overrides)
+  return callDeployless(ctx, requests, overrides, atLeast)
 }
 
 /**
@@ -316,6 +430,7 @@ async function callContract(
   multicall: Multicall,
   requests: CallRequest[],
   overrides: CallOverrides,
+  atLeast?: bigint,
 ): Promise<RawResult[] | 'invalid' | 'invalid-confirmed' | 'reverted'> {
   const calls = requests.map((req) => ({
     target: req.ethBalanceOf || req.blockNumber ? multicall.address : req.target,
@@ -324,15 +439,20 @@ async function callContract(
   }))
   try {
     // 地址上没有代码时 eth_call 返回 0x；空数据 / 无法解码的结果换下一个节点（节点偶发出错时别的节点能给出正确结果）
-    return await callAggregate3(ctx.provider, {
-      to: multicall.address,
-      data: multicall3Interface.encodeFunctionData('aggregate3', [calls]),
-      blockTag: overrides.blockTag,
-      from: overrides.from,
-    })
+    return await callAggregate3(
+      ctx.provider,
+      { to: multicall.address, data: multicall3Interface.encodeFunctionData('aggregate3', [calls]), blockTag: overrides.blockTag, from: overrides.from },
+      requests,
+      atLeast,
+    )
   } catch (err) {
     if (err instanceof InvalidResultError) {
       return 'invalid'
+    }
+    // 有节点只是落后（minBlock）：不能据此判断合约不存在，按落后处理（由 minBlock 的等待重试负责），不记次数
+    // （只看 minBlock 校验得出的 NodeBehindError；“区块不存在”的报错和空数据混在一起时照常退回 deployless）
+    if (atLeast !== undefined && (err instanceof NodeBehindError || (err instanceof AllNodesFailedError && err.errors.some((e) => e.error instanceof NodeBehindError)))) {
+      throw err
     }
     // 有节点返回空数据、其余节点出错（超时、限频等）：合约可能不存在，退回 deployless；
     // 只有 2 个以上节点都返回空数据才算确认，记缓存
@@ -361,9 +481,10 @@ async function callDeployless(
   ctx: AggregateContext,
   requests: CallRequest[],
   overrides: CallOverrides,
+  atLeast?: bigint,
 ): Promise<RawResult[]> {
   const chunks = splitByInitcodeSize(requests)
-  const results = await Promise.all(chunks.map((chunk) => callDeploylessChunk(ctx, chunk, overrides)))
+  const results = await Promise.all(chunks.map((chunk) => callDeploylessChunk(ctx, chunk, overrides, atLeast)))
   return results.flat()
 }
 
@@ -371,11 +492,21 @@ async function callDeploylessChunk(
   ctx: AggregateContext,
   requests: CallRequest[],
   overrides: CallOverrides,
+  atLeast?: bigint,
 ): Promise<RawResult[]> {
+  // minBlock：每片都附带区块号查询并各自校验——只校验带区块号的那一片的话，其他片可能来自落后节点、混进旧数据
+  const sent =
+    atLeast === undefined
+      ? requests
+      : [
+          ...requests,
+          ...(requests.includes(BLOCK_NUMBER_REQUEST) ? [] : [BLOCK_NUMBER_REQUEST]),
+          ...(requests.includes(ARB_BLOCK_NUMBER_REQUEST) ? [] : [ARB_BLOCK_NUMBER_REQUEST]),
+        ]
   const args = AbiCoder.defaultAbiCoder().encode(
     [CALL3_TUPLE],
     [
-      requests.map(({ target, allowFailure, callData, ethBalanceOf, blockNumber }) => ({
+      sent.map(({ target, allowFailure, callData, ethBalanceOf, blockNumber }) => ({
         target: ethBalanceOf || blockNumber ? MULTICALL3_ADDRESS : target,
         allowFailure,
         callData,
@@ -384,19 +515,20 @@ async function callDeploylessChunk(
   )
   try {
     // 返回空数据 / 无法解码（节点不支持合约创建式 eth_call，或偶发出错）时换下一个节点
-    return await callAggregate3(ctx.provider, { data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]), blockTag: overrides.blockTag, from: overrides.from })
+    const results = await callAggregate3(ctx.provider, { data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]), blockTag: overrides.blockTag, from: overrides.from }, sent, atLeast)
+    return results.slice(0, requests.length)
   } catch (err) {
-    const revertData = (err as { data?: string | null }).data
-    if (isError(err, 'CALL_EXCEPTION') && revertData?.startsWith(AGGREGATE3_RESULT_SELECTOR)) {
-      // 结果超过 24KB，合约通过 revert Aggregate3Result(...) 带回
-      return decodeAggregate3(AbiCoder.defaultAbiCoder().decode([RESULT_TUPLE], dataSlice(revertData, 4))[0])
+    // 结果超过 24KB，合约通过 revert Aggregate3Result(...) 带回（区块号已在 callAggregate3 里校验）
+    const reverted = revertedResults(err)
+    if (reverted) {
+      return reverted.slice(0, requests.length)
     }
     // 有的钱包 / 中间层会丢掉 revert 数据，大结果拿不回来：对半拆开重试，小批量能正常 return
     if (requests.length > 1 && isExecutionError(err) && !hasRevertData(err)) {
       const mid = Math.ceil(requests.length / 2)
       const [a, b] = await Promise.all([
-        callDeploylessChunk(ctx, requests.slice(0, mid), overrides),
-        callDeploylessChunk(ctx, requests.slice(mid), overrides),
+        callDeploylessChunk(ctx, requests.slice(0, mid), overrides, atLeast),
+        callDeploylessChunk(ctx, requests.slice(mid), overrides, atLeast),
       ])
       return [...a, ...b]
     }

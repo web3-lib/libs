@@ -83,7 +83,7 @@ await getBalances(user, tokens, { chainId: 56, withBlock: true }) // 每项带 b
 ```
 
 - **`withBlock`**：区块号与数据在同一次 `eth_call` 里读出（Multicall3 的 `getBlockNumber`；deployless 合约里直接取 `block.number`），不多发请求。`balances` / `tokens` / `allowances` 及对应函数都支持
-- **`minBlock`**：先按最新状态查并顺带读区块号；节点落后时按 `minBlock` 指定区块重查——落后的节点对未来区块报错，自动换下一个节点（落后不算故障，不进入冷却）；所有节点都落后时每秒重试，最多约 10 秒后抛错，传了 `signal` 时取消后立即停止。重查得到的是 `minBlock` 那个区块的状态（已包含刚确认的交易）。只对最新状态的查询生效（指定了 `blockTag` 时忽略）。Tron 节点只能查最新状态，落后时等节点跟上再查。`nativeBalance: 'rpc'` 时主币余额在批量查询实际读取的区块上用 `eth_getBalance` 读取，与代币余额、`blockNumber` 一致
+- **`minBlock`**：先按最新状态查并顺带读区块号，节点落后（结果的区块号早于 `minBlock`）时当场换下一个节点，跟上的节点直接给出最新状态；所有节点都落后时按 `minBlock` 指定区块重查——落后的节点对未来区块报错或返回较旧区块，同样换节点（落后不算故障，不进入冷却）；仍然都落后时每秒重试，最多约 10 秒后抛错，传了 `signal` 时取消后立即停止。重查得到的是 `minBlock` 那个区块的状态（已包含刚确认的交易）。只对最新状态的查询生效（指定了 `blockTag` 时忽略）。Tron 节点只能查最新状态，落后时等节点跟上再查。`nativeBalance: 'rpc'` 时主币余额在批量查询实际读取的区块上用 `eth_getBalance` 读取，与代币余额、`blockNumber` 一致
 - **`watchBalances`**：相同的节点参数 + 钱包 + 代币 + 选项共用一份轮询（多处订阅时取最小的 `interval`），新订阅者立即拿到最近一次的结果；查询失败调用 `onError`，轮询继续；上一次查询没完成时不会重叠发起；最后一个订阅者取消后停止
 
 ### 节点参数
