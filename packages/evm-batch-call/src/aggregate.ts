@@ -3,6 +3,7 @@ import { AbiCoder, Interface, concat, dataSlice, id, isError, type Provider as E
 import { encodeUint256, type CallRequest, type RawResult } from './call.js'
 import { DEPLOYLESS_MULTICALL3_BYTECODE } from './deployless.js'
 import { isExecutionError } from './errors.js'
+import { AllNodesFailedError, FallbackRpc, InvalidResultError } from './fallback.js'
 import { MULTICALL3_ADDRESS, type Multicall } from './multicall.js'
 import { isTronChain } from './tron.js'
 
@@ -75,7 +76,45 @@ const AGGREGATE3_RESULT_SELECTOR = id('Aggregate3Result((bool,bytes)[])').slice(
  * 判定为无效的 multicall 地址（无代码 / 不是 Multicall3），按 chainId+address 记在模块级，
  * 这样业务里每次 new Provider 也只会多试一次。
  */
-const unusableMulticalls = new Set<string>()
+const unusableMulticalls = new Map<string, number>()
+
+/** 判定不可用后多久重新尝试合约（节点偶发返回空数据时不至于整个会话都不用 Multicall3） */
+const UNUSABLE_TTL = 10 * 60 * 1000
+/** 单节点时连续返回空数据 / 无法解码的次数（多节点时由多个节点一致的结果确认，见 aggregateRawChunk） */
+const invalidStrikes = new Map<string, number>()
+
+/**
+ * eth_call 并解码 aggregate3 的结果：通过 FallbackRpc 时空数据 / 无法解码的结果换下一个节点（解码只做一次，结果复用）；
+ * 其他 Provider 不支持校验参数，取到结果后自己校验
+ */
+async function callAggregate3(provider: EthersLikeProvider, tx: Parameters<EthersLikeProvider['call']>[0]): Promise<RawResult[]> {
+  const decoded = new Map<string, RawResult[]>()
+  const accept = (data: string) => {
+    const results = decodeAggregate3Data(data)
+    if (results) {
+      decoded.set(data, results)
+    }
+    return results !== null
+  }
+  const data = provider instanceof FallbackRpc ? await provider.call(tx, { accept }) : await provider.call(tx)
+  const results = decoded.get(data) ?? decodeAggregate3Data(data)
+  if (!results) {
+    throw new InvalidResultError(data)
+  }
+  return results
+}
+
+/** aggregate3 返回数据的解码结果；空数据或无法解码时为 null */
+function decodeAggregate3Data(data: string): RawResult[] | null {
+  if (!data || data === '0x') {
+    return null
+  }
+  try {
+    return decodeAggregate3(multicall3Interface.decodeFunctionResult('aggregate3', data)[0])
+  } catch {
+    return null
+  }
+}
 
 export interface AggregateContext {
   provider: EthersLikeProvider
@@ -133,7 +172,11 @@ async function aggregateChunkAtLeast(ctx: AggregateContext, requests: CallReques
       return results.slice(0, -1)
     }
     if (canPinBlock) {
-      return aggregateChunk(ctx, requests, { ...overrides, blockTag: minBlock })
+      // 按区块号重查时同样带上区块号并校验：有的节点对未来区块不报错、直接返回最新状态（如 HyperEVM），不能当成 minBlock 的结果
+      const pinned = await aggregateChunk(ctx, [...requests, BLOCK_NUMBER_REQUEST], { ...overrides, blockTag: minBlock })
+      if ((blockOf(pinned[pinned.length - 1]) ?? -1n) >= BigInt(minBlock)) {
+        return pinned.slice(0, -1)
+      }
     }
     throw new Error(`Node is behind minBlock ${minBlock}`)
   })
@@ -239,45 +282,64 @@ async function aggregateRawChunk(
 ): Promise<RawResult[]> {
   const multicall = ctx.multicall
   if (multicall && isUsable(ctx.chainId, multicall, overrides.blockTag)) {
+    const key = cacheKey(ctx.chainId, multicall.address)
     const results = await callContract(ctx, multicall, requests, overrides)
     if (Array.isArray(results)) {
+      invalidStrikes.delete(key)
       return results
     }
-    // 只有“最新状态下地址上没有可用合约”才记缓存。
+    // 只有“最新状态下地址上没有可用合约”才记缓存（10 分钟后重新尝试）：
+    // - 'invalid'（返回空数据 / 无法解码）要确认过才记：多个节点结果一致，或单节点连续 2 次——节点偶发返回一次 0x 不算
     // - revert 无数据（'reverted'）有歧义：可能是 out of gas / 节点 gas 上限、子调用失败而钱包丢了 revert 数据，
     //   这些情况地址本身是好的，只对这一次退回 deployless，不记缓存
     // - 历史区块查到无代码可能只是那时还没部署，不能推及 latest
-    if (results === 'invalid' && isLatest(overrides.blockTag)) {
-      unusableMulticalls.add(cacheKey(ctx.chainId, multicall.address))
+    if (results !== 'reverted' && isLatest(overrides.blockTag)) {
+      const strikes = (invalidStrikes.get(key) ?? 0) + 1
+      if (results === 'invalid-confirmed' || strikes >= 2) {
+        unusableMulticalls.set(key, Date.now() + UNUSABLE_TTL)
+        invalidStrikes.delete(key)
+      } else {
+        invalidStrikes.set(key, strikes)
+      }
     }
   }
   return callDeployless(ctx, requests, overrides)
 }
 
 /**
- * 'invalid'：地址上没有代码或返回无法解码；'reverted'：执行 revert 且没有 revert 数据。
- * 两种情况都退回 deployless。
+ * 'invalid'：返回空数据（地址上没有代码）或无法解码——经 FallbackRpc 时会先换节点重试；
+ * 所有节点（2 个以上）都这样时为 'invalid-confirmed'。'reverted'：执行 revert 且没有 revert 数据。
+ * 这几种情况都退回 deployless。
  */
 async function callContract(
   ctx: AggregateContext,
   multicall: Multicall,
   requests: CallRequest[],
   overrides: CallOverrides,
-): Promise<RawResult[] | 'invalid' | 'reverted'> {
+): Promise<RawResult[] | 'invalid' | 'invalid-confirmed' | 'reverted'> {
   const calls = requests.map((req) => ({
     target: req.ethBalanceOf || req.blockNumber ? multicall.address : req.target,
     allowFailure: req.allowFailure,
     callData: req.callData,
   }))
-  let data: string
   try {
-    data = await ctx.provider.call({
+    // 地址上没有代码时 eth_call 返回 0x；空数据 / 无法解码的结果换下一个节点（节点偶发出错时别的节点能给出正确结果）
+    return await callAggregate3(ctx.provider, {
       to: multicall.address,
       data: multicall3Interface.encodeFunctionData('aggregate3', [calls]),
       blockTag: overrides.blockTag,
       from: overrides.from,
     })
   } catch (err) {
+    if (err instanceof InvalidResultError) {
+      return 'invalid'
+    }
+    // 有节点返回空数据、其余节点出错（超时、限频等）：合约可能不存在，退回 deployless；
+    // 只有 2 个以上节点都返回空数据才算确认，记缓存
+    if (err instanceof AllNodesFailedError && err.errors.some((e) => e.error instanceof InvalidResultError)) {
+      const invalid = err.errors.filter((e) => e.error instanceof InvalidResultError).length
+      return invalid >= 2 && invalid === err.errors.length ? 'invalid-confirmed' : 'invalid'
+    }
     // aggregate3 自己的失败（allowFailure=false 的子调用失败）会带 "Multicall3: call failed" 的 revert 数据；
     // 执行层面 revert 且没有数据，基本就是这个地址上不是 Multicall3。
     // 限流、节点缺状态等错误 ethers 也会包装成 CALL_EXCEPTION，那些要原样抛出，不能把地址判成无效
@@ -285,15 +347,6 @@ async function callContract(
       return 'reverted'
     }
     throw err
-  }
-  // 地址上没有代码时 eth_call 返回 0x
-  if (!data || data === '0x') {
-    return 'invalid'
-  }
-  try {
-    return decodeAggregate3(multicall3Interface.decodeFunctionResult('aggregate3', data)[0])
-  } catch {
-    return 'invalid'
   }
 }
 
@@ -329,13 +382,9 @@ async function callDeploylessChunk(
       })),
     ],
   )
-  let data: string
   try {
-    data = await ctx.provider.call({
-      data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]),
-      blockTag: overrides.blockTag,
-      from: overrides.from,
-    })
+    // 返回空数据 / 无法解码（节点不支持合约创建式 eth_call，或偶发出错）时换下一个节点
+    return await callAggregate3(ctx.provider, { data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]), blockTag: overrides.blockTag, from: overrides.from })
   } catch (err) {
     const revertData = (err as { data?: string | null }).data
     if (isError(err, 'CALL_EXCEPTION') && revertData?.startsWith(AGGREGATE3_RESULT_SELECTOR)) {
@@ -353,7 +402,6 @@ async function callDeploylessChunk(
     }
     throw err
   }
-  return decodeAggregate3(multicall3Interface.decodeFunctionResult('aggregate3', data)[0])
 }
 
 /** EIP-3860 initcode 上限 49152 字节，留出余量 */
@@ -393,8 +441,13 @@ function decodeAggregate3(raw: ReadonlyArray<readonly [boolean, string]>): RawRe
 }
 
 function isUsable(chainId: number, multicall: Multicall, blockTag?: BlockTag): boolean {
-  if (unusableMulticalls.has(cacheKey(chainId, multicall.address))) {
-    return false
+  const key = cacheKey(chainId, multicall.address)
+  const until = unusableMulticalls.get(key)
+  if (until !== undefined) {
+    if (Date.now() < until) {
+      return false
+    }
+    unusableMulticalls.delete(key)
   }
   if (blockTag === 'earliest') {
     return false
@@ -419,4 +472,5 @@ function cacheKey(chainId: number, address: string): string {
 /** 测试用：清掉“地址不可用”的缓存 */
 export function resetMulticallCache(): void {
   unusableMulticalls.clear()
+  invalidStrikes.clear()
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### 修复
+
+- 节点返回 `result: null` 等无法解析的结果时（ethers 报 `INVALID_ARGUMENT`，值为 null），换下一个节点、不冷却（调用方传入 undefined 等非法参数仍直接抛出）；原来被当成确定性错误直接抛出、不换节点（如 Unichain 官方节点对未来区块返回 null）
+- `eth_call` 返回空数据（`0x`）或无法解码时换下一个节点重试，不冷却：deployless 原来直接报 `BAD_DATA`；Multicall3 原来偶发一次就在整个会话里弃用（在不支持 deployless 的 Oasis Emerald、Aurora 上会导致批量查询全部失败）。现在最多试 2 个节点：2 个节点都返回空数据（或单节点连续 2 次）才判定合约不可用，10 分钟后重新尝试；有节点返回空数据、其余节点出错时退回 deployless
+- `minBlock`：按区块号重查的结果同样校验区块号——有的节点对未来区块不报错、直接返回最新状态（如 HyperEVM），原来会把早于 `minBlock` 的旧状态当成结果
+- 识别更多节点的“区块不存在”报错（Arbitrum 系 `unsupported block number`、X Layer、Mantle、zkSync、Winchain 等），只换节点、不冷却
+- `stallTimeout`：在并发竞争中输给后发节点的慢节点，冷却期内排到健康节点之后；原来慢但不超时的首选节点永不降级，每次查询都多等一个 `stallTimeout`
+- 钱包等对象节点的健康状态按链分开记：钱包在一条链上出错，不再影响它在其他链上的排序
+- 合并请求结束后移除挂在调用方 `signal` 上的监听（长期存在的 signal 发起多次查询时不再累积）
+- `watchBalances`：新订阅的间隔更短时按上次轮询时间计算下一次，不再因重新计时而推迟
+- 导入代币信息缓存时，时间戳只接受有限值，晚于现在的截到现在（原来未来时间、`NaN` / `Infinity` 会让 name / symbol 永不过期）
+
 ## 0.4.0
 
 ### 不兼容的改动

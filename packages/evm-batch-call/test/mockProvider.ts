@@ -91,6 +91,8 @@ export interface MockOptions {
   zeroNativeInContract?: boolean
   /** 节点当前的区块高度（默认 1 亿）；查询更高的区块时报 header not found */
   blockNumber?: number | (() => number)
+  /** 模拟查询未来区块时不报错、直接按最新状态返回的节点（如 HyperEVM） */
+  ignoreFutureBlock?: boolean
 }
 
 /**
@@ -110,10 +112,11 @@ export function createMockProvider(options: MockOptions = {}) {
   const balanceCalls: string[] = []
   const height = () => (typeof options.blockNumber === 'function' ? options.blockNumber() : (options.blockNumber ?? 100_000_000))
   /** 本次请求读取的区块：指定了数字区块就是它，否则是当前高度 */
-  const currentBlock = (tag: unknown) => (typeof tag === 'number' || typeof tag === 'bigint' || (typeof tag === 'string' && /^0x/.test(tag)) ? Number(tag) : height())
+  const currentBlock = (tag: unknown) =>
+    typeof tag === 'number' || typeof tag === 'bigint' || (typeof tag === 'string' && /^0x/.test(tag)) ? Math.min(Number(tag), options.ignoreFutureBlock ? height() : Number(tag)) : height()
   let currentTag: unknown
   const checkBlock = (tag: unknown) => {
-    if (currentBlock(tag) > height()) {
+    if (!options.ignoreFutureBlock && currentBlock(tag) > height()) {
       // 节点还没有这个区块（geth：header not found）；ethers 包装成 CALL_EXCEPTION，但不是执行错误
       throw makeError('missing revert data', 'CALL_EXCEPTION', {
         action: 'call',

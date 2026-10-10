@@ -243,13 +243,15 @@ export function importTokenMetaCache(snapshot: unknown): void {
     const key = `${rawKey.slice(0, separator)}:${rawKey.slice(separator + 1).toLowerCase()}`
     const meta: CachedMeta = {}
     if (Number.isInteger(value.decimals) && (value.decimals as number) >= 0 && (value.decimals as number) <= 255) meta.decimals = value.decimals
-    if (typeof value.name === 'string' && typeof value.nameAt === 'number') {
+    const nameAt = validTimestamp(value.nameAt)
+    if (typeof value.name === 'string' && nameAt !== null) {
       meta.name = value.name
-      meta.nameAt = value.nameAt
+      meta.nameAt = nameAt
     }
-    if (typeof value.symbol === 'string' && typeof value.symbolAt === 'number') {
+    const symbolAt = validTimestamp(value.symbolAt)
+    if (typeof value.symbol === 'string' && symbolAt !== null) {
       meta.symbol = value.symbol
-      meta.symbolAt = value.symbolAt
+      meta.symbolAt = symbolAt
     }
     if (value.standard === 'ERC721' || value.standard === 'ERC1155' || value.standard === null) meta.standard = value.standard
     if (Object.keys(meta).length && !tokenMetaCache.has(key)) {
@@ -259,6 +261,17 @@ export function importTokenMetaCache(snapshot: unknown): void {
   while (tokenMetaCache.size > MAX_CACHED_TOKENS) {
     tokenMetaCache.delete(tokenMetaCache.keys().next().value as string)
   }
+}
+
+/**
+ * 导入的写入时间：只接受有限的数值；晚于当前时间的（时钟不准、数据被改过）截到当前时间——否则永不过期。
+ * 不合格时为 null（丢弃 name / symbol，之后重新查）
+ */
+function validTimestamp(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return null
+  }
+  return Math.min(value, Date.now())
 }
 
 /** persistTokenMetaCache 的存储：localStorage / sessionStorage 可以直接传，也可以自己实现 */

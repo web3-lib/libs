@@ -29,12 +29,13 @@ interface Queue {
 
 /**
  * 整批请求的 signal：所有调用方都传了 signal、并且都取消后才取消（如 minBlock 的等待重试随之停止）；
- * 有调用方没传 signal 时返回 undefined（整批照常完成）
+ * 有调用方没传 signal 时为 undefined（整批照常完成）。请求结束后调用 dispose，移除挂在调用方 signal 上的监听
+ * （调用方可能用一个长期存在的 signal 发起很多次查询）
  */
-function combinedSignal(entries: readonly Pending[]): AbortSignal | undefined {
+function combinedSignal(entries: readonly Pending[]): { signal: AbortSignal | undefined; dispose: () => void } {
   const signals = [...new Set(entries.map((entry) => entry.signal))]
   if (!signals.length || signals.some((signal) => signal === undefined)) {
-    return undefined
+    return { signal: undefined, dispose: () => {} }
   }
   const controller = new AbortController()
   const check = () => {
@@ -44,7 +45,7 @@ function combinedSignal(entries: readonly Pending[]): AbortSignal | undefined {
   }
   signals.forEach((signal) => signal?.addEventListener('abort', check, { once: true }))
   check()
-  return controller.signal
+  return { signal: controller.signal, dispose: () => signals.forEach((signal) => signal?.removeEventListener('abort', check)) }
 }
 
 /**
@@ -154,11 +155,14 @@ export class Batcher {
     }
 
     let results: RawResult[]
+    const combined = combinedSignal(entries)
     try {
-      results = await this.#run(requests, { ...overrides, signal: combinedSignal(entries) })
+      results = await this.#run(requests, { ...overrides, signal: combined.signal })
     } catch (err) {
       entries.forEach((entry, i) => requestIndex[i] !== -1 && entry.reject(err))
       return
+    } finally {
+      combined.dispose()
     }
 
     entries.forEach((entry, i) => {

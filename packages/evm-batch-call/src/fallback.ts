@@ -25,6 +25,26 @@ export interface FallbackNodeInfo {
   label: string
   /** 健康状态的 key：URL 字符串或节点对象。相同 key 的节点在所有 FallbackRpc 之间共享冷却状态 */
   key: string | object
+  /** 对象节点按链分开记健康状态（钱包可以切链） */
+  chainId?: number
+}
+
+/** call 的结果校验：返回 false 时视为这个节点的结果不可用（如返回空数据），换下一个节点、不冷却 */
+export interface CallValidation {
+  accept?: (result: string) => boolean
+  /**
+   * 最多几个节点的结果没通过校验就不再换节点（默认 2：两个节点结果一致，足以确认是合约本身的问题，
+   * 不必把所有节点挨个试一遍——链上确实没有合约时，每个节点都会这样）
+   */
+  maxInvalid?: number
+}
+
+/** 节点返回的结果没通过校验（如 eth_call 返回 0x / 无法解码）：换节点，不冷却（可能是合约确实不存在，所有节点都会这样） */
+export class InvalidResultError extends Error {
+  constructor(readonly result: string) {
+    super(`Unusable eth_call result: ${result.length > 66 ? `${result.slice(0, 66)}…` : result}`)
+    this.name = 'InvalidResultError'
+  }
 }
 
 /** 节点健康状态，按节点（URL / 对象）全局共享：Provider 重建后刚失败过的节点仍排在后面 */
@@ -32,19 +52,22 @@ interface Health {
   failedAt: number
   /** 连续超时次数 */
   timeouts: number
+  /** 开了 stallTimeout 时，在并发竞争中输给后发节点的时间（慢但没出错）：冷却期内排在健康节点之后 */
+  slowAt: number
 }
 
 /** 连续超时多少次后才冷却（偶尔慢不算坏节点） */
 const TIMEOUTS_BEFORE_COOLDOWN = 3
 const MAX_TRACKED_URLS = 1000
 const healthByUrl = new Map<string, Health>()
-const healthByObject = new WeakMap<object, Health>()
+/** 对象节点（钱包、ethers Provider）按链分开记：钱包在一条链上出错不影响它在其他链上的排序 */
+const healthByObject = new WeakMap<object, Map<number | undefined, Health>>()
 
-function healthOf(key: string | object): Health {
+function healthOf(key: string | object, scope?: number): Health {
   if (typeof key === 'string') {
     let health = healthByUrl.get(key)
     if (!health) {
-      health = { failedAt: 0, timeouts: 0 }
+      health = { failedAt: 0, timeouts: 0, slowAt: 0 }
       healthByUrl.set(key, health)
       if (healthByUrl.size > MAX_TRACKED_URLS) {
         healthByUrl.delete(healthByUrl.keys().next().value as string)
@@ -52,10 +75,15 @@ function healthOf(key: string | object): Health {
     }
     return health
   }
-  let health = healthByObject.get(key)
+  let byScope = healthByObject.get(key)
+  if (!byScope) {
+    byScope = new Map()
+    healthByObject.set(key, byScope)
+  }
+  let health = byScope.get(scope)
   if (!health) {
-    health = { failedAt: 0, timeouts: 0 }
-    healthByObject.set(key, health)
+    health = { failedAt: 0, timeouts: 0, slowAt: 0 }
+    byScope.set(scope, health)
   }
   return health
 }
@@ -90,6 +118,7 @@ export class FallbackRpc implements EthersLikeProvider {
   readonly #labels: string[]
   /** 健康状态的 key；每次用时再从全局表里取（表淘汰条目后，各实例仍取到同一个对象） */
   readonly #healthKeys: Array<string | object>
+  readonly #healthScopes: Array<number | undefined>
   /** 上次 getLogs 成功的节点 */
   #logsNode = -1
   /** 上次成功的节点连续被限频的次数 */
@@ -107,6 +136,7 @@ export class FallbackRpc implements EthersLikeProvider {
     this.#cooldown = options.cooldown ?? 30_000
     this.#labels = nodes.map((_, i) => info?.[i]?.label ?? `node${i}`)
     this.#healthKeys = nodes.map((node, i) => info?.[i]?.key ?? node)
+    this.#healthScopes = nodes.map((_, i) => info?.[i]?.chainId)
     this.#logsFailedAt = nodes.map(() => 0)
   }
 
@@ -114,8 +144,24 @@ export class FallbackRpc implements EthersLikeProvider {
     return this.#nodes
   }
 
-  call(tx: TransactionRequest): Promise<string> {
-    return this.#run('call', (node) => node.call(tx))
+  /** eth_call；validation.accept 返回 false 的结果视为这个节点不可用，换下一个节点（不冷却） */
+  call(tx: TransactionRequest, validation?: CallValidation): Promise<string> {
+    const accept = validation?.accept
+    return this.#run(
+      'call',
+      (node) =>
+        node.call(tx).then((result) => {
+          if (accept && !accept(result)) {
+            throw new InvalidResultError(result)
+          }
+          return result
+        }),
+      accept ? (validation?.maxInvalid ?? 2) : Number.POSITIVE_INFINITY,
+    )
+  }
+
+  #health(index: number): Health {
+    return healthOf(this.#healthKeys[index] as string | object, this.#healthScopes[index])
   }
 
   getBalance(address: Parameters<EthersLikeProvider['getBalance']>[0], blockTag?: Parameters<EthersLikeProvider['getBalance']>[1]): Promise<bigint> {
@@ -238,12 +284,16 @@ export class FallbackRpc implements EthersLikeProvider {
    * 节点还没有请求的区块（minBlock 重查时落后的节点）也只换节点、不冷却。
    * 确定性错误（revert、参数错误等）直接抛出；所有节点都失败时抛 AllNodesFailedError（单节点时抛原始错误）。
    */
-  #run<T>(method: string, fn: (node: EthersLikeProvider) => Promise<T>): Promise<T> {
+  #run<T>(method: string, fn: (node: EthersLikeProvider) => Promise<T>, maxInvalid = Number.POSITIVE_INFINITY): Promise<T> {
     const order = this.#order()
+    let invalid = 0
     return new Promise<T>((resolve, reject) => {
       let next = 0
       let running = 0
       let settled = false
+      /** 正在进行的请求（按发出顺序）：有节点胜出时，比它先发出、还没返回的节点记一次“慢” */
+      const inFlight: Array<{ index: number; attempt: number }> = []
+      const done = (index: number) => inFlight.splice(inFlight.findIndex((f) => f.index === index), 1)
       const errors: Array<{ node: string; error: unknown }> = []
       let stallTimer: ReturnType<typeof setTimeout> | undefined
       const finish = (done: () => void) => {
@@ -261,8 +311,9 @@ export class FallbackRpc implements EthersLikeProvider {
         }
         const attempt = next++
         const index = order[attempt] as number
-        const health = healthOf(this.#healthKeys[index] as string | object)
+        const health = this.#health(index)
         running++
+        inFlight.push({ index, attempt })
         clearTimeout(stallTimer)
         if (this.#stallTimeout > 0 && next < order.length) {
           stallTimer = setTimeout(launch, this.#stallTimeout)
@@ -270,21 +321,26 @@ export class FallbackRpc implements EthersLikeProvider {
         this.#attempt(method, index, attempt, fn).then(
           (result) => {
             running--
+            done(index)
             health.failedAt = 0
             health.timeouts = 0
             if (!settled) {
+              health.slowAt = 0
+              // 先发出却还没返回的节点输掉了竞争：记一次慢，冷却期内排在健康节点之后（之后返回成功也不清除）
+              inFlight.filter((f) => f.attempt < attempt).forEach((f) => (this.#health(f.index).slowAt = Date.now()))
               finish(() => resolve(result))
             }
           },
           (err: unknown) => {
             running--
+            done(index)
             const deterministic = isDeterministic(err)
             if (err instanceof TimeoutError) {
               if (++health.timeouts >= TIMEOUTS_BEFORE_COOLDOWN) {
                 health.failedAt = Date.now()
                 health.timeouts = 0
               }
-            } else if (!deterministic && !isBehind(err)) {
+            } else if (!deterministic && !isBehind(err) && !(err instanceof InvalidResultError) && !isNullResult(err)) {
               health.failedAt = Date.now()
             }
             if (settled) {
@@ -295,7 +351,9 @@ export class FallbackRpc implements EthersLikeProvider {
               return
             }
             errors.push({ node: this.#labels[index] as string, error: err })
-            if (!launch() && running === 0) {
+            // 结果没通过校验的节点够数了（已能确认是合约本身的问题）：不再换节点，等进行中的请求结束
+            const enough = err instanceof InvalidResultError && ++invalid >= maxInvalid
+            if ((enough || !launch()) && running === 0) {
               fail()
             }
           },
@@ -306,14 +364,28 @@ export class FallbackRpc implements EthersLikeProvider {
     })
   }
 
-  /** 健康的节点按原顺序在前，冷却中的按出错时间先后排在后面（全挂时也都会再试一次） */
-  #order(failedAt: readonly number[] = this.#healthKeys.map((key) => healthOf(key).failedAt)): number[] {
+  /**
+   * 健康的节点按原顺序在前；最近在竞争中输过的慢节点其次；冷却中的按出错时间先后排在最后（全挂时也都会再试一次）。
+   * 传入 failedAt 时（getLogs 自己的冷却表）不考虑慢节点
+   */
+  #order(failedAt?: readonly number[]): number[] {
     const now = Date.now()
+    const health = this.#nodes.map((_, i) => this.#health(i))
+    const failed = failedAt ?? health.map((h) => h.failedAt)
     const healthy: number[] = []
+    const slow: number[] = []
     const cooling: number[] = []
-    failedAt.forEach((at, i) => (at && now - at < this.#cooldown ? cooling : healthy).push(i))
-    cooling.sort((a, b) => (failedAt[a] as number) - (failedAt[b] as number))
-    return [...healthy, ...cooling]
+    failed.forEach((at, i) => {
+      if (at && now - at < this.#cooldown) {
+        cooling.push(i)
+      } else if (!failedAt && (health[i] as Health).slowAt && now - (health[i] as Health).slowAt < this.#cooldown) {
+        slow.push(i)
+      } else {
+        healthy.push(i)
+      }
+    })
+    cooling.sort((a, b) => (failed[a] as number) - (failed[b] as number))
+    return [...healthy, ...slow, ...cooling]
   }
 
   /** 上次 getLogs 成功的节点（不在 getLogs 冷却中时）排到最前 */
@@ -362,15 +434,25 @@ function isRateLimited(err: unknown): boolean {
  * 节点还没有请求的区块（minBlock 按指定区块重查时，落后的节点会这样报错）：只换节点、不冷却——节点本身是健康的，只是慢一两个块
  */
 function isBehind(err: unknown): boolean {
-  return /header not found|unknown block|block not found|block .*not (yet )?(available|found)|requested block .*(ahead|future)|after last accepted block/i.test(errorText(err))
+  return BEHIND_RE.test(errorText(err))
 }
 
-/** 换节点也不会变的错误：合约执行结果、参数错误、用户拒绝等 */
+// 各节点对“还没有这个区块”的报错（2026-10 对内置节点实测）：geth / erigon、Arbitrum 系、X Layer、Mantle、zkSync、Winchain 等
+const BEHIND_RE =
+  /header not found|unknown block|block not found|block .*not (yet )?(available|found)|requested block .*(ahead|future|above)|after last accepted block|unsupported block number|block is out of range|above the latest|height must be less than or equal to the head|doesn't exist yet|block number .*(exceeds|greater than|higher than)|future block/i
+
+/**
+ * 节点返回 result: null（ethers 解析响应时报 INVALID_ARGUMENT，值为 null）：换节点、不冷却。
+ * 只认 null——调用方传入 undefined 等非法参数时值是 undefined，仍是确定性错误，不能拿去每个节点重试
+ */
+function isNullResult(err: unknown): boolean {
+  return isError(err, 'INVALID_ARGUMENT') && (err as { value?: unknown }).value === null
+}
+
+/** 换节点也不会变的错误：合约执行结果、参数错误、用户拒绝等（节点返回 null 除外，见 isNullResult） */
 function isDeterministic(err: unknown): boolean {
-  return (
-    isExecutionError(err) ||
-    isError(err, 'INVALID_ARGUMENT') ||
-    isError(err, 'ACTION_REJECTED') ||
-    isError(err, 'NUMERIC_FAULT')
-  )
+  if (isError(err, 'INVALID_ARGUMENT')) {
+    return !isNullResult(err)
+  }
+  return isExecutionError(err) || isError(err, 'ACTION_REJECTED') || isError(err, 'NUMERIC_FAULT')
 }

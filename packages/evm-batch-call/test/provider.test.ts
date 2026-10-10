@@ -161,15 +161,18 @@ describe('deployless', () => {
     expect(mock.calls[0]?.to).toBeUndefined()
   })
 
-  it('multicall 地址上没有代码时自动退回 deployless，并记住该地址', async () => {
+  it('multicall 地址上没有代码时自动退回 deployless；单节点连续 2 次才记住该地址（偶发一次空数据不算）', async () => {
     const mock = setup({ multicall: false })
     const a = new Contract(TOKEN_A, ERC20ABI)
     expect(await new Provider(BSC, mock).all([a.symbol()])).toEqual(['AAA'])
     expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, false])
+    // 第二次仍先试合约，再次为空：确认后记住
+    expect(await new Provider(BSC, mock).all([a.symbol()])).toEqual(['AAA'])
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, false, true, false])
 
     // 每次新建 Provider 也不再尝试坏地址
     expect(await new Provider(BSC, mock).all([a.decimals()])).toEqual([18n])
-    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, false, false])
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, false, true, false, false])
   })
 
   it('查询早于 multicall 部署区块的数据时走 deployless', async () => {

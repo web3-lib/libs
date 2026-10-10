@@ -53,7 +53,7 @@ export function resolveSource(
     // 内置公共节点本来就是按 chainId 选出来的，不需要再校验
     return source === undefined ? node : withChainCheck(chainId, item, node, timeout)
   })
-  const info: FallbackNodeInfo[] = list.map((item) => ({ label: nodeLabel(item), key: item as string | object }))
+  const info: FallbackNodeInfo[] = list.map((item) => ({ label: nodeLabel(item), key: item as string | object, chainId: Number.isFinite(chainId) ? chainId : undefined }))
   // 单节点也经过 FallbackRpc（统一触发 onRequest 事件、抛原始错误）。外层超时只对单个 EVM URL 节点加（FetchRequest 本来就有同样的超时）；
   // 钱包等对象节点、Tron URL（TronProvider 有自己的超时和 429 退避、限流队列，外层超时会把排队 / 退避中的请求截断）不传 timeout 时不加，与原来一致
   const singleEvmUrl = typeof list[0] === 'string' && !isTronChain(chainId)

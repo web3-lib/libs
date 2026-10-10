@@ -28,6 +28,8 @@ interface Watch {
   running: boolean
   /** 最近一次的结果（按规范化的代币 key），新订阅者可以立即拿到 */
   latest: Map<string, AnyBalance> | null
+  /** 上一次轮询结束的时间：下一次 = 它 + 最小间隔（新订阅者间隔更短时提前，不会因重新计时而推迟） */
+  lastPollAt: number
 }
 
 // 按 Provider 实例分组（快捷函数对相同节点参数复用同一个实例），组内按 “钱包 + 代币集合 + 选项” 共用一份轮询
@@ -73,7 +75,7 @@ export function watchBalances(owner: string, tokens: readonly BalanceToken[], op
   let watch = group.get(key)
   const isNew = !watch
   if (!watch) {
-    watch = { subscribers: new Set(), timer: null, running: false, latest: null }
+    watch = { subscribers: new Set(), timer: null, running: false, latest: null, lastPollAt: 0 }
     group.set(key, watch)
   }
   const subscriber: Subscriber = { tokens, interval, onChange: onChange as Subscriber['onChange'], onError, last: null, signature: null }
@@ -102,8 +104,8 @@ export function watchBalances(owner: string, tokens: readonly BalanceToken[], op
     if (!current.subscribers.size) {
       return
     }
-    const wait = Math.min(...[...current.subscribers].map((sub) => sub.interval))
-    current.timer = setTimeout(poll, wait)
+    const interval = Math.min(...[...current.subscribers].map((sub) => sub.interval))
+    current.timer = setTimeout(poll, Math.max(0, current.lastPollAt + interval - Date.now()))
   }
   const poll = async () => {
     current.timer = null
@@ -119,6 +121,7 @@ export function watchBalances(owner: string, tokens: readonly BalanceToken[], op
       current.subscribers.forEach((sub) => safely(() => sub.onError?.(err)))
     } finally {
       current.running = false
+      current.lastPollAt = Date.now()
       schedule()
     }
   }
