@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - 只查主币余额时不再读回账户数据：`getSolBalances` 和单币模式（含 `getMultiBalances`）里的主币用 `getMultipleAccounts` + `dataSlice: { offset: 0, length: 0 }` 只取 lamports。原来钱包是数据很大的程序账户（如 105KB）时整份读回，并发查询会超时
   - 单币模式下钱包账户第一次单独一组读；确认是普通钱包（系统账户或不存在，数据本来就为空）后，之后与 mint / ATA 账户放在同一个请求里，不多发请求、主币和代币来自同一个快照；程序账户等始终单独读

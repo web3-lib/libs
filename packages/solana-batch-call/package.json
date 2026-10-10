@@ -1,6 +1,6 @@
 {
   "name": "@w3lib/solana-batch-call",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Batched Solana reads: SOL / SPL / Token-2022 balances, token metadata, NFTs. Auto-batching JSON-RPC, getMultipleAccounts chunking, RPC failover. No Solana SDK dependency.",
   "keywords": [
     "solana",
