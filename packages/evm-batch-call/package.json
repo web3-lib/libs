@@ -1,6 +1,6 @@
 {
   "name": "@w3lib/evm-batch-call",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Batched EVM/Tron contract reads via Multicall3 with deployless fallback, native balances, RPC failover, auto-batching and staticCall simulation. ethcall compatible.",
   "keywords": [
     "ethers",
