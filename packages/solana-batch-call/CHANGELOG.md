@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - `getBalances` / `getOwnerTokens` 新增 `tokenPrograms`：按代币类型过滤，`['spl']` 不含 Token-2022（扫描时也不再请求 Token-2022 的代币账户），`['token-2022']` 反之；也可以传程序地址。不认识的值或空数组报错
 - `getBalances` 新增 `accounts: 'ata' | 'all'`：指定 mints 时用按 mint 过滤的 `getTokenAccountsByOwner` 统计全部代币账户（含非 ATA），比全量扫描轻
