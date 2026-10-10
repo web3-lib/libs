@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 修复：服务端临时故障（-32000 server busy / overloaded / temporarily unavailable / timeout，或 HTTP 5xx + -32603）不再暂停批量 10 分钟，按节点故障处理、换节点（与限频一样不降级，降级只会加重负载）。批量收到 5xx + -32603 时先重试一次批量（偶发故障这次就成功）；仍失败时逐条发送，逐条成功说明节点用 5xx 拒绝批量，才暂停批量。5xx 下的其他错误（方法数量超限、账户数超限、参数错误、minContextSlot 等）照常按类型处理
+- 说明（0.2.1 起的行为）：ATA 模式下所属程序未知时，只统计与 mint 所属程序一致的那个 ATA；一个 mint 只属于一个程序，真实链上不会两个 ATA 同时有余额
+
 ## 0.2.1
 
 - 只查主币余额时不再读回账户数据：`getSolBalances` 和单币模式（含 `getMultiBalances`）里的主币用 `getMultipleAccounts` + `dataSlice: { offset: 0, length: 0 }` 只取 lamports。原来钱包是数据很大的程序账户（如 105KB）时整份读回，并发查询会超时

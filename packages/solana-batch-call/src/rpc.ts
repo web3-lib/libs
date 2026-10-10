@@ -17,17 +17,48 @@ export class RpcError extends Error {
     this.name = 'RpcError'
     this.code = code
     this.data = data
+    const kind = classifyRpcError(code, message)
     this.nodeFault =
       code === 403 ||
-      code === 429 ||
       code === -32005 ||
-      // 节点高度没到 minContextSlot：换节点可能成功
-      code === MIN_CONTEXT_SLOT_NOT_REACHED ||
-      /minimum context slot/i.test(message) ||
-      (/forbidden|blocked|personal token|api.?key|rate.?limit|too many|not allowed|unauthori[sz]ed|limit exceeded|disabled|not available|not supported/i.test(message) &&
-        !TOO_MANY_ACCOUNTS.test(message))
+      // 节点高度没到 minContextSlot、限频、服务端临时故障（繁忙、过载、暂不可用、超时）：换节点可能成功；
+      // 临时故障也不应据此关闭批量（降级只会加重负载）
+      kind === 'min-slot' ||
+      kind === 'rate-limited' ||
+      kind === 'transient' ||
+      (/forbidden|blocked|personal token|api.?key|too many|not allowed|unauthori[sz]ed|limit exceeded|disabled|not available|not supported/i.test(message) &&
+        kind !== 'too-many-accounts')
   }
 }
+
+/**
+ * JSON-RPC 错误的分类（RpcError.nodeFault、HTTP 5xx 的处理共用，避免两份清单各自维护）：
+ * - method-limit / too-many-accounts：节点对批量 / 单次账户数的限制，按限制重新分批或缩小
+ * - invalid-params：参数错误（-32602），确定性的
+ * - min-slot / rate-limited / transient：节点落后、限频、服务端临时故障，换节点
+ * - internal：-32603 internal error，含义不明确（可能是临时故障，也可能是节点拒绝批量）
+ */
+type RpcErrorKind = 'method-limit' | 'too-many-accounts' | 'invalid-params' | 'min-slot' | 'rate-limited' | 'transient' | 'internal' | 'other'
+
+function classifyRpcError(code: number | undefined, message: string): RpcErrorKind {
+  if (METHOD_LIMIT.test(message)) return 'method-limit'
+  if (TOO_MANY_ACCOUNTS.test(message)) return 'too-many-accounts'
+  if (code === -32602) return 'invalid-params'
+  if (code === MIN_CONTEXT_SLOT_NOT_REACHED || /minimum context slot/i.test(message)) return 'min-slot'
+  if (code === 429 || RATE_LIMITED.test(message)) return 'rate-limited'
+  if (TRANSIENT.test(message)) return 'transient'
+  if (code === -32603) return 'internal'
+  return 'other'
+}
+
+/** 节点限制单个方法在批量里的数量（如 publicnode：“Maximum number of 'getMultipleAccounts' calls in a batch request is 1”） */
+const METHOD_LIMIT = /maximum number of '([^']+)' calls in a batch request is (\d+)/i
+
+/** 限频的报错 */
+const RATE_LIMITED = /rate.?limit|too many requests/i
+
+/** 服务端临时故障的报错（如 -32000 server is busy、-32603 + 503 overloaded） */
+const TRANSIENT = /\bbusy\b|overload|temporar(il)?y|unavailable|try again|timed? ?out|timeout/i
 
 /** 节点限制单次 getMultipleAccounts 的账户数（如 “Too many accounts requested”）：缩小每次的账户数后重试，不是节点故障 */
 const TOO_MANY_ACCOUNTS = /too many accounts/i
@@ -38,11 +69,15 @@ export class HttpError extends Error {
   /** 请求超时（HttpRpcOptions.timeout） */
   readonly timeout: boolean
 
-  constructor(message: string, status?: number, timeout = false) {
+  /** 5xx 的响应体是 JSON-RPC 错误（服务端故障，或节点用 5xx 拒绝批量请求） */
+  readonly rpcError: boolean
+
+  constructor(message: string, status?: number, timeout = false, rpcError = false) {
     super(message)
     this.name = 'HttpError'
     this.status = status
     this.timeout = timeout
+    this.rpcError = rpcError
   }
 }
 
@@ -262,7 +297,7 @@ export class HttpRpc implements RpcTransport {
    * 记下限制并按限制重新分批，返回 true；限制解析不出或这批本来就没超限（避免无限重发）时返回 false
    */
   async #retryWithMethodLimit(items: Pending[], message: string | undefined): Promise<boolean> {
-    const match = /maximum number of '([^']+)' calls in a batch request is (\d+)/i.exec(message ?? '')
+    const match = METHOD_LIMIT.exec(message ?? '')
     const method = match?.[1]
     const limit = Number(match?.[2])
     if (!method || !Number.isFinite(limit) || limit < 1 || items.filter((item) => item.method === method).length <= limit) {
@@ -273,7 +308,8 @@ export class HttpRpc implements RpcTransport {
     return true
   }
 
-  async #dispatch(items: Pending[]): Promise<void> {
+  /** retriedServerError：这一批已经因 5xx + JSON-RPC 错误重试过一次 */
+  async #dispatch(items: Pending[], retriedServerError = false): Promise<void> {
     if (items.length === 1 || !this.#batch) {
       await Promise.all(items.map((item) => this.#single(item)))
       return
@@ -294,6 +330,23 @@ export class HttpRpc implements RpcTransport {
       if (err instanceof HttpError && err.status !== undefined && BATCH_REJECTED_STATUS.has(err.status)) {
         this.#disableBatch()
         await Promise.all(items.map((item) => this.#single(item)))
+        return
+      }
+      // 5xx + -32603（含义不明确：临时故障，或节点用 5xx 拒绝批量）：先原样重试一次批量（偶发故障这次就成功了，不降级）；
+      // 仍然失败时只用第一条单独试探——成功说明是批量本身被拒，暂停批量（10 分钟后重试）并逐条发送其余的；
+      // 失败则是临时故障，其余的直接报错（换节点），不给出问题的节点加量
+      if (err instanceof HttpError && err.rpcError && items.length > 1) {
+        if (!retriedServerError) {
+          await this.#dispatch(items, true)
+          return
+        }
+        const [first, ...rest] = items as [Pending, ...Pending[]]
+        if (await this.#single(first)) {
+          this.#disableBatch()
+          await Promise.all(rest.map((item) => this.#single(item)))
+        } else {
+          rest.forEach((item) => item.reject(err))
+        }
         return
       }
       items.forEach((item) => item.reject(err))
@@ -322,7 +375,7 @@ export class HttpRpc implements RpcTransport {
     }
     const byId = new Map((body as RpcResponse[]).map((res) => [res.id, res]))
     // 有的节点把 “方法数量超限” 放在批量结果的某一项里
-    const methodLimited = (body as RpcResponse[]).find((res) => /maximum number of '[^']+' calls in a batch/i.test(res.error?.message ?? ''))
+    const methodLimited = (body as RpcResponse[]).find((res) => METHOD_LIMIT.test(res.error?.message ?? ''))
     if (methodLimited && (await this.#retryWithMethodLimit(items, methodLimited.error?.message))) {
       return
     }
@@ -363,12 +416,15 @@ export class HttpRpc implements RpcTransport {
     await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
   }
 
-  async #single(item: Pending, retries = this.#retries): Promise<void> {
+  /** 逐条发送一个调用；返回是否拿到了结果（没有出错） */
+  async #single(item: Pending, retries = this.#retries): Promise<boolean> {
     try {
       const body = (await this.#post({ jsonrpc: '2.0', id: nextId++, method: item.method, params: item.params }, retries)) as RpcResponse
       settle(item, body)
+      return !body?.error
     } catch (err) {
       item.reject(err)
+      return false
     }
   }
 
@@ -413,6 +469,16 @@ export class HttpRpc implements RpcTransport {
       // 非 2xx 但返回了 JSON-RPC 结构（如 403 Access forbidden、drpc 的 500 + 批量错误数组）：交给上层解析
       if (!response.ok && !Array.isArray(body) && !(body as RpcResponse)?.error) {
         throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}`, response.status)
+      }
+      // 5xx + 单个 JSON-RPC 错误：
+      // - 繁忙、过载等明确的临时故障：按 HTTP 错误处理，直接换节点（不重试、不逐条，不给过载的节点加量）
+      // - -32603 internal error：含义不明确，标记 rpcError，由 #dispatch 判断是临时故障还是节点用 5xx 拒绝批量
+      // 其他错误（方法数量超限、账户数超限、参数错误、minContextSlot、限频等）照常交给上层按类型处理
+      const bodyError = response.status >= 500 && !Array.isArray(body) ? (body as RpcResponse)?.error : undefined
+      const kind = bodyError ? classifyRpcError(bodyError.code, bodyError.message ?? '') : undefined
+      if (kind === 'transient' || kind === 'internal') {
+        const message = bodyError?.message
+        throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}${message ? `: ${message}` : ''}`, response.status, false, kind === 'internal')
       }
       // 有的节点限频时返回 HTTP 200 + JSON-RPC 错误码 429：同样退避重试
       if (attempt < retries && isRateLimited(body)) {

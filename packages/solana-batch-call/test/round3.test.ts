@@ -358,3 +358,137 @@ describe('review 修复：补读 mint、钱包学习、导入的所属程序', (
     expect(reads[0]?.params[0]).toContain(EMPTY_WALLET)
   })
 })
+
+describe('服务端临时故障不关闭批量（与限频一样不降级），交给故障切换', () => {
+  /** 第一个批量请求返回给定的故障，之后正常 */
+  /** 前 failures 次请求（批量和逐条都算）返回给定的故障，之后正常 */
+  function flaky(status: number, error: { code: number; message: string }, log: Array<RpcCall | RpcCall[]>, failures = 1): typeof fetch {
+    let left = failures
+    return (async (_url: string, init?: { body?: string }) => {
+      const body = JSON.parse(init?.body ?? '{}') as RpcCall | RpcCall[]
+      log.push(body)
+      if (left > 0) {
+        left--
+        return new Response(JSON.stringify({ jsonrpc: '2.0', error }), { status })
+      }
+      return new Response(JSON.stringify(Array.isArray(body) ? body.map(ok) : ok(body)), { status: 200 })
+    }) as typeof fetch
+  }
+
+  it('503 + -32603 偶发一次：重试一次批量就成功，不降级，之后照常批量', async () => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const rpc = new HttpRpc('https://rpc.example', { fetch: flaky(503, { code: -32603, message: 'Internal error' }, log), retries: 0 })
+    expect(await Promise.all([rpc.request('a'), rpc.request('b')])).toEqual(['a', 'b'])
+    expect(log.every((entry) => Array.isArray(entry))).toBe(true) // 失败的批量 + 重试的批量，没有逐条请求
+    log.length = 0
+    await Promise.all([rpc.request('c'), rpc.request('d')])
+    expect(log).toHaveLength(1)
+    expect(Array.isArray(log[0])).toBe(true)
+  })
+
+  it('节点用 500 + -32603 拒绝批量（逐条正常）：重试仍失败后逐条发送，并暂停批量', async () => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const rpc = new HttpRpc('https://rpc.example', {
+      fetch: (async (_url: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? '{}') as RpcCall | RpcCall[]
+        log.push(body)
+        return Array.isArray(body)
+          ? new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' } }), { status: 500 })
+          : new Response(JSON.stringify(ok(body)), { status: 200 })
+      }) as typeof fetch,
+      retries: 0,
+    })
+    expect(await Promise.all([rpc.request('a'), rpc.request('b')])).toEqual(['a', 'b'])
+    log.length = 0
+    await Promise.all([rpc.request('c'), rpc.request('d')])
+    expect(log.every((entry) => !Array.isArray(entry))).toBe(true) // 批量已暂停，直接逐条
+  })
+
+  it.each([
+    // 持续故障：批量、重试的批量、试探的那一条都失败（3 次），其余的直接报错
+    ['503 + -32603（持续）', 503, { code: -32603, message: 'Internal error' }, 3],
+    // 503 + busy：明确的临时故障，直接按节点故障报错，不重试、不逐条
+    ['503 + busy', 503, { code: -32000, message: 'Server is busy' }, 1],
+    // busy 直接按节点故障报错（换节点），不重试批量、不逐条
+    ['200 + -32000 busy', 200, { code: -32000, message: 'Server is busy, try again later' }, 1],
+  ] as const)('%s：这一批按节点故障报错（可换节点），之后照常批量', async (_name, status, error, failures) => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const rpc = new HttpRpc('https://rpc.example', { fetch: flaky(status, error, log, failures), retries: 0 })
+    const settled = await Promise.allSettled([rpc.request('a'), rpc.request('b')])
+    expect(settled.every((r) => r.status === 'rejected')).toBe(true)
+    const { isNodeFault } = await import('../src/rpc.js')
+    expect(isNodeFault((settled[0] as PromiseRejectedResult).reason)).toBe(true)
+    log.length = 0
+    expect(await Promise.all([rpc.request('c'), rpc.request('d')])).toEqual(['c', 'd'])
+    expect(log).toHaveLength(1)
+    expect(Array.isArray(log[0])).toBe(true) // 批量没有被关闭
+  })
+
+  it('多节点：第一个节点繁忙时换到第二个节点', async () => {
+    const busy = new HttpRpc('https://busy.example', {
+      fetch: (async () => new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Server is busy' } }), { status: 200 })) as typeof fetch,
+      retries: 0,
+    })
+    const good = new HttpRpc('https://good.example', { fetch: fakeFetch((body) => (Array.isArray(body) ? body.map(ok) : ok(body))) })
+    const { FallbackRpc } = await import('../src/rpc.js')
+    const rpc = new FallbackRpc([busy, good])
+    expect(await Promise.all([rpc.request('x'), rpc.request('y')])).toEqual(['x', 'y'])
+  })
+})
+
+describe('5xx 的规则只针对服务端故障，其他错误照常按类型处理', () => {
+  it('500 + 方法数量超限：仍按限制重新分批，而不是当成故障', async () => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const message = "Maximum number of 'getMultipleAccounts' calls in a batch request is 1."
+    const rpc = new HttpRpc('https://rpc.example', {
+      fetch: (async (_url: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? '{}') as RpcCall | RpcCall[]
+        log.push(body)
+        if (Array.isArray(body) && body.filter((r) => r.method === 'getMultipleAccounts').length > 1) {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32600, message } }), { status: 500 })
+        }
+        return new Response(JSON.stringify(Array.isArray(body) ? body.map(ok) : ok(body)), { status: 200 })
+      }) as typeof fetch,
+    })
+    expect(await Promise.all([rpc.request('getMultipleAccounts'), rpc.request('getMultipleAccounts')])).toEqual(['getMultipleAccounts', 'getMultipleAccounts'])
+  })
+
+  it('500 + -32602 参数错误：仍是参数错误（RpcError，不是节点故障）', async () => {
+    const rpc = new HttpRpc('https://rpc.example', {
+      fetch: (async () => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'Invalid param' } }), { status: 500 })) as typeof fetch,
+    })
+    const err = await rpc.request('getTokenAccountsByOwner').catch((e: unknown) => e)
+    const { RpcError, isNodeFault } = await import('../src/rpc.js')
+    expect(err).toBeInstanceOf(RpcError)
+    expect(isNodeFault(err)).toBe(false)
+  })
+})
+
+describe('5xx 的请求量', () => {
+  it('503 + busy：只发一个请求就按节点故障报错，不给过载的节点加量', async () => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const rpc = new HttpRpc('https://rpc.example', {
+      fetch: (async (_url: string, init?: { body?: string }) => {
+        log.push(JSON.parse(init?.body ?? '{}'))
+        return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Server is busy' } }), { status: 503 })
+      }) as typeof fetch,
+      retries: 0,
+    })
+    await Promise.allSettled(Array.from({ length: 20 }, (_, i) => rpc.request(`m${i}`)))
+    expect(log).toHaveLength(1)
+  })
+
+  it('500 + -32603 持续、过载时部分请求成功：只试探一条，不因个别成功就暂停批量', async () => {
+    const log: Array<RpcCall | RpcCall[]> = []
+    const rpc = new HttpRpc('https://rpc.example', {
+      fetch: (async (_url: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? '{}') as RpcCall | RpcCall[]
+        log.push(body)
+        return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' } }), { status: 500 })
+      }) as typeof fetch,
+      retries: 0,
+    })
+    await Promise.allSettled(Array.from({ length: 20 }, (_, i) => rpc.request(`m${i}`)))
+    expect(log).toHaveLength(3) // 批量 + 重试的批量 + 试探的一条
+  })
+})
