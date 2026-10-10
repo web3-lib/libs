@@ -102,7 +102,7 @@ describe('accounts / solBalances', () => {
     expect(res).toEqual([
       { address: OWNER, balance: '1500000000', formatted: '1.5', success: true },
       { address: MISSING, balance: '0', formatted: '0', success: true },
-      { address: 'bad', balance: '0', formatted: '0', success: false },
+      { address: 'bad', balance: '0', formatted: '0', success: false, error: 'invalid-address' },
     ])
   })
 })
@@ -135,12 +135,13 @@ describe('balances（指定 mint：ATA 模式）', () => {
     expect(res.map((r) => r.symbol)).toEqual(['SOL', 'USDC', 'PYUSD'])
   })
 
-  it('没有 ATA 的代币余额为 0；mint 不存在 / 地址非法 success 为 false', async () => {
+  it('没有 ATA 的代币余额为 0；失败项带原因：mint 不存在 / 不是代币 / 地址非法', async () => {
     const { sol } = setup()
-    const res = await sol.balances(OTHER, [USDC, MISSING, 'bad'])
-    expect(res[0]).toMatchObject({ balance: '0', decimals: 6, success: true })
-    expect(res[1]).toMatchObject({ success: false })
-    expect(res[2]).toMatchObject({ success: false })
+    const res = await sol.balances(OTHER, [USDC, MISSING, OWNER, 'bad'])
+    expect(res[0]).toEqual({ token: USDC, native: false, balance: '0', decimals: 6, formatted: '0', tokenProgram: TOKEN_PROGRAM_ID, success: true })
+    expect(res[1]).toEqual({ token: MISSING, native: false, balance: '0', decimals: 0, formatted: '0', tokenProgram: null, success: false, error: 'not-found' })
+    expect(res[2]).toMatchObject({ token: OWNER, success: false, error: 'not-token' }) // 系统账户，不是 mint
+    expect(res[3]).toMatchObject({ token: 'bad', success: false, error: 'invalid-address' })
   })
 
   it('System Program 地址（11111…1）也按 SOL 处理；nativeMints 可配置', async () => {
@@ -185,6 +186,89 @@ describe('balances（scan：全部持仓）', () => {
   })
 })
 
+describe('balances（scan：nativeMints 不含 So111…112）', () => {
+  it('SOL 只出现一次（按 System Program 地址），wSOL 作为普通代币只出现一次', async () => {
+    const node = createMockNode({
+      accounts: {
+        ...world(),
+        [NATIVE_MINT]: { owner: TOKEN_PROGRAM_ID, data: mintData({ decimals: 9 }) },
+        [getAssociatedTokenAddress(OWNER, NATIVE_MINT, TOKEN_PROGRAM_ID)]: { owner: TOKEN_PROGRAM_ID, data: tokenAccountData(NATIVE_MINT, OWNER, 5n) },
+      },
+    })
+    const sol = new SolanaClient(node, { nativeMints: [SYSTEM_PROGRAM_ID] })
+    const res = await sol.balances(OWNER)
+    expect(res.map((r) => [r.token, r.native, r.balance])).toEqual([
+      [SYSTEM_PROGRAM_ID, true, '1500000000'],
+      [USDC, false, '1235000000'],
+      [NATIVE_MINT, false, '5'],
+      [PYUSD, false, '2000000'],
+    ])
+    // 只要 Token-2022 时 SOL 照常返回
+    expect((await sol.balances(OWNER, undefined, { tokenPrograms: ['token-2022'] })).map((r) => r.token)).toEqual([SYSTEM_PROGRAM_ID, PYUSD])
+  })
+})
+
+describe('balances（tokenPrograms：按代币类型过滤）', () => {
+  const tokenAccountsCalls = (node: ReturnType<typeof createMockNode>) =>
+    node.calls.filter((c) => c.method === 'getTokenAccountsByOwner').map((c) => (c.params[1] as { programId: string }).programId)
+
+  it("scan：只传 'spl' 时不含 Token-2022，也不请求 Token-2022 的代币账户", async () => {
+    const { node, sol } = setup()
+    const res = await sol.balances(OWNER, undefined, { tokenPrograms: ['spl'] })
+    expect(res.map((r) => r.token)).toEqual([NATIVE_MINT, USDC])
+    expect(tokenAccountsCalls(node)).toEqual([TOKEN_PROGRAM_ID])
+  })
+
+  it("scan：只传 'token-2022'；传程序地址效果相同", async () => {
+    const { node, sol } = setup()
+    const res = await sol.balances(OWNER, undefined, { tokenPrograms: ['token-2022'] })
+    expect(res.map((r) => r.token)).toEqual([NATIVE_MINT, PYUSD])
+    expect(tokenAccountsCalls(node)).toEqual([TOKEN_2022_PROGRAM_ID])
+    expect(await sol.balances(OWNER, undefined, { tokenPrograms: [TOKEN_2022_PROGRAM_ID] })).toEqual(res)
+  })
+
+  it('不认识的值报错（避免拼错时悄悄过滤掉全部代币）', async () => {
+    const { node, sol } = setup()
+    await expect(sol.balances(OWNER, [USDC], { tokenPrograms: ['token2022'] })).rejects.toThrow(/Unknown token program: token2022/)
+    // 原型上的名字（普通对象查表时会被当成已知值）
+    await expect(sol.balances(OWNER, undefined, { tokenPrograms: ['constructor'] })).rejects.toThrow(/Unknown token program/)
+    await expect(sol.balances(OWNER, undefined, { tokenPrograms: [] })).rejects.toThrow(/tokenPrograms is empty/)
+    expect(node.calls).toHaveLength(0)
+  })
+
+  it('scan + 指定 mints：不符合的代币（持有或未持有）从结果里去掉', async () => {
+    const { sol } = setup()
+    expect((await sol.balances(OWNER, [NATIVE_MINT, PYUSD, USDC], { scan: true, tokenPrograms: [TOKEN_PROGRAM_ID] })).map((r) => r.token)).toEqual([NATIVE_MINT, USDC])
+    expect((await sol.balances(OTHER, [PYUSD, USDC], { scan: true, tokenPrograms: [TOKEN_PROGRAM_ID] })).map((r) => r.token)).toEqual([USDC])
+  })
+
+  it('ATA 模式：所属程序未知时只推导允许的程序的 ATA，读到 mint 后去掉不符合的代币', async () => {
+    const { node, sol } = setup()
+    const res = await sol.balances(OWNER, [NATIVE_MINT, USDC, PYUSD, MISSING], { tokenPrograms: [TOKEN_PROGRAM_ID] })
+    expect(res.map((r) => [r.token, r.balance, r.success])).toEqual([
+      [NATIVE_MINT, '1500000000', true],
+      [USDC, '1234500000', true],
+      [MISSING, '0', false], // mint 不存在：无法判断类型，照常返回失败项
+    ])
+    // OWNER + 3 个 mint + 3 个 SPL Token ATA（不推导 Token-2022 ATA）
+    expect(addressesRequested(node)).toBe(7)
+  })
+
+  it('ATA 模式：所属程序已缓存时，不符合的代币不发请求', async () => {
+    const { node, sol } = setup()
+    await sol.balances(OWNER, [PYUSD])
+    const before = addressesRequested(node)
+    expect(await sol.balances(OWNER, [PYUSD], { tokenPrograms: [TOKEN_PROGRAM_ID] })).toEqual([])
+    expect(addressesRequested(node)).toBe(before)
+  })
+
+  it('getBalances 透传 tokenPrograms', async () => {
+    const node = createMockNode({ accounts: world() })
+    const res = await getBalances(OWNER, [USDC, PYUSD], { provider: node, tokenPrograms: [TOKEN_2022_PROGRAM_ID] })
+    expect(res.map((r) => r.token)).toEqual([PYUSD])
+  })
+})
+
 describe('tokens', () => {
   it('默认 name / symbol / decimals', async () => {
     const { sol } = setup()
@@ -225,7 +309,7 @@ describe('tokens', () => {
   it('mint 不存在：字段为 null，success 为 false', async () => {
     const { sol } = setup()
     const [missing] = await sol.tokens([MISSING], { fields: ['decimals', 'mintAuthority'] })
-    expect(missing).toEqual({ address: MISSING, native: false, decimals: null, mintAuthority: null, success: false })
+    expect(missing).toEqual({ address: MISSING, native: false, decimals: null, mintAuthority: null, success: false, error: 'not-found' })
   })
 
   it('getTokens 透传 fields', async () => {
@@ -265,9 +349,11 @@ describe('NFT', () => {
     const res = await getNftOwners([NFT, MISSING, 'bad'], { provider: node })
     expect(res).toEqual([
       { mint: NFT, owner: OTHER, tokenAccount: getAssociatedTokenAddress(OTHER, NFT, TOKEN_PROGRAM_ID), success: true },
-      { mint: MISSING, owner: null, tokenAccount: null, success: false },
-      { mint: 'bad', owner: null, tokenAccount: null, success: false },
+      { mint: MISSING, owner: null, tokenAccount: null, success: false, error: 'not-found' },
+      { mint: 'bad', owner: null, tokenAccount: null, success: false, error: 'invalid-address' },
     ])
+    // 被拒绝的 mint 和持有人的代币账户在同一次 getMultipleAccounts 里读
+    expect(node.calls.filter((c) => c.method === 'getMultipleAccounts')).toHaveLength(1)
   })
 
   it('ownerNfts：扫描数量 1、精度 0 的代币账户', async () => {
@@ -280,6 +366,128 @@ describe('NFT', () => {
   it('getNfts', async () => {
     const node = createMockNode({ accounts: world() })
     expect((await getNfts([NFT], { provider: node }))[0]?.collection?.address).toBe(COLLECTION)
+  })
+})
+
+describe("balances（accounts: 'all'：指定 mint，统计全部代币账户）", () => {
+  const PYUSD_EXTRA = getMetadataAddress(OTHER) // OTHER 的非 ATA PYUSD 账户（余额全在这里）
+
+  function allWorld() {
+    return createMockNode({
+      accounts: { ...world(), [PYUSD_EXTRA]: { owner: TOKEN_2022_PROGRAM_ID, data: tokenAccountData(PYUSD, OTHER, 7_000_000n) } },
+    })
+  }
+
+  const byMint = (node: ReturnType<typeof createMockNode>) =>
+    node.calls.filter((c) => c.method === 'getTokenAccountsByOwner').map((c) => (c.params[1] as { mint?: string; programId?: string }))
+
+  it('每个代币按 mint 过滤查询，合计非 ATA 账户；不做全量扫描', async () => {
+    const node = allWorld()
+    const sol = new SolanaClient(node, { cluster: 'mainnet' })
+    const res = await sol.balances(OWNER, [NATIVE_MINT, USDC, PYUSD], { accounts: 'all' })
+    expect(res).toEqual([
+      { token: NATIVE_MINT, native: true, balance: '1500000000', decimals: 9, formatted: '1.5', tokenProgram: null, success: true },
+      { token: USDC, native: false, balance: '1235000000', decimals: 6, formatted: '1235', tokenProgram: TOKEN_PROGRAM_ID, success: true }, // ATA + 非 ATA
+      { token: PYUSD, native: false, balance: '2000000', decimals: 6, formatted: '2', tokenProgram: TOKEN_2022_PROGRAM_ID, success: true },
+    ])
+    expect(byMint(node)).toEqual([{ mint: USDC }, { mint: PYUSD }])
+    // ATA 模式会漏掉只在非 ATA 账户里的余额
+    expect((await sol.balances(OTHER, [PYUSD]))[0]?.balance).toBe('0')
+    expect((await sol.balances(OTHER, [PYUSD], { accounts: 'all' }))[0]?.balance).toBe('7000000')
+  })
+
+  it('没持有的代币余额为 0（decimals 照常返回）；失败项带原因', async () => {
+    const node = allWorld()
+    const res = await new SolanaClient(node).balances(OTHER, [USDC, MISSING, OWNER, 'bad', USDC], { accounts: 'all', symbol: true })
+    expect(res[0]).toEqual({ token: USDC, native: false, balance: '0', decimals: 6, formatted: '0', tokenProgram: TOKEN_PROGRAM_ID, symbol: 'USDC', success: true })
+    expect(res[1]).toMatchObject({ token: MISSING, success: false, error: 'not-found' })
+    expect(res[2]).toMatchObject({ token: OWNER, success: false, error: 'not-token' })
+    expect(res[3]).toMatchObject({ token: 'bad', success: false, error: 'invalid-address' })
+    expect(res[4]).toMatchObject({ token: USDC, success: true }) // 重复的 mint 原样返回，只查一次
+    expect(byMint(node)).toHaveLength(3) // USDC / MISSING / OWNER，'bad' 不发请求
+  })
+
+  it('tokenPrograms 同样生效；scan: true 优先（全量扫描）；节点不支持索引方法时报错', async () => {
+    const node = allWorld()
+    const sol = new SolanaClient(node)
+    expect((await sol.balances(OWNER, [USDC, PYUSD], { accounts: 'all', tokenPrograms: ['spl'] })).map((r) => r.token)).toEqual([USDC])
+    node.calls.length = 0
+    await sol.balances(OWNER, [USDC], { accounts: 'all', scan: true })
+    expect(byMint(node).every((f) => f.programId !== undefined)).toBe(true)
+    const limited = createMockNode({ accounts: world(), errors: { getTokenAccountsByOwner: { code: -32602, message: 'Indexed requests require a personal token' } } })
+    await expect(new SolanaClient(limited).balances(OWNER, [USDC], { accounts: 'all' })).rejects.toThrow(/personal token/)
+  })
+
+  it('getBalances 透传 accounts', async () => {
+    const node = allWorld()
+    expect((await getBalances(OTHER, [PYUSD], { provider: node, accounts: 'all' }))[0]?.balance).toBe('7000000')
+  })
+})
+
+describe('失败原因（error）', () => {
+  it('scan + 指定 mints：mint 不存在 / 不是代币 / 地址非法', async () => {
+    const { sol } = setup()
+    const res = await sol.balances(OWNER, [MISSING, OWNER, 'bad'], { scan: true })
+    expect(res.map((r) => r.error)).toEqual(['not-found', 'not-token', 'invalid-address'])
+  })
+
+  it('成功项不带 error / errorField', async () => {
+    const { sol } = setup()
+    const [usdc] = await sol.balances(OWNER, [USDC])
+    expect(usdc).not.toHaveProperty('error')
+    const [details] = await sol.tokens([USDC])
+    expect(details).not.toHaveProperty('error')
+    expect(details).not.toHaveProperty('errorField')
+  })
+
+  it('tokens：地址非法 / 不存在 / 不是代币 / 字段读不到（errorField 为第一个读不到的字段）', async () => {
+    const { sol } = setup()
+    const res = await sol.tokens(['bad', MISSING, OWNER, NFT, USDC], { fields: ['decimals', 'name', 'symbol'] })
+    expect(res.map((r) => [r.error, r.errorField])).toEqual([
+      ['invalid-address', undefined],
+      ['not-found', undefined],
+      ['not-token', undefined],
+      [undefined, undefined], // NFT 有 Metaplex 元数据
+      [undefined, undefined],
+    ])
+    // 没有元数据的代币：name 读不到
+    const node = createMockNode({ accounts: { ...world(), [MISSING]: { owner: TOKEN_PROGRAM_ID, data: mintData({ decimals: 2 }) } } })
+    const [bare] = await new SolanaClient(node).tokens([MISSING], { fields: ['decimals', 'name', 'symbol'] })
+    expect(bare).toMatchObject({ decimals: 2, name: null, success: false, error: 'missing-field', errorField: 'name' })
+  })
+
+  it('nfts：地址非法 / 不存在 / 不是代币 / 没有元数据', async () => {
+    const { sol } = setup()
+    const res = await sol.nfts(['bad', MISSING, OWNER, NFT])
+    expect(res.map((r) => r.error)).toEqual(['invalid-address', 'not-found', 'not-token', undefined])
+    const node = createMockNode({ accounts: { ...world(), [MISSING]: { owner: TOKEN_PROGRAM_ID, data: mintData({ decimals: 0, supply: 1n }) } } })
+    expect((await new SolanaClient(node).nfts([MISSING]))[0]).toMatchObject({ success: false, error: 'no-metadata' })
+  })
+
+  it('nftOwners：不是代币 / 没有持有人', async () => {
+    // mock 对不存在的 mint 报参数错误；对存在但没有持有人的 mint 返回空列表
+    const node = createMockNode({ accounts: { ...world(), [MISSING]: { owner: TOKEN_PROGRAM_ID, data: mintData({ decimals: 0, supply: 0n }) } } })
+    const res = await new SolanaClient(node).nftOwners([OWNER, MISSING])
+    expect(res).toEqual([
+      { mint: OWNER, owner: null, tokenAccount: null, success: false, error: 'not-token' },
+      { mint: MISSING, owner: null, tokenAccount: null, success: false, error: 'no-holder' },
+    ])
+  })
+})
+
+describe('nativeMints 可以传非 Solana 地址', () => {
+  const EVM_NATIVE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+
+  it('作为调用方自己的主币标识：按 SOL 返回，token 原样', async () => {
+    const { node } = setup()
+    const sol = new SolanaClient(node, { nativeMints: [EVM_NATIVE, NATIVE_MINT] })
+    expect(await sol.balances(OWNER, [EVM_NATIVE, USDC])).toEqual([
+      { token: EVM_NATIVE, native: true, balance: '1500000000', decimals: 9, formatted: '1.5', tokenProgram: null, success: true },
+      { token: USDC, native: false, balance: '1234500000', decimals: 6, formatted: '1234.5', tokenProgram: TOKEN_PROGRAM_ID, success: true },
+    ])
+    expect((await sol.balances(OWNER, [EVM_NATIVE], { accounts: 'all' }))[0]).toMatchObject({ native: true, balance: '1500000000' })
+    expect((await sol.balances(OWNER, [EVM_NATIVE], { scan: true }))[0]).toMatchObject({ native: true, balance: '1500000000' })
+    expect((await sol.tokens([EVM_NATIVE]))[0]).toMatchObject({ native: true, symbol: 'SOL', success: true })
   })
 })
 

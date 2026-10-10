@@ -144,8 +144,6 @@ export function resolveSource(
   // 内置节点本来就是按 cluster 选的，不校验；单个节点且没指定 cluster 时，期望值就是它自己，也不需要校验
   const check = !isDefault && (multiple || cluster !== undefined)
   const nodes = check ? raw.map((node) => new NetworkCheckedRpc(node, genesis)) : raw
-  return {
-    transport: multiple ? new FallbackRpc(nodes, options) : (nodes[0] as RpcTransport),
-    genesis,
-  }
+  // 单个节点也包一层 FallbackRpc：统一 onRequest 事件和健康状态（单节点失败时抛原始错误）
+  return { transport: new FallbackRpc(nodes, options), genesis }
 }

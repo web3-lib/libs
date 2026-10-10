@@ -1,21 +1,43 @@
-export { SolanaClient, type BalancesOptions, type ClientConfig, type OwnerTokensOptions, type TokensOptions } from './client.js'
+export {
+  SolanaClient,
+  exportTokenMetaCache,
+  importTokenMetaCache,
+  persistTokenMetaCache,
+  type AccountsOptions,
+  type BalanceQuery,
+  type BalancesOptions,
+  type ClientConfig,
+  type OwnerTokensOptions,
+  type PersistTokenMetaOptions,
+  type RequestOptions,
+  type SlotOptions,
+  type SolBalancesOptions,
+  type TokenMetaSnapshot,
+  type TokensOptions,
+} from './client.js'
 export {
   getBalances,
+  getMultiBalances,
   getNftOwners,
   getNfts,
   getOwnerNfts,
   getOwnerTokens,
   getSolBalances,
   getTokens,
+  watchBalances,
   type GetBalancesOptions,
+  type GetNftsOptions,
   type GetOwnerTokensOptions,
+  type GetSolBalancesOptions,
   type GetTokensOptions,
+  type WatchBalancesOptions,
   type ShortcutOptions,
 } from './shortcuts.js'
 export {
   DEFAULT_TOKEN_FIELDS,
   type Commitment,
   type DefaultTokenField,
+  type FailureReason,
   type NftDetails,
   type NftOwner,
   type OwnedToken,
@@ -23,7 +45,11 @@ export {
   type TokenBalance,
   type TokenDetails,
   type TokenField,
+  type TokenProgramName,
+  type TokenProgramOption,
   type TokenStandard,
+  type TransferFee,
+  type TransferFeeConfig,
 } from './types.js'
 export {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -38,17 +64,35 @@ export {
   clusterOfGenesis,
   type Cluster,
 } from './constants.js'
-export { decodeAddress, encodeAddress, findProgramAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress } from './address.js'
+export { decodeAddress, encodeAddress, findProgramAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress, isOnCurve } from './address.js'
 export {
   formatAmount,
+  formatUnits,
   parseMetaplexMetadata,
   parseMint,
   parseTokenAccount,
+  parseTransferFeeConfig,
   type AccountInfo,
   type MetaplexMetadata,
   type MintInfo,
   type TokenAccountInfo,
   type TokenMetadata,
+  type TransferFeeConfigInfo,
+  type TransferFeeInfo,
 } from './layout.js'
-export { FallbackRpc, HttpError, HttpRpc, RpcError, isNodeFault, type FallbackOptions, type HttpRpcOptions, type RpcTransport } from './rpc.js'
+export {
+  AllNodesFailedError,
+  FallbackRpc,
+  HttpError,
+  HttpRpc,
+  MIN_CONTEXT_SLOT_NOT_REACHED,
+  RpcError,
+  isNodeFault,
+  nodeLabel,
+  onRequest,
+  type FallbackOptions,
+  type HttpRpcOptions,
+  type RequestEvent,
+  type RpcTransport,
+} from './rpc.js'
 export { NetworkCheckedRpc, NetworkMismatchError, type RpcSource, type SourceOptions } from './source.js'

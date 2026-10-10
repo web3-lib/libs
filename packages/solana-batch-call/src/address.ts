@@ -1,4 +1,3 @@
-import { ed25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base58 } from '@scure/base'
 
@@ -28,14 +27,57 @@ export function encodeAddress(bytes: Uint8Array): string {
   return base58.encode(bytes)
 }
 
-/** 32 字节是否在 ed25519 曲线上（PDA 必须不在曲线上） */
-function isOnCurve(bytes: Uint8Array): boolean {
-  try {
-    ed25519.Point.fromBytes(bytes)
-    return true
-  } catch {
+// ed25519：-x² + y² = 1 + d·x²·y²（mod p）
+const P = 2n ** 255n - 19n
+const D = 37095705934669439343138083508754565189542113879843219016388785533085940283555n
+
+/** x^(2^k) mod p */
+function pow2k(x: bigint, k: number): bigint {
+  let r = x
+  for (let i = 0; i < k; i++) r = (r * r) % P
+  return r
+}
+
+/** x^((p-1)/2) mod p（欧拉判别法），(p-1)/2 = (2^250 - 1)·2^4 + 6，用加法链：约 254 次平方 + 12 次乘法 */
+function legendre(x: bigint): bigint {
+  const b2 = (((x * x) % P) * x) % P // x^(2^2-1)
+  const b4 = (pow2k(b2, 2) * b2) % P
+  const b5 = (pow2k(b4, 1) * x) % P
+  const b10 = (pow2k(b5, 5) * b5) % P
+  const b20 = (pow2k(b10, 10) * b10) % P
+  const b40 = (pow2k(b20, 20) * b20) % P
+  const b80 = (pow2k(b40, 40) * b40) % P
+  const b160 = (pow2k(b80, 80) * b80) % P
+  const b240 = (pow2k(b160, 80) * b80) % P
+  const b250 = (pow2k(b240, 10) * b10) % P
+  return (pow2k(b250, 4) * ((b2 * b2) % P)) % P
+}
+
+/**
+ * 32 字节是否是合法的 ed25519 压缩点（PDA 必须不在曲线上）。
+ * 按 RFC 8032 5.1.3 解压缩，与 @noble/curves 的 Point.fromBytes（web3.js 的 isOnCurve 同样如此）一致：
+ * y ≥ p、x = 0 但符号位为 1 都算不在曲线上。只需判断 x² = (y² - 1) / (d·y² + 1) 有没有解，不必真的开方
+ */
+export function isOnCurve(bytes: Uint8Array): boolean {
+  if (bytes.length !== 32) {
     return false
   }
+  let y = 0n
+  for (let i = 31; i >= 0; i--) {
+    y = (y << 8n) | BigInt(i === 31 ? (bytes[i] as number) & 0x7f : (bytes[i] as number))
+  }
+  if (y >= P) {
+    return false
+  }
+  const y2 = (y * y) % P
+  const u = (y2 - 1n + P) % P
+  const v = (D * y2 + 1n) % P // d 不是平方数，v 不会为 0
+  if (u === 0n) {
+    // x = 0：符号位必须为 0
+    return ((bytes[31] as number) & 0x80) === 0
+  }
+  // u / v 是平方数 ⇔ u·v 是平方数（欧拉判别法）
+  return legendre((u * v) % P) === 1n
 }
 
 const PDA_MARKER = new TextEncoder().encode('ProgramDerivedAddress')

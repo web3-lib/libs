@@ -107,6 +107,7 @@ const ACCOUNT_TYPE_OFFSET = 165
 const EXTENSIONS_OFFSET = 166
 const ACCOUNT_TYPE_MINT = 1
 const ACCOUNT_TYPE_ACCOUNT = 2
+const EXTENSION_TRANSFER_FEE_CONFIG = 1
 const EXTENSION_TOKEN_METADATA = 19
 
 /** 解析 Mint 账户（SPL Token / Token-2022 通用，Token-2022 额外解析 TokenMetadata 扩展） */
@@ -133,7 +134,11 @@ export function parseMint(data: Uint8Array): MintInfo {
   }
 }
 
-function parseTokenMetadataExtension(data: Uint8Array): TokenMetadata | null {
+/** 在 Token-2022 账户的扩展（TLV：u16 类型 + u16 长度 + 数据）里找指定类型，返回其数据；没有或数据不完整时为 null */
+function findExtension(data: Uint8Array, extensionType: number): Uint8Array | null {
+  if (data.length <= EXTENSIONS_OFFSET) {
+    return null
+  }
   try {
     const r = new Reader(data, EXTENSIONS_OFFSET)
     while (r.offset + 4 <= data.length) {
@@ -142,11 +147,11 @@ function parseTokenMetadataExtension(data: Uint8Array): TokenMetadata | null {
       if (type === 0 && length === 0) {
         return null // 未初始化的填充
       }
-      if (type === EXTENSION_TOKEN_METADATA) {
-        const m = new Reader(data.slice(r.offset, r.offset + length))
-        m.pubkey() // updateAuthority
-        m.pubkey() // mint
-        return { name: m.string(), symbol: m.string(), uri: m.string() }
+      if (type === extensionType) {
+        if (r.offset + length > data.length) {
+          return null
+        }
+        return data.slice(r.offset, r.offset + length)
       }
       r.skip(length)
     }
@@ -154,6 +159,77 @@ function parseTokenMetadataExtension(data: Uint8Array): TokenMetadata | null {
     // 扩展数据不完整：当作没有
   }
   return null
+}
+
+function parseTokenMetadataExtension(data: Uint8Array): TokenMetadata | null {
+  const ext = findExtension(data, EXTENSION_TOKEN_METADATA)
+  if (!ext) {
+    return null
+  }
+  try {
+    const m = new Reader(ext)
+    m.pubkey() // updateAuthority
+    m.pubkey() // mint
+    return { name: m.string(), symbol: m.string(), uri: m.string() }
+  } catch {
+    return null
+  }
+}
+
+/** Token-2022 转账手续费的一套配置：从 epoch 开始生效，费率 basisPoints（万分比），单笔最多 maximumFee（最小单位） */
+export interface TransferFeeInfo {
+  epoch: bigint
+  maximumFee: bigint
+  basisPoints: number
+}
+
+/** Token-2022 TransferFeeConfig 扩展 */
+export interface TransferFeeConfigInfo {
+  /** 可以修改手续费的地址；null 表示不能再改 */
+  transferFeeConfigAuthority: string | null
+  withdrawWithheldAuthority: string | null
+  /** mint 上暂存的、已收取未提取的手续费 */
+  withheldAmount: bigint
+  /** 旧配置：当前 epoch < newer.epoch 时生效 */
+  older: TransferFeeInfo
+  /** 新配置：从 newer.epoch 起生效 */
+  newer: TransferFeeInfo
+}
+
+const ZERO_PUBKEY = '11111111111111111111111111111111'
+
+/**
+ * 解析 mint 账户里的 Token-2022 TransferFeeConfig 扩展（类型 1，108 字节）；
+ * SPL Token、没有这个扩展或数据不完整时为 null。
+ * 当前生效的是 `epoch >= newer.epoch ? newer : older`
+ */
+export function parseTransferFeeConfig(data: Uint8Array): TransferFeeConfigInfo | null {
+  if (!(data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_MINT)) {
+    return null
+  }
+  const ext = findExtension(data, EXTENSION_TRANSFER_FEE_CONFIG)
+  if (!ext) {
+    return null
+  }
+  try {
+    const r = new Reader(ext)
+    // OptionalNonZeroPubkey：全 0 表示没有
+    const configAuthority = r.pubkey()
+    const withdrawAuthority = r.pubkey()
+    const withheldAmount = r.u64()
+    const fee = (): TransferFeeInfo => ({ epoch: r.u64(), maximumFee: r.u64(), basisPoints: r.u16() })
+    const older = fee()
+    const newer = fee()
+    return {
+      transferFeeConfigAuthority: configAuthority === ZERO_PUBKEY ? null : configAuthority,
+      withdrawWithheldAuthority: withdrawAuthority === ZERO_PUBKEY ? null : withdrawAuthority,
+      withheldAmount,
+      older,
+      newer,
+    }
+  } catch {
+    return null
+  }
 }
 
 export interface TokenAccountInfo {
@@ -228,11 +304,17 @@ export function parseMetaplexMetadata(data: Uint8Array): MetaplexMetadata {
   return result
 }
 
-/** 按精度格式化：formatAmount(1_500_000_000n, 9) === '1.5' */
-export function formatAmount(value: bigint, decimals: number): string {
+/** 按精度格式化（与 ethers 的 formatUnits 同名同义）：formatUnits(1_500_000_000n, 9) === '1.5'；不四舍五入，整数不带小数点 */
+export function formatUnits(value: bigint, decimals: number): string {
   const negative = value < 0n
   const digits = (negative ? -value : value).toString().padStart(decimals + 1, '0')
   const whole = digits.slice(0, digits.length - decimals)
   const fraction = digits.slice(digits.length - decimals).replace(/0+$/, '')
   return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
 }
+
+/**
+ * 同 formatUnits。
+ * @deprecated 改用 formatUnits：formatAmount 这个名字容易和项目里的数字展示函数撞名
+ */
+export const formatAmount = formatUnits

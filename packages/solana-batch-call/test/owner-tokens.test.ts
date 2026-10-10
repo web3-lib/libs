@@ -109,6 +109,14 @@ describe('ownerTokens / getOwnerTokens', () => {
     await expect(getOwnerTokens('bad', { provider: node })).rejects.toThrow(/Invalid owner/)
   })
 
+  it("tokenPrograms：只传 'spl' 时不含 Token-2022 代币", async () => {
+    const node = createMockNode({ accounts: world() })
+    const list = await getOwnerTokens(OWNER, { provider: node, tokenPrograms: ['spl'] })
+    expect(list.map((t) => t.symbol)).toEqual(['SOL', 'USDC', null])
+    expect(list.every((t) => t.tokenProgram !== TOKEN_2022_PROGRAM_ID)).toBe(true)
+    expect(node.calls.filter((c) => c.method === 'getTokenAccountsByOwner')).toHaveLength(1)
+  })
+
   it('元数据读取被限频时余额列表照常返回（name / symbol 为 null，且不缓存）', async () => {
     const node = createMockNode({ accounts: world(), errors: { getMultipleAccounts: { code: 429, message: 'Too many requests' } } })
     const sol = new SolanaClient(node, { cluster: 'mainnet' })

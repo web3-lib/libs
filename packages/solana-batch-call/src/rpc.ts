@@ -1,6 +1,8 @@
 /** 最小的 JSON-RPC 传输接口：可以传入自己的实现（如包一层 @solana/kit 的 rpc） */
 export interface RpcTransport {
   request<T = unknown>(method: string, params?: readonly unknown[]): Promise<T>
+  /** 节点名称，用于 AllNodesFailedError / onRequest 里标识节点；不传时自定义传输显示为 'custom' */
+  readonly label?: string
 }
 
 /** 节点返回的 JSON-RPC 错误 */
@@ -19,6 +21,9 @@ export class RpcError extends Error {
       code === 403 ||
       code === 429 ||
       code === -32005 ||
+      // 节点高度没到 minContextSlot：换节点可能成功
+      code === MIN_CONTEXT_SLOT_NOT_REACHED ||
+      /minimum context slot/i.test(message) ||
       /forbidden|blocked|personal token|api.?key|rate.?limit|too many|not allowed|unauthori[sz]ed|limit exceeded|disabled|not available|not supported/i.test(message)
   }
 }
@@ -26,15 +31,52 @@ export class RpcError extends Error {
 /** HTTP 层错误（非 2xx、网络错误、超时） */
 export class HttpError extends Error {
   readonly status: number | undefined
+  /** 请求超时（HttpRpcOptions.timeout） */
+  readonly timeout: boolean
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, timeout = false) {
     super(message)
     this.name = 'HttpError'
     this.status = status
+    this.timeout = timeout
   }
 }
 
-/** 是否是节点问题（应换节点重试）：除了确定性的 JSON-RPC 错误（如参数错误），其余都算 */
+/** JSON-RPC 错误码：节点高度还没到请求的 minContextSlot */
+export const MIN_CONTEXT_SLOT_NOT_REACHED = -32016
+
+/** 是否是请求超时（HttpRpc 的超时，或自定义传输抛出的 TimeoutError） */
+export function isTimeout(err: unknown): boolean {
+  return (err instanceof HttpError && err.timeout) || (err as { name?: unknown } | null)?.name === 'TimeoutError'
+}
+
+/** 是否是“节点高度没到 minContextSlot”（所有节点都落后时也算） */
+export function isBehind(err: unknown): boolean {
+  if (err instanceof AllNodesFailedError) {
+    return err.errors.length > 0 && err.errors.every((e) => isBehind(e.error))
+  }
+  return err instanceof RpcError && (err.code === MIN_CONTEXT_SLOT_NOT_REACHED || /minimum context slot/i.test(err.message))
+}
+
+/**
+ * 多节点时所有节点都失败（都是节点问题）。errors 是各节点的错误，按尝试顺序；
+ * node 是节点名称（URL 只保留 host，不会带出 path / query 里的 API Key）
+ */
+export class AllNodesFailedError extends Error {
+  readonly errors: ReadonlyArray<{ node: string; error: unknown }>
+
+  constructor(errors: ReadonlyArray<{ node: string; error: unknown }>) {
+    super(`All RPC nodes failed: ${errors.map((e) => `${e.node}: ${errorMessage(e.error)}`).join(' | ')}`, { cause: errors[errors.length - 1]?.error })
+    this.name = 'AllNodesFailedError'
+    this.errors = errors
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** 是否是节点问题（应换节点重试）：除了确定性的 JSON-RPC 错误（如参数错误），其余都算（包括 AllNodesFailedError） */
 export function isNodeFault(err: unknown): boolean {
   if (err instanceof RpcError) {
     return err.nodeFault
@@ -86,6 +128,8 @@ function isBatchLimitError(message: string | undefined): boolean {
  */
 export class HttpRpc implements RpcTransport {
   readonly url: string
+  /** 报错信息里用的地址：只保留 origin，不带 path / query（常含 API Key） */
+  readonly #safeUrl: string
   readonly #timeout: number
   readonly #headers: Record<string, string>
   readonly #batchWait: number
@@ -98,6 +142,7 @@ export class HttpRpc implements RpcTransport {
 
   constructor(url: string, options: HttpRpcOptions = {}) {
     this.url = url
+    this.#safeUrl = safeOrigin(url)
     this.#timeout = options.timeout ?? 10_000
     this.#headers = { 'content-type': 'application/json', ...options.headers }
     this.#maxBatchSize = Math.max(1, options.maxBatchSize ?? 20)
@@ -234,7 +279,9 @@ export class HttpRpc implements RpcTransport {
           signal: this.#timeout > 0 && Number.isFinite(this.#timeout) ? AbortSignal.timeout(this.#timeout) : undefined,
         })
       } catch (err) {
-        throw new HttpError(`Request to ${this.url} failed: ${(err as Error)?.message ?? err}`)
+        // AbortSignal.timeout 触发时是 TimeoutError（DOMException）
+        const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
+        throw new HttpError(`Request to ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, undefined, timeout)
       }
       if (response.status === 429 && attempt < this.#retries) {
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
@@ -245,11 +292,11 @@ export class HttpRpc implements RpcTransport {
       try {
         body = parseJson(text)
       } catch {
-        throw new HttpError(`Invalid JSON from ${this.url} (HTTP ${response.status})`, response.status)
+        throw new HttpError(`Invalid JSON from ${this.#safeUrl} (HTTP ${response.status})`, response.status)
       }
       // 非 2xx 但返回了 JSON-RPC 结构（如 403 Access forbidden、drpc 的 500 + 批量错误数组）：交给上层解析
       if (!response.ok && !Array.isArray(body) && !(body as RpcResponse)?.error) {
-        throw new HttpError(`HTTP ${response.status} from ${this.url}`, response.status)
+        throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}`, response.status)
       }
       // 有的节点限频时返回 HTTP 200 + JSON-RPC 错误码 429：同样退避重试
       if (attempt < this.#retries && isRateLimited(body)) {
@@ -282,6 +329,14 @@ function parseJson(text: string): unknown {
   return JSON.parse(text.replace(/([:[,]\s*)(-?\d{16,})(?=\s*[,}\]])/g, '$1"$2"'))
 }
 
+function safeOrigin(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return 'invalid URL'
+  }
+}
+
 function isRateLimited(body: unknown): boolean {
   const responses = (Array.isArray(body) ? body : [body]) as RpcResponse[]
   return responses.length > 0 && responses.every((res) => res?.error?.code === 429)
@@ -297,19 +352,143 @@ function settle(item: Pending, response: RpcResponse | undefined): void {
   }
 }
 
+/**
+ * onRequest 的事件：每个 JSON-RPC 调用对每个节点的每次尝试一条（合并成批量 HTTP 请求时，批里每个调用各一条，
+ * ms 是该调用从发出到返回的时间；HttpRpc 内部的 429 退避重试算在同一条里）
+ */
+export interface RequestEvent {
+  /** 节点名称：URL 的 host，自定义传输的 label（没有时为 'custom'） */
+  node: string
+  method: string
+  ms: number
+  ok: boolean
+  /** 失败时的错误 */
+  error?: unknown
+  /** 本次调用按故障切换顺序尝试的第几个节点（0 起）；大于 0 说明换过节点 */
+  attempt: number
+}
+
+const requestListeners = new Set<(event: RequestEvent) => void>()
+
+/**
+ * 监听所有客户端发出的 JSON-RPC 调用（节点、方法、耗时、成功与否、第几次尝试），用于统计和排查。返回取消监听的函数。
+ *
+ * ```ts
+ * const stop = onRequest((e) => console.log(e.node, e.method, e.ms, e.ok, e.attempt))
+ * ```
+ */
+export function onRequest(listener: (event: RequestEvent) => void): () => void {
+  requestListeners.add(listener)
+  return () => {
+    requestListeners.delete(listener)
+  }
+}
+
+function emit(event: RequestEvent): void {
+  for (const listener of requestListeners) {
+    try {
+      listener(event)
+    } catch {
+      // 监听函数出错不影响请求
+    }
+  }
+}
+
+/** 节点名称：优先用传输自带的 label；HttpRpc 取 URL 的 host（不带 path / query，避免泄露 API Key） */
+export function nodeLabel(node: RpcTransport): string {
+  if (typeof node.label === 'string') {
+    return node.label
+  }
+  const base = unwrap(node)
+  if (base !== node && typeof base.label === 'string') {
+    return base.label
+  }
+  if (base instanceof HttpRpc) {
+    try {
+      return new URL(base.url).host || 'custom'
+    } catch {
+      return 'custom'
+    }
+  }
+  return 'custom'
+}
+
+/** 去掉校验层等包装（有 inner 属性的传输），取底层节点 */
+function unwrap(node: RpcTransport): RpcTransport {
+  let current = node
+  for (let inner = (current as { inner?: RpcTransport }).inner; inner && typeof inner.request === 'function'; inner = (current as { inner?: RpcTransport }).inner) {
+    current = inner
+  }
+  return current
+}
+
+interface NodeHealth {
+  /** 上次出错（进入冷却）的时间，0 表示健康 */
+  failedAt: number
+  /** 连续超时次数 */
+  timeouts: number
+}
+
+// 节点健康状态按节点共享（模块级）：客户端重建后，刚出过错的节点仍排在后面。URL 节点按完整 URL，其他按对象
+const healthByUrl = new Map<string, NodeHealth>()
+let healthByObject = new WeakMap<object, NodeHealth>()
+const MAX_TRACKED_URLS = 1000
+/** 连续超时这么多次才冷却（单次超时多半只是这次请求慢） */
+const TIMEOUTS_BEFORE_COOLDOWN = 3
+
+/** 健康状态的 key：HttpRpc 按完整 URL（不同连接对象共享），其他节点按对象（去掉校验层） */
+function healthKeyOf(node: RpcTransport): string | object {
+  const base = unwrap(node)
+  return base instanceof HttpRpc ? base.url : base
+}
+
+/** 每次用时按 key 从全局表里取：表淘汰条目后，各实例仍取到同一个对象 */
+function healthOf(key: string | object): NodeHealth {
+  if (typeof key === 'string') {
+    let health = healthByUrl.get(key)
+    if (!health) {
+      health = { failedAt: 0, timeouts: 0 }
+      healthByUrl.set(key, health)
+      if (healthByUrl.size > MAX_TRACKED_URLS) {
+        healthByUrl.delete(healthByUrl.keys().next().value as string)
+      }
+    }
+    return health
+  }
+  let health = healthByObject.get(key)
+  if (!health) {
+    health = { failedAt: 0, timeouts: 0 }
+    healthByObject.set(key, health)
+  }
+  return health
+}
+
+/** 测试用：清空节点健康状态 */
+export function resetNodeHealth(): void {
+  healthByUrl.clear()
+  healthByObject = new WeakMap()
+}
+
 export interface FallbackOptions {
   /** 出错节点的冷却时间（毫秒），期间排到最后。默认 30000 */
   cooldown?: number
 }
 
 /**
- * 多节点故障切换：按顺序使用，节点问题（网络、超时、限频、需要 Key、403 等）换下一个；
- * 参数错误等确定性错误直接抛出。出错的节点在冷却期内排到最后。
+ * 多节点故障切换：按顺序使用，节点问题（网络、超时、限频、需要 Key、403、高度不够等）换下一个；
+ * 参数错误等确定性错误直接抛出。单个节点也用它包一层（统一 onRequest 事件），此时失败抛原始错误。
+ *
+ * - 出错的节点在冷却期内排到最后；健康状态按节点全局共享（URL 相同即同一节点），客户端重建后仍然有效
+ * - 超时只换节点、不冷却（大批量查询慢一点很正常），同一节点连续 3 次超时才冷却
+ * - 节点高度没到 minContextSlot 只换节点、不冷却（只是这次请求要求的 slot 太新）
+ * - 多个节点都失败时抛 AllNodesFailedError，带上每个节点的错误
  */
 export class FallbackRpc implements RpcTransport {
   readonly nodes: readonly RpcTransport[]
   readonly #cooldown: number
-  readonly #failedAt: number[]
+  /** 节点标识和健康状态的 key 不会变，构造时算好（每次请求只做一次 Map 查找） */
+  readonly #labels: readonly string[]
+  readonly #healthKeys: ReadonlyArray<string | object>
 
   constructor(nodes: readonly RpcTransport[], options: FallbackOptions = {}) {
     if (!nodes.length) {
@@ -317,33 +496,54 @@ export class FallbackRpc implements RpcTransport {
     }
     this.nodes = nodes
     this.#cooldown = options.cooldown ?? 30_000
-    this.#failedAt = nodes.map(() => 0)
+    this.#labels = nodes.map(nodeLabel)
+    this.#healthKeys = nodes.map(healthKeyOf)
   }
 
   async request<T = unknown>(method: string, params?: readonly unknown[]): Promise<T> {
-    let lastError: unknown
-    for (const index of this.#order()) {
+    const errors: Array<{ node: string; error: unknown }> = []
+    const order = this.#order()
+    for (let attempt = 0; attempt < order.length; attempt++) {
+      const index = order[attempt] as number
+      const node = this.nodes[index] as RpcTransport
+      const label = this.#labels[index] as string
+      const health = healthOf(this.#healthKeys[index] as string | object)
+      const started = Date.now()
       try {
-        const result = await (this.nodes[index] as RpcTransport).request<T>(method, params)
-        this.#failedAt[index] = 0
+        const result = await node.request<T>(method, params)
+        health.failedAt = 0
+        health.timeouts = 0
+        emit({ node: label, method, ms: Date.now() - started, ok: true, attempt })
         return result
       } catch (err) {
+        emit({ node: label, method, ms: Date.now() - started, ok: false, error: err, attempt })
         if (!isNodeFault(err)) {
           throw err
         }
-        this.#failedAt[index] = Date.now()
-        lastError = err
+        if (isTimeout(err)) {
+          if (++health.timeouts >= TIMEOUTS_BEFORE_COOLDOWN) {
+            health.failedAt = Date.now()
+            health.timeouts = 0
+          }
+        } else if (!isBehind(err)) {
+          health.failedAt = Date.now()
+        }
+        errors.push({ node: label, error: err })
       }
     }
-    throw lastError
+    if (this.nodes.length === 1) {
+      throw errors[0]?.error
+    }
+    throw new AllNodesFailedError(errors)
   }
 
   #order(): number[] {
     const now = Date.now()
+    const failedAt = this.#healthKeys.map((key) => healthOf(key).failedAt)
     const healthy: number[] = []
     const cooling: number[] = []
-    this.#failedAt.forEach((at, i) => (at && now - at < this.#cooldown ? cooling : healthy).push(i))
-    cooling.sort((a, b) => (this.#failedAt[a] as number) - (this.#failedAt[b] as number))
+    failedAt.forEach((at, i) => (at && now - at < this.#cooldown ? cooling : healthy).push(i))
+    cooling.sort((a, b) => (failedAt[a] as number) - (failedAt[b] as number))
     return [...healthy, ...cooling]
   }
 }

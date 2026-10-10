@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { FallbackRpc, GENESIS_HASHES, HttpRpc, NetworkCheckedRpc, NetworkMismatchError, RpcError, SolanaClient, isNodeFault } from '../src/index.js'
+import { AllNodesFailedError, FallbackRpc, GENESIS_HASHES, HttpRpc, NetworkCheckedRpc, NetworkMismatchError, RpcError, SolanaClient, isNodeFault } from '../src/index.js'
 import { resolveSource } from '../src/source.js'
 import { createMockNode } from './mock.js'
 
@@ -132,7 +132,9 @@ describe('网络校验', () => {
     const mainnet = createMockNode({ genesis: GENESIS_HASHES.mainnet, errors: { getMultipleAccounts: { code: 403, message: 'Access forbidden' } } })
     const devnet = createMockNode({ genesis: GENESIS_HASHES.devnet })
     const client = new SolanaClient([mainnet, devnet])
-    await expect(client.solBalances(['5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9'])).rejects.toThrow(NetworkMismatchError)
+    const err = (await client.solBalances(['5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9']).catch((e: unknown) => e)) as AllNodesFailedError
+    expect(err).toBeInstanceOf(AllNodesFailedError)
+    expect(err.errors.map((e) => e.error)).toEqual([expect.any(RpcError), expect.any(NetworkMismatchError)])
     expect(await client.getCluster()).toBe('mainnet')
   })
 
@@ -144,18 +146,20 @@ describe('网络校验', () => {
     expect(node.calls.filter((c) => c.method === 'getGenesisHash')).toHaveLength(1)
   })
 
-  it('内置节点与单节点（未指定 cluster）不包校验层', () => {
+  it('内置节点与单节点（未指定 cluster）不包校验层；单节点也包一层 FallbackRpc', () => {
+    const node = (source: Parameters<typeof resolveSource>[0], cluster?: 'mainnet') => (resolveSource(source, cluster).transport as FallbackRpc).nodes[0]
     expect(resolveSource(undefined, 'mainnet').transport).toBeInstanceOf(FallbackRpc)
-    expect((resolveSource(undefined, 'mainnet').transport as FallbackRpc).nodes[0]).toBeInstanceOf(HttpRpc)
-    expect(resolveSource('https://rpc.example', undefined).transport).toBeInstanceOf(HttpRpc)
-    expect(resolveSource('https://rpc.example', 'mainnet').transport).toBeInstanceOf(NetworkCheckedRpc)
+    expect(node(undefined, 'mainnet')).toBeInstanceOf(HttpRpc)
+    expect(resolveSource('https://rpc.example', undefined).transport).toBeInstanceOf(FallbackRpc)
+    expect(node('https://rpc.example')).toBeInstanceOf(HttpRpc)
+    expect(node('https://rpc.example', 'mainnet')).toBeInstanceOf(NetworkCheckedRpc)
   })
 
   it('支持 web3.js Connection（rpcEndpoint）与自定义传输', () => {
-    const fromConnection = resolveSource({ rpcEndpoint: 'https://conn.example' }, undefined).transport as HttpRpc
+    const fromConnection = (resolveSource({ rpcEndpoint: 'https://conn.example' }, undefined).transport as FallbackRpc).nodes[0] as HttpRpc
     expect(fromConnection.url).toBe('https://conn.example')
     const custom = createMockNode()
-    expect(resolveSource(custom, undefined).transport).toBe(custom)
+    expect((resolveSource(custom, undefined).transport as FallbackRpc).nodes[0]).toBe(custom)
     expect(() => resolveSource({} as never, undefined)).toThrow(/Unsupported RPC source/)
   })
 })
