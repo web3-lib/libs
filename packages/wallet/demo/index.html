@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/wallet demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 12h16v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2z' fill='%23fff'/%3E%3Ccircle cx='21' cy='17' r='1.6' fill='%232563eb'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/wallet <small>demo</small></h1>
+      <div class="segmented" id="theme" role="radiogroup" aria-label="主题">
+        <button data-value="light">浅色</button>
+        <button data-value="dark">深色</button>
+        <button data-value="auto">跟随系统</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>设置</h2>
+        <div class="row">
+          <label>选择方式</label>
+          <div class="segmented" id="flow">
+            <button data-value="chain-first">先选链，再选钱包</button>
+            <button data-value="wallet-first">先选钱包，再选链</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>连接模式</label>
+          <div class="segmented" id="mode">
+            <button data-value="single">single（同时只连一个）</button>
+            <button data-value="multi">multi（每条链各连一个）</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>启用的链</label>
+          <div class="checks" id="chains"></div>
+        </div>
+        <div class="row">
+          <label for="projectId">WalletConnect</label>
+          <input id="projectId" placeholder="projectId（https://cloud.reown.com 申请；不填不启用扫码）" />
+        </div>
+        <p class="hint">
+          改动设置会重新创建 wallet，已连接的钱包会自动恢复（从 multi 切到 single 时只保留当前钱包）。<br />
+          WalletConnect：projectId 要在 Reown 后台把当前域名加进允许列表；它的 SDK 只在填了 projectId 后才从 esm.sh 加载。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>连接</h2>
+        <div class="actions">
+          <button class="primary" id="open">连接钱包（自带弹窗）</button>
+          <span class="muted" id="result"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>当前状态</h2>
+        <dl class="state" id="state"></dl>
+        <div class="actions">
+          <button id="sign">签名消息</button>
+          <select id="switchTo" aria-label="切到哪条链"></select>
+          <button id="switch">切链（EVM）</button>
+          <button id="disconnect">断开</button>
+          <button id="disconnectAll">全部断开</button>
+        </div>
+        <pre class="output" id="output" hidden></pre>
+      </section>
+
+      <section class="card">
+        <h2>自己画钱包列表 <small class="muted">不用自带弹窗：watchWallets / watchWalletGroups</small></h2>
+        <div class="segmented" id="listKind">
+          <button data-value="chain-first">按链</button>
+          <button data-value="wallet-first">按钱包</button>
+        </div>
+        <div id="customList"></div>
+      </section>
+
+      <section class="card">
+        <h2>事件 <button class="link" id="clearLog">清空</button></h2>
+        <ol class="log" id="log"></ol>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/web3-lib/libs/tree/main/packages/wallet">源码和文档</a>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

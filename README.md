@@ -6,6 +6,7 @@ Web3 工具库 monorepo（pnpm workspace），每个库独立发布到 npm。
 | --- | --- |
 | [@w3lib/evm-batch-call](packages/evm-batch-call) | 基于 Multicall3 的 EVM / Tron 批量只读请求与预执行，API 兼容 ethcall；批量转账 / 归集 / 批量调用合约，EVM 与 Tron（子路径 `/write`） |
 | [@w3lib/solana-batch-call](packages/solana-batch-call) | Solana 批量读取：SOL / SPL / Token-2022 余额、代币详情、NFT，不依赖 Solana SDK；子路径 `/write`：批量转账、归集、批量调用程序 |
+| [@w3lib/wallet](packages/wallet) | 浏览器钱包连接：EVM（EIP-6963、WalletConnect）、Solana、Sui、Tron、TON，自动恢复、统一事件和错误；框架无关，可选的自带连接弹窗（浅色 / 深色）、Vue / React hook、内置常用链；[在线 demo](https://web3-lib.github.io/libs/) |
 
 ## 目录结构
 

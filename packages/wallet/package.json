@@ -1,0 +1,120 @@
+{
+  "name": "@w3lib/wallet",
+  "version": "0.1.0",
+  "description": "Framework-agnostic browser wallet connection for EVM (EIP-6963, WalletConnect), Solana and Sui (Wallet Standard), Tron and TON. Multi-chain connections, auto-reconnect, events, chain switching, chain presets, Vue/React hooks and an optional built-in connect modal. No bundled SDKs.",
+  "keywords": [
+    "wallet",
+    "connect",
+    "eip-6963",
+    "walletconnect",
+    "wallet-standard",
+    "solana",
+    "tron",
+    "sui",
+    "ton",
+    "vue",
+    "react",
+    "connect-modal"
+  ],
+  "license": "MIT",
+  "author": "L",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./evm": {
+      "types": "./dist/evm/index.d.ts",
+      "import": "./dist/evm/index.js"
+    },
+    "./solana": {
+      "types": "./dist/solana/index.d.ts",
+      "import": "./dist/solana/index.js"
+    },
+    "./sui": {
+      "types": "./dist/sui/index.d.ts",
+      "import": "./dist/sui/index.js"
+    },
+    "./tron": {
+      "types": "./dist/tron/index.d.ts",
+      "import": "./dist/tron/index.js"
+    },
+    "./ton": {
+      "types": "./dist/ton/index.d.ts",
+      "import": "./dist/ton/index.js"
+    },
+    "./chains": {
+      "types": "./dist/chains/index.d.ts",
+      "import": "./dist/chains/index.js"
+    },
+    "./vue": {
+      "types": "./dist/vue/index.d.ts",
+      "import": "./dist/vue/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "vue": ">=3.3"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
+    "demo": "vite demo",
+    "demo:build": "vite build demo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/web3-lib/libs.git",
+    "directory": "packages/wallet"
+  },
+  "homepage": "https://github.com/web3-lib/libs/tree/main/packages/wallet#readme",
+  "bugs": {
+    "url": "https://github.com/web3-lib/libs/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@tonconnect/sdk": "3.4.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "^20.14.6",
+    "jsqr": "^1.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "vite": "^8.3.4",
+    "vue": "^3.5.43"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@w3lib/wallet": ["../src/index.ts"],
+      "@w3lib/wallet/*": ["../src/*/index.ts"]
+    }
+  },
+  "include": ["main.ts", "vite.config.ts"]
+}
