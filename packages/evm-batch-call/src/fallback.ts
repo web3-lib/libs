@@ -187,6 +187,14 @@ export class FallbackRpc implements EthersLikeProvider {
     )
   }
 
+  /**
+   * 用任意方法请求节点，与 call / getBalance 相同的故障切换（写操作模块用：nonce、预估 gas、广播交易、查回执等）。
+   * fn 抛出的确定性错误（revert、参数错误等）直接抛出，不换节点
+   */
+  request<T>(method: string, fn: (node: EthersLikeProvider) => Promise<T>): Promise<T> {
+    return this.#run(method, fn)
+  }
+
   #health(index: number): Health {
     return healthOf(this.#healthKeys[index] as string | object, this.#healthScopes[index])
   }

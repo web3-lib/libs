@@ -1,7 +1,7 @@
 {
   "name": "@w3lib/evm-batch-call",
   "version": "0.4.2",
-  "description": "Batched EVM/Tron contract reads via Multicall3 with deployless fallback, native balances, RPC failover, auto-batching and staticCall simulation. ethcall compatible.",
+  "description": "Batched EVM/Tron contract reads via Multicall3 with deployless fallback, native balances, RPC failover, auto-batching and staticCall simulation; batch transfer, collect and contract calls (Disperse / EIP-7702). ethcall compatible.",
   "keywords": [
     "ethers",
     "ethereum",
@@ -9,7 +9,10 @@
     "multicall",
     "multicall3",
     "batch",
-    "ethcall"
+    "ethcall",
+    "batch-transfer",
+    "disperse",
+    "eip-7702"
   ],
   "license": "MIT",
   "author": "L",
@@ -28,6 +31,10 @@
     "./owner": {
       "types": "./dist/subpaths/owner.d.ts",
       "import": "./dist/subpaths/owner.js"
+    },
+    "./write": {
+      "types": "./dist/subpaths/write.d.ts",
+      "import": "./dist/subpaths/write.js"
     }
   },
   "files": [

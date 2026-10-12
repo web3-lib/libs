@@ -1,6 +1,6 @@
 # @w3lib/evm-batch-call
 
-基于 Multicall3 的 EVM / Tron 批量合约读取与交易预执行库，依赖 ethers v6，API 兼容 [ethcall](https://github.com/Destiner/ethcall)。
+基于 Multicall3 的 EVM / Tron 批量合约读取与交易预执行库，依赖 ethers v6，API 兼容 [ethcall](https://github.com/Destiner/ethcall)。另有[批量写操作](#批量写操作)（批量转账、归集、批量调用合约）。
 
 ```bash
 pnpm add @w3lib/evm-batch-call ethers
@@ -51,7 +51,7 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | `getErc1155Balances(owner, items, opts)` | `erc1155Balances(multi, owner, items)` | **`/nft`**。ERC1155 余额 |
 | `getOwnerTokens(owner, opts)` | `ownerTokens(multi, owner, opts)` | **子路径 `/owner`**。资产列表：地址持有的代币（**不推荐使用**，结果不保证完整，见[资产列表](#资产列表)） |
 
-**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 44KB、gzip 约 16KB，均不含 ethers）。
+**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`，批量写操作在 `@w3lib/evm-batch-call/write`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 44KB、gzip 约 16KB，均不含 ethers）。
 
 共同的规则：
 
@@ -359,6 +359,108 @@ for (const r of results) {
 ```
 
 预执行**不走 multicall**：multicall 里子调用的 `msg.sender` 是 multicall 合约，也无法逐条带 `value`，与真实交易不一致。每条都是对目标合约的独立 `eth_call`，同时发出（`JsonRpcProvider` 会合进一个 JSON-RPC batch 请求）。
+
+## 批量写操作
+
+子路径 `@w3lib/evm-batch-call/write`，只做查询时打包不会带上。三个函数都复用 `Provider`（节点故障切换、一次 multicall 读余额 / decimals）。在已经用到 `Provider` 的基础上，只引入 `batchCall` 约增加 12KB（minify，gzip 约 4KB），三个函数都引入约 21KB（gzip 约 8KB），均不含 ethers；私钥用 ethers 的 `BaseWallet` 签名，不会带上 `Wallet` 的 keystore 加解密代码（约 74KB）：
+
+```ts
+import { Contract, ERC20_ABI, NATIVE_TOKEN, Provider } from '@w3lib/evm-batch-call'
+import { batchCall, batchCollect, batchTransfer } from '@w3lib/evm-batch-call/write'
+
+const multi = new Provider(56, [rpc1, rpc2])
+
+// 一对多转账：默认走 Disperse 合约，每种代币一笔交易（代币先 approve 本次的精确总额）
+await batchTransfer(multi, privateKey, [
+  { to: a, formatted: '1.5' },                // 默认代币（token 选项，默认主币）
+  { to: b, amount: 10n ** 18n },              // amount 是最小单位，formatted 按精度换算，二选一
+  { to: c, token: USDT, formatted: '20' },    // 主币、代币可以混在一起
+])
+
+// 归集：多个钱包 → 一个地址；主币不够付手续费的子钱包先由 gasWallet 补 gas
+const { results, topUps } = await batchCollect(multi, [key1, key2, key3], hotWallet, {
+  tokens: [USDT, NATIVE_TOKEN],   // 包含主币：代币归集确认后，扣掉手续费扫空剩余主币
+  gasWallet: gasKey,
+})
+
+// 通用批量调用合约
+const usdt = new Contract(USDT, ERC20_ABI)
+await batchCall(multi, [
+  { from: key1, call: usdt.approve(router, amount) },
+  { from: key1, to: router, data: swapData },  // 依赖上一笔：预估失败时先等 approve 确认再预估
+  { from: key2, to: someone, value: 10n ** 16n },
+])
+```
+
+**钱包**：私钥字符串，或 ethers Signer。能本地签名的（`Wallet` 等）自己管理 nonce，可以连续发出、等待时重发；浏览器钱包的 `JsonRpcSigner` 交给钱包签名并发送（每笔需要用户确认，不支持 `'7702'`）。
+
+**发送方式**：
+
+| mode | 说明 | 用于 |
+| --- | --- | --- |
+| `'tx'` | 每个调用一笔交易。同一钱包按 nonce 顺序连续发出（不等上一笔确认），不同钱包并发（`concurrency`，默认 8） | `batchCall` 默认；所有链 |
+| `'disperse'` | [Disperse](https://disperse.app) 合约（`DISPERSE_ADDRESS`），每种代币每 `batchSize`（默认 200）个收款人一笔交易 | `batchTransfer` 默认 |
+| `'7702'` | 钱包通过 EIP-7702 委托给 Simple7702Account（`SIMPLE_7702_ACCOUNT`，eth-infinitism），同一钱包的调用合成一笔发给自己的 `executeBatch` 交易（每 `batchSize`，默认 50 个一笔），一笔里的调用要么全成功要么全失败；`msg.sender` 仍是钱包本身 | `batchCall` / `batchTransfer` 可选 |
+
+- **Disperse 自动退回逐笔发送**：链上没有 Disperse 合约、某种代币只有一个收款人、某一批预估就 revert（收款地址拒收主币、转账收税的代币、被拉黑的地址等）时，这部分改为逐笔发送，出问题的收款项单独标记失败。结果里的 `via` 是实际的发送方式。Disperse 只会从调用者自己的账户 `transferFrom`，approve 给它的额度别人无法动用
+- **7702 会改变账户**：委托一直保留，直到撤销（`revokeDelegation(multi, key)`）。钱包已委托给其他合约时默认报错，传 `redelegate: true` 才会改。需要链支持 EIP-7702、委托合约在这条链上已部署（没部署时直接报错：委托给没有代码的地址时调用会“成功”但什么都不执行），钱包需要能本地签名 7702 授权（私钥 / ethers Wallet）。发授权交易时钱包不能有未确认的交易（否则 gas 预估不准、上链后执行失败）。第一笔带授权的交易确认后才发同一钱包的下一笔，没确认（超时）时后面的批次跳过
+- **Disperse 不能用于通用调用**：它只能分发主币 / 代币。任意合约调用合成一笔交易只能用 `'7702'`（Multicall3 的 `msg.sender` 是 Multicall3 合约本身，approve 或转给它的代币任何人都能拿走）
+
+**结果**：与输入一一对应，字段都是字符串 / 数字 / null，可以直接 `JSON.stringify`：
+
+```ts
+{ index: 0, from, to, status: 'confirmed', hash: '0x…', nonce: 7, gasLimit: '55320', gasUsed: '46100', fee: '46100000000000', blockNumber: 123, error: null }
+// batchTransfer 另有 token / native / amount / formatted / via / approvals（为走 Disperse 发出的 approve 交易）；batchCollect 另有 token / native / amount / formatted
+```
+
+| status | 含义 |
+| --- | --- |
+| `confirmed` | 已上链且执行成功 |
+| `reverted` | 已上链但执行失败（手续费已扣） |
+| `failed` | 没有发出去（预估 revert、余额不足、节点拒绝、用户在钱包里拒绝），不花手续费；`error` 是原因（能解析时带 revert 原因） |
+| `sent` | 已广播，没等确认（`wait: false`，或等待中途取消）。广播结果不确定的交易也算 `sent`（超时 / 连不上节点，或前一个节点超时后另一个节点拒绝；浏览器钱包已广播、之后查询出错），可能已进交易池，不能当作失败重试，`error` 里有说明，等待期间会定期重发。节点明确拒绝的（给出了错误信息）是 `failed` |
+| `pending` | 等到 `timeout` 还没确认，之后仍可能上链 |
+| `skipped` | 没有执行：同一钱包前面的调用发送前失败（`batchCall` 默认 `continueOnError: false`；已发出、之后上链 revert 的拦不住后面已发出的交易）、已取消、同一笔 7702 交易里其他调用失败、余额为 0 等 |
+| `simulated` | `dryRun: true` 时预估通过（不发交易） |
+
+**依赖前一笔的调用**：预估 gas 失败且同一钱包还有未确认的交易时，先等它们确认再重新预估一次，所以“先 approve 再调用”可以直接写在一批里。`dryRun` 不会真的执行前一笔，这类调用预估会失败。
+
+**归集流程**（`batchCollect`）：一次 multicall 读出所有钱包的余额 → 预估每笔归集的手续费（gasLimit × maxFeePerGas，OP Stack / Scroll 加上 L1 数据费）→ 不够的钱包由 `gasWallet` 补上差额（`gasMode`，默认 `'disperse'` 一笔补齐，等确认）→ 重新预估、发代币归集（手续费价格沿用补 gas 时的那一个，补 gas 等确认期间节点报价上涨也不会超出补的数量）→ 包含主币时等代币归集确认，按最新余额（`minBlock` 不早于最后一笔交易的区块）扣掉手续费扫空。代币没有全部归集成功的钱包不扫主币（留着付重新归集的手续费）；补的 gas 用剩的零头不够付扫尾手续费时，主币一项也为 `skipped`。余额为 0、低于 `minAmount`、钱包就是归集地址的项为 `skipped`。`dryRun: true` 返回计划（补多少 gas、每笔 gasLimit），不发交易。
+
+Disperse / 7702 里同一笔交易的多个调用，`hash`、`fee`、`gasUsed` 都是整笔交易的值（汇总手续费时按 `hash` 去重）。
+
+**nonce 被占用**：广播时节点说 nonce 已被用掉，先多查几次回执（节点可能落后）：是这笔已上链就按已发出处理；确定没上链（钱包在别处发了交易）才换 nonce 重发；查询出错时不确定，按已发出跟踪，绝不重发。
+
+**浏览器钱包**（ethers 的 `JsonRpcSigner`）：先确认钱包当前所在的链与 Provider 一致，不一致时报错、不发送（否则会在另一条链上真的转账）；交易里也带上 `chainId`，钱包会再校验一次。
+
+**共同选项**（`SendOptions`）：`wait`（默认 true，等上链确认）、`timeout`（默认 180 秒）、`pollInterval`（默认 2 秒，等待期间每 5 次重发一次原交易）、`concurrency`、`gasMultiplier`（gas 预估的放大倍数，默认 1.2）、`gasPrice` / `maxFeePerGas` / `maxPriorityFeePerGas`（不传按节点的 `getFeeData`）、`dryRun`、`signal`（取消：不再发新交易）、`onUpdate`（每个结果状态变化时回调，用于展示进度；回调抛错会被忽略，不影响发送）。
+
+**Tron**：同样的 `batchCall` / `batchTransfer` / `batchCollect`，传 Tron 的 `Provider` 即可（地址可以用 T 开头的格式）。Tron 部分按需加载：打包工具做代码分割时（Vite / Rollup / webpack 默认如此），只用 EVM 不会带上它（约 17KB）。
+
+```ts
+const tron = new Provider(TRON_CHAIN_ID.mainnet, 'https://api.trongrid.io', { tron: { apiKey } })
+await batchTransfer(tron, privateKey, [{ to: 'T…', formatted: '1.5' }, { to: 'T…', token: USDT, formatted: '20' }])
+await batchCollect(tron, [key1, key2], hotWallet, { tokens: [USDT, NATIVE_TOKEN], gasWallet: gasKey })
+```
+
+- 交易在本地按 protobuf 编码（与 TronWeb 逐字节一致）、本地签名，通过 `/wallet/broadcasthex` 广播：不让节点代为构造交易，节点无法替换交易内容
+- 每个调用一笔交易（Tron 上没有通用的 Disperse 合约，`mode` 不支持 `'7702'`，`gasMode` 和调用里的 `gasLimit` 不起作用）；Tron 没有 nonce，交易互不阻塞
+- 合约调用先用 `triggerconstantcontract` 模拟，revert 的不发送；`fee_limit` 默认按模拟的能量 × 能量单价 × 1.5（`feeLimit` 可以指定）
+- **发送前检查 TRX 够不够**：Tron 上能量不够的合约调用照样上链、执行失败（OUT_OF_ENERGY）并烧掉 TRX，所以按每笔的金额 + 能量（× 1.2，扣掉质押的能量）+ 带宽 + 激活费累计，不够的那笔及之后在发送前就是 `failed`
+- 给合约地址转 TRX 时用合约调用（空 calldata 带 `call_value`），主网禁止用普通转账给合约转 TRX
+- 交易 60 秒过期（浏览器钱包 3 分钟）。过期判断按固化数据：同一个节点上固化区块的时间超过过期时间 + 60 秒、并且固化的交易信息里没有这笔，连续两次确认后才换新的参考区块重发，最多 `retries` 次（默认 2）；查询出错时一律当作“不确定”，不会重发，避免重复执行
+- 广播时只有交易本身的问题（签名、合约校验、带宽不够、交易太大）判为 `failed`；其他错误码（如 TAPOS_ERROR、节点忙）可能只是某个节点的问题，按 `sent` 继续跟踪
+- 默认 `pollInterval` 3 秒，等待期间每 3 次重发一次原交易
+- 带宽按 java-tron 的规则算：质押带宽或免费带宽有一项够这笔交易用时不收费，两者不能凑在一起用，都不够时整笔按字节烧 TRX
+- 归集的手续费按上面的资源模型算；没激活的子钱包由补 gas 的转账激活（激活费约 1.1 TRX 由 `gasWallet` 付），补 gas 前先确认 `gasWallet` 付得起全部（含激活费），不够时什么都不发、直接报错；TRX 余额读不到的钱包不补 gas。扫空 TRX 时扣掉带宽费；归集地址是合约时还要预留能量，会剩一点零头
+- 结果的 `hash` 是交易 ID（不带 0x），`gasLimit` 是模拟的能量，`gasUsed` 是实际消耗的能量，`fee` 是实际烧掉的 sun；`nonce` 为 null
+- 钱包：私钥、ethers `Wallet`、自定义 `{ address, signDigest(digest) }`（KMS / 硬件钱包），或浏览器钱包：注入的 `window.tronWeb`（TronLink / OKX 等）、@tronweb3/tronwallet-adapter 的 adapter
+- 浏览器钱包：每笔交易弹一次确认（Tron 钱包不支持一次签多笔），过期时间放宽到 3 分钟。钱包拿到的是 TronWeb 格式的交易 JSON（能通过 TronWeb 的 `txCheck`，和本地编码的 `raw_data_hex` 一致）；签完后从签名恢复出地址核对，钱包切换了账户或改了交易时这笔失败。用户拒绝时 `error` 为 `'rejected by user'`
+
+```ts
+await window.tronLink.request({ method: 'tron_requestAccounts' }) // 先连接（TronLink）
+await batchTransfer(new Provider(window.tronWeb), window.tronWeb, recipients)
+```
 
 ## 主币余额与 deployless
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 未发布
+
+### 新功能
+
+- 批量写操作，子路径 `@w3lib/evm-batch-call/write`（只做查询时打包不会带上）：
+  - `batchCall`：批量调用合约。`'tx'` 模式每个调用一笔交易，同一钱包按 nonce 顺序连续发出、不同钱包并发；`'7702'` 模式通过 EIP-7702 委托给 Simple7702Account，同一钱包的调用合成一笔交易。依赖前一笔结果的调用（先 approve 再调用）预估失败时自动等前一笔确认后重新预估
+  - `batchTransfer`：一对多转账（主币 / ERC20 可混合），默认走 Disperse 合约，链上没有合约、只有一个收款人、某一批预估 revert 时自动改为逐笔发送；为 Disperse 发出的 approve 交易在结果的 `approvals` 里
+  - `batchCollect`：多钱包归集，可选 `gasWallet` 自动补 gas（只补差额）、扫空剩余主币（扣除手续费，OP Stack / Scroll 预留 L1 数据费；代币没有全部归集成功的钱包不扫）
+  - `revokeDelegation`：撤销 EIP-7702 委托
+  - Tron：同样的三个函数传 Tron 的 Provider 即可（TRX / TRC20 转账、合约调用、归集含补 gas 和激活账户）。交易本地编码签名、`broadcasthex` 广播，合约调用先模拟，过期按链上时间判断后自动重发；支持浏览器钱包（tronWeb / tronwallet-adapter）；这部分按需加载
+  - 钱包可以传私钥或 ethers Signer（含浏览器钱包的 JsonRpcSigner）；结果可以直接 JSON 序列化，`onUpdate` 回调进度，支持 `dryRun` / `wait: false` / `signal`
+- `FallbackRpc.request(method, fn)`：用任意方法请求节点，与 call / getBalance 相同的故障切换
+
 ## 0.4.2
 
 ### 修复

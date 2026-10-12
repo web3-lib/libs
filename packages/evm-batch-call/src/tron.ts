@@ -169,6 +169,11 @@ export class TronProvider implements EthersLikeProvider {
     })
   }
 
+  /** 直接请求 HTTP API（如 'wallet/getnowblock'），同样经过限流和 429 退避（写操作模块用） */
+  request(path: string, body: Record<string, unknown> = {}): Promise<any> {
+    return this.#limit(() => this.#request(path, body))
+  }
+
   async call(tx: TransactionRequest): Promise<string> {
     assertLatest(tx.blockTag)
     const body: Record<string, unknown> = {

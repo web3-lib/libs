@@ -143,6 +143,11 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     return this.#run(() => this.inner.call(tx))
   }
 
+  /** 对内层节点做任意请求，同样先校验链（写操作模块用） */
+  request<T>(fn: (inner: EthersLikeProvider) => Promise<T>): Promise<T> {
+    return this.#run(() => fn(this.inner))
+  }
+
   getBalance(...args: Parameters<EthersLikeProvider['getBalance']>): Promise<bigint> {
     return this.#run(() => this.inner.getBalance(...args))
   }
