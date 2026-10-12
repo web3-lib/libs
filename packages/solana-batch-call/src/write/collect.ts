@@ -204,7 +204,9 @@ export async function batchCollect(client: SolanaClient, wallets: readonly Signe
   items
     .filter((i) => i.native && active(i))
     .forEach((native) => {
-      const unfinished = items.find((i) => !i.native && i.signer.address === native.signer.address && i.result.status !== 'confirmed' && i.result.status !== 'skipped')
+      // dryRun 时代币项是 simulated，也算成功
+      const done = (status: string) => status === 'confirmed' || status === 'skipped' || (options.dryRun && status === 'simulated')
+      const unfinished = items.find((i) => !i.native && i.signer.address === native.signer.address && !done(i.result.status))
       if (unfinished) {
         report(native, emptyOutcome('skipped', `skipped: collecting ${unfinished.token} did not succeed (${unfinished.result.status})`))
       }

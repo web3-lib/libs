@@ -2,7 +2,7 @@ import { ed25519 } from '@noble/curves/ed25519.js'
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base58, base64 } from '@scure/base'
 
-import { ASSOCIATED_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddress } from '../src/index.js'
+import { ASSOCIATED_TOKEN_PROGRAM_ID, MIN_CONTEXT_SLOT_NOT_REACHED, RpcError, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddress } from '../src/index.js'
 import { COMPUTE_BUDGET_PROGRAM_ID } from '../src/write/instructions.js'
 import { createMockNode, mintData, tokenAccountData, type MockAccount } from './mock.js'
 
@@ -31,7 +31,14 @@ export interface FakeSolanaOptions {
   priorityFees?: number[]
   /** 状态查询落后几个 slot（模拟负载均衡后面落后的节点：最近几个 slot 上链的交易查不到） */
   statusLag?: number
+  /** System 转账消耗的计算单元，默认 150（调大可以模拟超出单笔交易的计算上限） */
+  systemTransferUnits?: number
+  /** 确认状态逐步推进：上链后第一次查询为 processed，之后 confirmed，再过 finalizeAfter 次（默认 3）为 finalized。默认直接 confirmed */
+  progression?: { finalizeAfter?: number }
 }
+
+/** 拦截请求：返回 undefined 时照常处理；可以抛错、返回别的结果，或调用 next 后再处理 */
+export type Interceptor = (method: string, params: readonly unknown[], next: () => Promise<unknown>) => Promise<unknown> | unknown
 
 class TxError extends Error {
   constructor(
@@ -99,6 +106,8 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
   const accounts: Record<string, MockAccount> = {}
   const node = createMockNode({ accounts })
   let height = 1000
+  /** 每个实例的 blockhash 都不同（库会记住最近发过的消息，相同的 blockhash 会让不同测试互相影响） */
+  const salt = Math.random()
   let blockhashCalls = 0
   const blockhashes = new Map<string, number>() // blockhash → lastValidBlockHeight
   const landed = new Map<string, { slot: number; err: unknown }>()
@@ -126,9 +135,14 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
     const payer = tx.keys[0] as string
     const payerAccount = state[payer]
     if (!payerAccount) throw new TxError('AccountNotFound')
-    if ((payerAccount.lamports ?? 0n) < fee) throw new TxError('InsufficientFundsForFee')
+    if (payerAccount.owner !== SYSTEM_PROGRAM_ID || payerAccount.data?.length) throw new TxError('InvalidAccountForFee')
+    const payerBefore = payerAccount.lamports ?? 0n
+    if (payerBefore < fee) throw new TxError('InsufficientFundsForFee')
+    // 与 agave 的 validate_fee_payer 一致：扣完手续费后从免租掉进需要交租的状态时，交易直接被拒（不上链、不扣费）
+    const payerAfter = payerBefore - fee
+    if (payerBefore >= RENT_EXEMPT_MIN && payerAfter > 0n && payerAfter < RENT_EXEMPT_MIN) throw new TxError({ InsufficientFundsForRent: { account_index: 0 } })
     const charged = clone(state)
-    ;(charged[payer] as MockAccount).lamports = (payerAccount.lamports ?? 0n) - fee
+    ;(charged[payer] as MockAccount).lamports = payerAfter
     const next = clone(charged)
     let units = 0
     const logs: string[] = []
@@ -156,28 +170,40 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
           return
         }
         if (ix.program === SYSTEM_PROGRAM_ID) {
-          use(150)
+          use(options.systemTransferUnits ?? 150)
+          if (ix.data.length !== 12 || new DataView(ix.data.buffer, ix.data.byteOffset).getUint32(0, true) !== 2) fail('InvalidInstructionData', 'Program 11111111111111111111111111111111 failed: only Transfer is supported by the fake')
           const from = key(0)
           const amount = u64(ix.data, 4)
           if (!isSigner(0)) fail('MissingRequiredSignature')
+          if (next[from]?.data?.length) fail({ Custom: 3 }, 'Transfer: `from` must not carry data')
           if (lamports(from) < amount) fail({ Custom: 1 }, `Transfer: insufficient lamports ${lamports(from)}, need ${amount}`)
           ;(next[from] as MockAccount).lamports = lamports(from) - amount
           credit(key(1), amount)
           return
         }
         if (ix.program === ASSOCIATED_TOKEN_PROGRAM_ID) {
-          const [payerKey, ata, owner, mint, , program] = [0, 1, 2, 3, 4, 5].map(key) as string[]
-          if (next[ata as string]) {
+          const [payerKey, ata, owner, mint, , program] = [0, 1, 2, 3, 4, 5].map(key) as [string, string, string, string, string, string]
+          const idempotent = ix.data[0] === 1
+          if (ix.data.length > 0 && ix.data[0] !== 0 && !idempotent) fail('InvalidInstructionData')
+          if (getAssociatedTokenAddress(owner, mint, program) !== ata) fail('InvalidSeeds', 'Program log: Associated address does not match seed derivation')
+          if (next[mint]?.owner !== program || !next[mint]?.data) fail('IncorrectProgramId', 'Program log: Error: IncorrectProgramId')
+          const existing = next[ata]
+          if (existing?.data?.length) {
             use(4000)
+            // CreateIdempotent：已经是这个钱包这个代币的账户时什么都不做；普通 Create 报已存在
+            if (!idempotent) fail({ Custom: 0 }, 'Allocate: account already in use')
+            if (existing.owner !== program || base58.encode(existing.data.slice(0, 32)) !== mint || base58.encode(existing.data.slice(32, 64)) !== owner) fail('IllegalOwner')
             return
           }
           use(25_000)
-          if (getAssociatedTokenAddress(owner as string, mint as string, program as string) !== ata) fail('InvalidSeeds')
-          if (lamports(payerKey as string) < TOKEN_ACCOUNT_RENT) fail({ Custom: 1 }, 'Transfer: insufficient lamports')
-          ;(next[payerKey as string] as MockAccount).lamports = lamports(payerKey as string) - TOKEN_ACCOUNT_RENT
-          const data = tokenAccountData(mint as string, owner as string, 0n)
+          // 地址上事先只有 lamports（有人先转了 SOL）：照常创建，只补差额
+          const prefunded = existing?.lamports ?? 0n
+          const topUp = prefunded >= TOKEN_ACCOUNT_RENT ? 0n : TOKEN_ACCOUNT_RENT - prefunded
+          if (lamports(payerKey) < topUp) fail({ Custom: 1 }, 'Transfer: insufficient lamports')
+          ;(next[payerKey] as MockAccount).lamports = lamports(payerKey) - topUp
+          const data = tokenAccountData(mint, owner, 0n)
           data[108] = 1
-          next[ata as string] = { lamports: TOKEN_ACCOUNT_RENT, owner: program as string, data }
+          next[ata] = { lamports: prefunded + topUp, owner: program, data }
           return
         }
         if (ix.program === TOKEN_PROGRAM_ID) {
@@ -187,13 +213,15 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
             const amount = u64(ix.data, 1)
             const src = next[source]
             const dst = next[dest]
-            if (!src?.data) fail('InvalidAccountData', 'Program log: Error: InvalidAccountData')
-            if (!dst?.data) fail('UninitializedAccount', 'Program log: Error: UninitializedAccount')
-            if (!isSigner(3) || base58.encode(src!.data!.slice(32, 64)) !== authority) fail({ Custom: 4 }, 'Program log: Error: owner does not match')
+            // 与 spl-token 的 process_transfer 顺序一致：账户 → 冻结 → 余额 → mint → 精度 → owner
+            if (!src?.data?.length || !dst?.data?.length) fail('InvalidAccountData', 'Program log: Error: InvalidAccountData')
             if (frozen.has(source) || frozen.has(dest)) fail({ Custom: 17 }, 'Program log: Error: Account is frozen')
-            if (ix.data[9] !== next[mint]?.data?.[44]) fail({ Custom: 18 }, 'Program log: Error: decimals mismatch')
             const balance = u64(src!.data!, 64)
             if (balance < amount) fail({ Custom: 1 }, 'Program log: Error: insufficient funds')
+            const srcMint = base58.encode(src!.data!.slice(0, 32))
+            if (srcMint !== mint || base58.encode(dst!.data!.slice(0, 32)) !== srcMint) fail({ Custom: 3 }, 'Program log: Error: Account not associated with this Mint')
+            if (ix.data[9] !== next[mint]?.data?.[44]) fail({ Custom: 18 }, 'Program log: Error: decimals mismatch')
+            if (!isSigner(3) || base58.encode(src!.data!.slice(32, 64)) !== authority) fail({ Custom: 4 }, 'Program log: Error: owner does not match')
             new DataView(src!.data!.buffer).setBigUint64(64, balance - amount, true)
             new DataView(dst!.data!.buffer).setBigUint64(64, u64(dst!.data!, 64) + amount, true)
             return
@@ -203,8 +231,8 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
             const [account, dest, authority] = [0, 1, 2].map(key) as [string, string, string]
             const acc = next[account]
             if (!acc?.data) fail('InvalidAccountData')
-            if (base58.encode(acc!.data!.slice(32, 64)) !== authority || !isSigner(2)) fail({ Custom: 4 }, 'Program log: Error: owner does not match')
             if (u64(acc!.data!, 64) !== 0n) fail({ Custom: 11 }, 'Program log: Error: Non-native account can only be closed if its balance is zero')
+            if (base58.encode(acc!.data!.slice(32, 64)) !== authority || !isSigner(2)) fail({ Custom: 4 }, 'Program log: Error: owner does not match')
             credit(dest, acc!.lamports ?? 0n)
             delete next[account]
             return
@@ -217,12 +245,16 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
       tx.keys.forEach((k, i) => {
         const a = next[k]
         const after = a?.lamports ?? 0n
-        const before = state[k]?.lamports ?? 0n
+        const before = charged[k]?.lamports ?? 0n
         const wasPaying = before > 0n && before < RENT_EXEMPT_MIN
         if (writable(tx, i) && a && a.owner === SYSTEM_PROGRAM_ID && !a.data?.length && after > 0n && after < RENT_EXEMPT_MIN && !(wasPaying && after <= before)) {
           throw new TxError({ InsufficientFundsForRent: { account_index: i } }, logs)
         }
       })
+      // 与真实节点一致：余额为 0 的系统账户不再存在
+      for (const [k, a] of Object.entries(next)) {
+        if (a.owner === SYSTEM_PROGRAM_ID && !a.data?.length && (a.lamports ?? 0n) === 0n) delete next[k]
+      }
       return { state: next, units, err: null, logs, fee }
     } catch (err) {
       if (!(err instanceof TxError)) throw err
@@ -245,14 +277,26 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
     }
   }
 
+  let interceptor: Interceptor | null = null
   const transport = {
     label: 'fake',
     async request<T>(method: string, params: readonly unknown[] = []): Promise<T> {
+      if (interceptor) {
+        // 拦截器调用过 next 时直接用它的结果，同一个请求不执行两次
+        let called: Promise<T> | null = null
+        const result = await interceptor(method, params, () => (called ??= handle<T>(method, params)))
+        if (result !== undefined) return result as T
+        if (called) return called
+      }
+      return handle<T>(method, params)
+    },
+  }
+  async function handle<T>(method: string, params: readonly unknown[]): Promise<T> {
       switch (method) {
         case 'getLatestBlockhash': {
           const call = blockhashCalls++
           const valid = typeof options.validBlocks === 'function' ? options.validBlocks(call) : (options.validBlocks ?? 150)
-          const blockhash = base58.encode(sha256(new TextEncoder().encode(`blockhash-${height}-${call}`)))
+          const blockhash = base58.encode(sha256(new TextEncoder().encode(`blockhash-${salt}-${height}-${call}`)))
           blockhashes.set(blockhash, height + valid)
           return { context: { slot: node.slot }, value: { blockhash, lastValidBlockHeight: height + valid } } as T
         }
@@ -264,7 +308,17 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
           return (options.priorityFees ?? [0]).map((fee, i) => ({ slot: i, prioritizationFee: fee })) as T
         case 'simulateTransaction': {
           const tx = parse(base64.decode(params[0] as string))
+          const config = (params[1] ?? {}) as { sigVerify?: boolean; replaceRecentBlockhash?: boolean; minContextSlot?: number }
+          if (config.minContextSlot !== undefined && config.minContextSlot > node.slot) {
+            throw new RpcError('Minimum context slot has not been reached', MIN_CONTEXT_SLOT_NOT_REACHED)
+          }
+          if (config.sigVerify && tx.signatures.some((sig, i) => !ed25519.verify(sig, tx.message, base58.decode(tx.keys[i] as string)))) {
+            throw new RpcError('Transaction signature verification failure', -32003)
+          }
           simulations.push(tx)
+          if (!config.replaceRecentBlockhash && (blockhashes.get(tx.blockhash) ?? -1) < height) {
+            return { context: { slot: node.slot }, value: { err: 'BlockhashNotFound', logs: [], unitsConsumed: 0 } } as T
+          }
           try {
             const result = execute(tx, accounts)
             return { context: { slot: node.slot }, value: { err: result.err, logs: result.logs, unitsConsumed: result.units } } as T
@@ -276,7 +330,7 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
         case 'sendTransaction': {
           const tx = parse(base64.decode(params[0] as string))
           tx.signatures.forEach((sig, i) => {
-            if (!ed25519.verify(sig, tx.message, base58.decode(tx.keys[i] as string))) throw new Error(`fake: bad signature for ${tx.keys[i]}`)
+            if (!ed25519.verify(sig, tx.message, base58.decode(tx.keys[i] as string))) throw new RpcError('Transaction signature verification failure', -32003)
           })
           const signature = base58.encode(tx.signatures[0] as Uint8Array)
           sent.push(signature)
@@ -308,18 +362,23 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
             context: { slot: seen },
             value: (params[0] as string[]).map((s) => {
               const l = landed.get(s)
-              return l && l.slot <= seen ? { slot: l.slot, err: l.err, confirmationStatus: 'confirmed', confirmations: 1 } : null
+              if (!l || l.slot > seen) return null
+              const age = node.slot - l.slot
+              const status = !options.progression ? 'confirmed' : age < 1 ? 'processed' : age <= (options.progression.finalizeAfter ?? 3) ? 'confirmed' : 'finalized'
+              return { slot: l.slot, err: l.err, confirmationStatus: status, confirmations: status === 'finalized' ? null : age }
             }),
           } as T
         }
         default:
           return node.request<T>(method, params)
       }
-    },
   }
 
   return {
     transport,
+    intercept(fn: Interceptor | null) {
+      interceptor = fn
+    },
     accounts,
     sent,
     landed,

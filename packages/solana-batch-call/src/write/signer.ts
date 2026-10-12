@@ -114,6 +114,8 @@ function subtle(): SubtleCrypto {
 
 /** 用 32 字节种子生成签名器：私钥导入 WebCrypto 后不可导出 */
 async function fromSeed(seed: Uint8Array, expected?: Uint8Array): Promise<ResolvedSigner> {
+  // 没有 WebCrypto 时直接给出这个原因（放在 try 外面，不被下面统一改写成“私钥不对”）
+  const crypto = subtle()
   const pkcs8 = new Uint8Array(48)
   pkcs8.set(PKCS8_PREFIX)
   pkcs8.set(seed, 16)
@@ -121,14 +123,14 @@ async function fromSeed(seed: Uint8Array, expected?: Uint8Array): Promise<Resolv
   let key: CryptoKey
   try {
     // 先以可导出方式导入一次取公钥（JWK 的 x），再以不可导出方式导入用于签名
-    const extractable = await subtle().importKey('pkcs8', pkcs8, { name: 'Ed25519' }, true, ['sign'])
-    const jwk = await subtle().exportKey('jwk', extractable)
+    const extractable = await crypto.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, true, ['sign'])
+    const jwk = await crypto.exportKey('jwk', extractable)
     const publicKey = base64urlnopad.decode(jwk.x as string)
     address = encodeAddress(publicKey)
     if (expected && encodeAddress(expected) !== address) {
       throw new Error('mismatch')
     }
-    key = await subtle().importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign'])
+    key = await crypto.importKey('pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign'])
   } catch (err) {
     if ((err as Error).message === 'mismatch') {
       throw new Error('Invalid private key: the public key part does not match')

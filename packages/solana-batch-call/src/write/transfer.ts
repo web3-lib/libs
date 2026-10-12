@@ -1,7 +1,8 @@
 import { getAssociatedTokenAddress, isAddress } from '../address.js'
 import type { SolanaClient } from '../client.js'
-import { NATIVE_MINT } from '../constants.js'
+import { NATIVE_MINT, SOL_DECIMALS } from '../constants.js'
 import { formatUnits, parseUnits } from '../layout.js'
+import type { TokenBalance } from '../types.js'
 import { createAssociatedTokenAccountIdempotent, systemTransfer, transferChecked } from './instructions.js'
 import { emptyOutcome, sendUnits, toWriteResult, type SendOptions, type TxOutcome, type Unit, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
@@ -46,8 +47,8 @@ export interface TransferResult extends WriteResult {
   native: boolean
   /** 数量（最小单位） */
   amount: string
-  /** 按精度换算后的数量；精度查不到时为 null */
-  formatted: string | null
+  /** 按精度换算后的数量 */
+  formatted: string
   /** 是否为收款人新建了代币账户（这一项额外付了租金） */
   createdAccount: boolean
 }
@@ -59,7 +60,7 @@ interface Planned {
   token: string
   native: boolean
   amount: bigint
-  decimals: number | null
+  decimals: number
   tokenProgram: string | null
 }
 
@@ -116,7 +117,7 @@ export async function batchTransfer(client: SolanaClient, from: SignerInput, rec
 }
 
 /** 转账指令：SOL 直接转；代币按需先创建收款人的 ATA，再 TransferChecked */
-export function transferInstructions(signer: ResolvedSigner, payer: ResolvedSigner, p: Pick<Planned, 'to' | 'token' | 'native' | 'amount' | 'decimals' | 'tokenProgram'>, ata: string | null, create: boolean): Instruction[] {
+export function transferInstructions(signer: ResolvedSigner, payer: ResolvedSigner, p: Pick<Planned, 'to' | 'token' | 'native' | 'amount' | 'tokenProgram'> & { decimals: number | null }, ata: string | null, create: boolean): Instruction[] {
   if (p.native) {
     return [systemTransfer(signer.address, p.to, p.amount)]
   }
@@ -148,12 +149,10 @@ async function plan(client: SolanaClient, owner: string, recipients: readonly Tr
     if (!native && (!balance?.success || !balance.tokenProgram)) {
       throw new Error(`recipients[${index}]: cannot read token ${token} (${balance?.error ?? 'unknown error'})`)
     }
-    const decimals = balance?.success ? balance.decimals : null
+    // 原生 SOL 的精度固定；代币读不到时上面已经报错
+    const decimals = native ? SOL_DECIMALS : (balance as TokenBalance).decimals
     let amount: bigint
     if (item.formatted !== undefined) {
-      if (decimals === null) {
-        throw new Error(`recipients[${index}]: cannot read decimals of ${token}, pass amount instead of formatted`)
-      }
       amount = parseUnits(item.formatted, decimals)
     } else {
       amount = BigInt(item.amount as bigint | number | string)
@@ -167,10 +166,8 @@ async function plan(client: SolanaClient, owner: string, recipients: readonly Tr
     const totals = new Map<string, bigint>()
     planned.forEach((p) => totals.set(p.token, (totals.get(p.token) ?? 0n) + p.amount))
     for (const [token, total] of totals) {
-      const balance = info.get(token)
-      if (!balance?.success) {
-        throw new Error(`Cannot read the balance of ${token} (${balance?.error ?? 'unknown error'}); pass checkBalance: false to skip the check`)
-      }
+      // 读到这里时余额都读成功了（代币读不到时上面已经报错，原生 SOL 总能读到）
+      const balance = info.get(token) as TokenBalance
       if (BigInt(balance.balance) < total) {
         throw new Error(`Insufficient balance of ${token}: need ${total}, have ${balance.balance}`)
       }
@@ -186,7 +183,7 @@ function toTransferResult(p: Planned, result: WriteResult, createdAccount: boole
     token: p.token,
     native: p.native,
     amount: p.amount.toString(),
-    formatted: p.decimals === null ? null : formatUnits(p.amount, p.decimals),
+    formatted: formatUnits(p.amount, p.decimals),
     createdAccount,
   }
 }
