@@ -9,8 +9,10 @@ const GENESIS = '00000000000000001ebf88508a03865c71d452e25f4d51194196a1d22b6653d
 export const ENERGY_FEE = 210n
 /** 带宽单价（sun / 字节） */
 export const BANDWIDTH_FEE = 1000n
-/** 激活新账户的费用（1 TRX，加上 0.1 TRX 的带宽） */
-export const ACTIVATION_FEE = 1_100_000n
+/** 激活新账户：激活费 1 TRX + 创建账户的带宽（没有质押带宽时烧 0.1 TRX），不再收普通带宽费 */
+export const NEW_ACCOUNT_FEE = 1_000_000n
+export const CREATE_ACCOUNT_FEE = 100_000n
+export const ACTIVATION_FEE = NEW_ACCOUNT_FEE + CREATE_ACCOUNT_FEE
 /** 代币转账消耗的能量（收款人没有余额时更多） */
 export const TRANSFER_ENERGY = 30_000
 export const TRANSFER_ENERGY_NEW_HOLDER = 65_000
@@ -21,6 +23,7 @@ const erc20 = new Interface([
   'function balanceOf(address) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
   'function approve(address spender, uint256 amount) returns (bool)',
+  'function faucet()',
 ])
 const errorInterface = new Interface(['error Error(string)'])
 
@@ -70,7 +73,12 @@ export interface FakeTronOptions {
   infoErrors?: number
   /** 前几次广播返回这个错误码，但交易其实被收下了（模拟前一个超时的节点已经收下） */
   broadcastCode?: { code: string; times: number }
+  /** 账户的质押资源 */
+  staked?: Record<string, { NetLimit?: number; NetUsed?: number; EnergyLimit?: number; EnergyUsed?: number }>
 }
+
+/** 拦截请求：返回 undefined 时照常处理；可以抛错、返回别的结果，或调用 next 后再处理 */
+export type TronInterceptor = (path: string, body: Record<string, any>, next: () => Promise<any>) => unknown
 
 /** 假 Tron 全节点：解码 / 验签 / 执行 TransferContract 与 TRC20 的 TriggerSmartContract，按能量和带宽收费 */
 export function createFakeTron(options: FakeTronOptions = {}) {
@@ -102,6 +110,12 @@ export function createFakeTron(options: FakeTronOptions = {}) {
         return { energy: 300, output: erc20.encodeFunctionResult('symbol', ['TKN']), reverted: null }
       case 'balanceOf':
         return { energy: 300, output: erc20.encodeFunctionResult('balanceOf', [token.balances.get(toTronAddress(parsed.args[0])) ?? 0n]), reverted: null }
+      case 'faucet': {
+        // 测试用：给调用者 1000（后一笔转账依赖它时用来测“等前一笔确认再模拟”）
+        if (state === null) token.balances.set(from, (token.balances.get(from) ?? 0n) + 1000n)
+        else state.set(from, (state.get(from) ?? 0n) + 1000n)
+        return { energy: 20_000, output: '0x', reverted: null }
+      }
       case 'transfer': {
         const to = toTronAddress(parsed.args[0])
         const amount = parsed.args[1] as bigint
@@ -173,22 +187,44 @@ export function createFakeTron(options: FakeTronOptions = {}) {
     // 带宽：免费带宽（600 / 天）够用时不收费，否则按字节烧 TRX
     const bytes = hex.length / 2 + 64
     const freeNet = Math.max(0, 600 - from.freeNetUsed)
-    const netFee = freeNet >= bytes ? 0n : BigInt(bytes) * BANDWIDTH_FEE
+    const stake = staked.get(owner)
+    const stakedNet = stake ? Math.max(0, stake.NetLimit - stake.NetUsed) : 0
+    // 与 java-tron 一致：质押带宽够用先用质押的，否则免费带宽够用用免费的，都不够整笔烧 TRX
+    const netFee = stakedNet >= bytes || freeNet >= bytes ? 0n : BigInt(bytes) * BANDWIDTH_FEE
+    /** 上链时消耗带宽 */
+    const useNet = () => {
+      if (stake && stakedNet >= bytes) stake.NetUsed += bytes
+      else if (!netFee) from.freeNetUsed += bytes
+    }
+    /** 合约调用的能量：先用质押的，不够的部分烧 TRX；返回要烧的 sun（受余额和 fee_limit 限制时为 null） */
+    const burnFor = (energy: number, feeLimit: bigint): bigint | null => {
+      const fromStake = Math.min(energy, stake ? Math.max(0, stake.EnergyLimit - stake.EnergyUsed) : 0)
+      const cost = BigInt(energy - fromStake) * ENERGY_FEE
+      if (cost > (from.balance < feeLimit ? from.balance : feeLimit)) return null
+      if (stake) stake.EnergyUsed += fromStake
+      return cost
+    }
 
     let run: () => void
     if (type === 1 && typeUrl.endsWith('TransferContract')) {
       const to = tronOf(one(param, 2, new Uint8Array()))
       if (vaults.has(to) || tokenOf(to)) return fail('CONTRACT_VALIDATE_ERROR', 'Cannot transfer TRX to a smartContract.')
       const amount = one(param, 3, 0n)
-      const activation = account(to) ? 0n : ACTIVATION_FEE
-      if (from.balance < amount + netFee + activation) return fail('CONTRACT_VALIDATE_ERROR', 'Validate TransferContract error, balance is not sufficient.')
+      // 给没激活的地址转：按创建账户计费（激活费 + 质押带宽或 0.1 TRX），不收普通带宽费、不用免费带宽
+      const creates = !account(to)
+      const fee = creates ? NEW_ACCOUNT_FEE + (stakedNet >= bytes ? 0n : CREATE_ACCOUNT_FEE) : netFee
+      if (from.balance < amount + fee) return fail('CONTRACT_VALIDATE_ERROR', 'Validate TransferContract error, balance is not sufficient.')
       run = () => {
-        from.balance -= amount + netFee + activation
-        if (!netFee) from.freeNetUsed += bytes
+        from.balance -= amount + fee
+        if (creates) {
+          if (stake && stakedNet >= bytes) stake.NetUsed += bytes
+        } else {
+          useNet()
+        }
         const target = account(to) ?? { balance: 0n, freeNetUsed: 0 }
         target.balance += amount
         accounts.set(to, target)
-        infos.set(txId, { id: txId, blockNumber: ++block, fee: Number(netFee + activation), receipt: { net_usage: netFee ? 0 : bytes } })
+        infos.set(txId, { id: txId, blockNumber: ++block, fee: Number(fee), receipt: { net_usage: fee ? 0 : bytes } })
       }
     } else if (type === 31 && vaults.has(tronOf(one(param, 2, new Uint8Array())))) {
       // 给合约转 TRX：空 calldata 带 call_value
@@ -197,9 +233,10 @@ export function createFakeTron(options: FakeTronOptions = {}) {
       const feeLimit = one(rawFields, 18, 0n)
       if (from.balance < callValue + netFee) return fail('CONTRACT_VALIDATE_ERROR', 'balance is not sufficient')
       run = () => {
-        const burned = 500n * ENERGY_FEE
-        from.balance -= netFee + callValue + (burned > feeLimit ? feeLimit : burned)
-        if (!netFee) from.freeNetUsed += bytes
+        from.balance -= netFee + callValue
+        useNet()
+        const burned = burnFor(500, feeLimit) ?? (from.balance < feeLimit ? from.balance : feeLimit)
+        from.balance -= burned
         const target = account(vault) ?? { balance: 0n, freeNetUsed: 0 }
         target.balance += callValue
         accounts.set(vault, target)
@@ -212,16 +249,15 @@ export function createFakeTron(options: FakeTronOptions = {}) {
       if (from.balance < netFee) return fail('BANDWITH_ERROR', 'Account resource insufficient error.')
       run = () => {
         from.balance -= netFee
-        if (!netFee) from.freeNetUsed += bytes
+        useNet()
         const preview = execToken(owner, contractAddress, data, new Map(tokenOf(contractAddress)?.balances ?? []))
-        const cost = BigInt(preview.energy) * ENERGY_FEE
-        const affordable = from.balance < feeLimit ? from.balance : feeLimit
+        const cost = burnFor(preview.energy, feeLimit)
         let result = 'SUCCESS'
-        let burned = cost
+        let burned = cost ?? 0n
         let output = preview.output
-        if (cost > affordable) {
+        if (cost === null) {
           result = 'OUT_OF_ENERGY'
-          burned = affordable
+          burned = from.balance < feeLimit ? from.balance : feeLimit
           output = '0x'
         } else if (preview.reverted) {
           result = 'REVERT'
@@ -254,7 +290,17 @@ export function createFakeTron(options: FakeTronOptions = {}) {
     return { result: true, txid: txId }
   }
 
+  /** 各账户的质押资源（执行交易时会消耗） */
+  const staked = new Map(Object.entries(options.staked ?? {}).map(([a, s]) => [a, { NetLimit: 0, NetUsed: 0, EnergyLimit: 0, EnergyUsed: 0, ...s }]))
+  let interceptor: TronInterceptor | null = null
   const request = async (path: string, body: Record<string, any>): Promise<any> => {
+    if (interceptor) {
+      const result = await interceptor(path, body, () => handle(path, body))
+      if (result !== undefined) return result
+    }
+    return handle(path, body)
+  }
+  const handle = async (path: string, body: Record<string, any>): Promise<any> => {
     switch (path) {
       case 'wallet/getblockbynum':
         return { blockID: GENESIS }
@@ -268,15 +314,23 @@ export function createFakeTron(options: FakeTronOptions = {}) {
       case 'walletsolidity/gettransactioninfobyid':
         return infos.get(body.value) ?? {}
       case 'wallet/getchainparameters':
-        return { chainParameter: [{ key: 'getEnergyFee', value: Number(ENERGY_FEE) }, { key: 'getTransactionFee', value: Number(BANDWIDTH_FEE) }] }
+        return {
+          chainParameter: [
+            { key: 'getEnergyFee', value: Number(ENERGY_FEE) },
+            { key: 'getTransactionFee', value: Number(BANDWIDTH_FEE) },
+            { key: 'getCreateNewAccountFeeInSystemContract', value: Number(NEW_ACCOUNT_FEE) },
+            { key: 'getCreateAccountFee', value: Number(CREATE_ACCOUNT_FEE) },
+          ],
+        }
       case 'wallet/getaccount': {
         const address = tronOf(getBytes(`0x${body.address}`))
         const a = account(address)
         return a ? { address: body.address, balance: Number(a.balance) } : {}
       }
       case 'wallet/getaccountresource': {
-        const a = account(tronOf(getBytes(`0x${body.address}`)))
-        return a ? { freeNetLimit: 600, freeNetUsed: a.freeNetUsed } : {}
+        const address = tronOf(getBytes(`0x${body.address}`))
+        const a = account(address)
+        return a ? { freeNetLimit: 600, freeNetUsed: a.freeNetUsed, ...staked.get(address) } : {}
       }
       case 'wallet/triggerconstantcontract':
         return constant(body)
@@ -302,10 +356,18 @@ export function createFakeTron(options: FakeTronOptions = {}) {
 
   return {
     request,
+    intercept(fn: TronInterceptor | null) {
+      interceptor = fn
+    },
     broadcasts,
     infos,
     setTrx(address: string, balance: bigint) {
       accounts.set(address, { balance, freeNetUsed: 0 })
+    },
+    /** 把今天的免费带宽用完 */
+    exhaustFreeBandwidth(address: string) {
+      const a = account(address)
+      if (a) a.freeNetUsed = 600
     },
     trx(address: string): bigint | null {
       return account(address)?.balance ?? null

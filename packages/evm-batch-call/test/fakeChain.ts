@@ -80,6 +80,25 @@ export interface FakeChainOptions {
   receiptLag?: number
   /** 广播时节点用这个 JSON-RPC 错误明确拒绝（不在已知的错误列表里） */
   rejectBroadcast?: string
+  /** 覆盖 getFeeData 的结果（如 legacy 链：maxFeePerGas 为 null） */
+  feeData?: { gasPrice: bigint | null; maxFeePerGas: bigint | null; maxPriorityFeePerGas: bigint | null }
+  /** 前几次 getFeeData 报错 */
+  feeErrors?: number
+  /** OP Stack 的 L1 费用预言机：每笔交易的 L1 费用（上链时从发送方扣） */
+  l1Fee?: bigint
+  /** L1 预言机的 getCode 报错 / getL1Fee 调用失败 */
+  l1OracleCodeError?: boolean
+  l1OracleCallError?: boolean
+  /** 前几次预估 gas 时节点报错（不是 revert） */
+  estimateErrors?: number
+  /** 前几次查回执时报错 */
+  receiptErrors?: number
+  /** 查 pending nonce 时少返回 by（节点落后，或钱包在别处刚发了交易），前 times 次生效（默认 1 次） */
+  staleNonce?: { by: number; times?: number }
+  /** 7702 批量执行（多个调用）时直接用这个数据 revert */
+  batchRevertData?: string
+  /** 拒收主币的地址（转主币给它时 revert，像没有 receive 的合约） */
+  rejectNative?: Set<string>
   /** 预估 gas 时发送方没有主币就报余额不足（有的节点这样） */
   estimateNeedsGas?: boolean
   /** pending nonce 不算交易池里的交易（模拟多节点时先返回的节点还没收到刚发出的交易） */
@@ -110,6 +129,13 @@ export function createFakeChain(options: FakeChainOptions = {}) {
   const pending: Array<{ hash: string; polls: number; tx: Transaction }> = []
   const broadcasts: Transaction[] = []
   let receiptLag = options.receiptLag ?? 0
+  let receiptErrors = options.receiptErrors ?? 0
+  let feeErrors = options.feeErrors ?? 0
+  let estimateErrors = options.estimateErrors ?? 0
+  let staleTimes = options.staleNonce ? (options.staleNonce.times ?? 1) : 0
+  const L1_ORACLE = '0x420000000000000000000000000000000000000f'
+  if (options.l1Fee !== undefined) state.code.set(L1_ORACLE, '0x6080')
+  const l1Interface = new Interface(['function getL1Fee(bytes data) view returns (uint256)'])
 
   const token = (address: string) => state.tokens.get(k(address))
 
@@ -139,6 +165,9 @@ export function createFakeChain(options: FakeChainOptions = {}) {
     const fromBal = s.native.get(k(from)) ?? 0n
     if (fromBal < value) {
       revertWith('insufficient native balance')
+    }
+    if (value > 0n && options.rejectNative?.has(k(to))) {
+      revertWith('cannot receive native coin')
     }
     s.native.set(k(from), fromBal - value)
     s.native.set(k(to), (s.native.get(k(to)) ?? 0n) + value)
@@ -205,6 +234,9 @@ export function createFakeChain(options: FakeChainOptions = {}) {
       }
       const parsed = accountInterface.parseTransaction({ data })
       const calls = parsed?.args[0] as Array<[string, bigint, string]>
+      if (options.batchRevertData && calls.length > 1) {
+        throw new Revert(options.batchRevertData)
+      }
       let gas = 30_000
       calls.forEach(([target, v, d], i) => {
         try {
@@ -272,28 +304,45 @@ export function createFakeChain(options: FakeChainOptions = {}) {
       gasUsed = Number(tx.gasLimit)
       state = next
     }
-    const fee = BigInt(gasUsed) * price
+    const fee = BigInt(gasUsed) * price + (options.l1Fee ?? 0n)
     state.native.set(k(from), (state.native.get(k(from)) ?? 0n) - fee)
     receipts.set(entry.hash, { status, gasUsed: BigInt(gasUsed), fee, blockNumber: ++block, hash: entry.hash })
     hooks.afterMine?.(tx)
   }
 
   const node = {
-    call: read,
+    async call(tx: TransactionRequest) {
+      if (options.l1Fee !== undefined && k(String(tx.to)) === L1_ORACLE) {
+        if (options.l1OracleCallError) throw makeError('execution reverted', 'CALL_EXCEPTION', { action: 'call', data: '0x', reason: null, transaction: { to: null, data: '0x' }, invocation: null, revert: null })
+        return l1Interface.encodeFunctionResult('getL1Fee', [options.l1Fee])
+      }
+      return read(tx)
+    },
     async getBalance(address: string): Promise<bigint> {
       return state.native.get(k(address)) ?? 0n
     },
     async getTransactionCount(address: string, blockTag?: string): Promise<number> {
       const queued = options.nonceIgnoresPending || blockTag === 'latest' ? 0 : pending.filter((p) => k(p.tx.from as string) === k(address)).length
-      return (state.nonces.get(k(address)) ?? 0) + queued
+      const stale = blockTag !== 'latest' && staleTimes > 0 ? (options.staleNonce?.by ?? 0) : 0
+      if (stale) staleTimes--
+      return (state.nonces.get(k(address)) ?? 0) + queued - stale
     },
     async getCode(address: string): Promise<string> {
+      if (options.l1OracleCodeError && k(address) === L1_ORACLE) throw makeError('missing response', 'SERVER_ERROR', {} as never)
       return state.code.get(k(address)) ?? '0x'
     },
     async getFeeData() {
-      return fees
+      if (feeErrors > 0) {
+        feeErrors--
+        throw makeError('missing response', 'SERVER_ERROR', {} as never)
+      }
+      return options.feeData ?? fees
     },
     async estimateGas(tx: TransactionRequest & { authorizationList?: Transaction['authorizationList'] }): Promise<bigint> {
+      if (estimateErrors > 0) {
+        estimateErrors--
+        throw makeError('missing response', 'SERVER_ERROR', {} as never)
+      }
       const s = clone(state)
       if (options.estimateNeedsGas && (s.native.get(k(String(tx.from))) ?? 0n) === 0n) {
         throw makeError('insufficient funds for gas * price + value', 'INSUFFICIENT_FUNDS', { transaction: {} })
@@ -330,7 +379,8 @@ export function createFakeChain(options: FakeChainOptions = {}) {
       if (tx.chainId !== BigInt(CHAIN_ID)) {
         throw makeError('invalid chain id', 'UNKNOWN_ERROR', {})
       }
-      const cost = tx.gasLimit * (tx.maxFeePerGas ?? tx.gasPrice ?? 0n) + tx.value
+      // 与 op-geth 一致：余额要够付 L1 数据费
+      const cost = tx.gasLimit * (tx.maxFeePerGas ?? tx.gasPrice ?? 0n) + tx.value + (options.l1Fee ?? 0n)
       const queuedCost = pending.filter((p) => k(p.tx.from as string) === k(from)).reduce((sum, p) => sum + p.tx.gasLimit * (p.tx.maxFeePerGas ?? p.tx.gasPrice ?? 0n) + p.tx.value, 0n)
       if ((state.native.get(k(from)) ?? 0n) < cost + queuedCost) {
         throw makeError('insufficient funds for gas * price + value', 'INSUFFICIENT_FUNDS', { transaction: tx })
@@ -348,6 +398,10 @@ export function createFakeChain(options: FakeChainOptions = {}) {
       return { hash }
     },
     async getTransactionReceipt(hash: string) {
+      if (receiptErrors > 0) {
+        receiptErrors--
+        throw makeError('missing response', 'SERVER_ERROR', {} as never)
+      }
       if (receiptLag > 0) {
         receiptLag--
         return null
@@ -372,6 +426,10 @@ export function createFakeChain(options: FakeChainOptions = {}) {
     receipts,
     get state() {
       return state
+    },
+    /** 之后的几次 getFeeData 报错 */
+    failFees(times: number) {
+      feeErrors = times
     },
     setNative(address: string, amount: bigint) {
       state.native.set(k(address), amount)

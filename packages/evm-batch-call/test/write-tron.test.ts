@@ -75,10 +75,9 @@ describe('Tron batchTransfer', () => {
     expect(results[0]?.hash).toMatch(/^[0-9a-f]{64}$/)
     expect(chain.trx(R1)).toBe(1_500_000n)
     expect(chain.token(USDT, R2)).toBe(20_000_000n)
-    // 第一笔：激活 R1 的费用（免费带宽够用）；第二笔：烧的能量 + 免费带宽用完后按字节烧的带宽
+    // 第一笔：激活 R1（激活费 + 创建账户的带宽，不占用免费带宽）；第二笔：烧的能量（免费带宽够用）
     expect(results[0]?.fee).toBe(ACTIVATION_FEE.toString())
-    expect(results[1]?.gasUsed).toBe(String(TRANSFER_ENERGY_NEW_HOLDER))
-    expect(BigInt(results[1]!.fee!)).toBeGreaterThan(BigInt(TRANSFER_ENERGY_NEW_HOLDER) * ENERGY_FEE)
+    expect(results[1]).toMatchObject({ gasUsed: String(TRANSFER_ENERGY_NEW_HOLDER), fee: (BigInt(TRANSFER_ENERGY_NEW_HOLDER) * ENERGY_FEE).toString() })
   })
 
   it('模拟 revert 的收款项单独失败，不花手续费；余额不够时抛错', async () => {

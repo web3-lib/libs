@@ -262,8 +262,10 @@ interface ChainParams {
   energyFee: bigint
   /** 每字节带宽烧多少 sun */
   bandwidthFee: bigint
-  /** 转 TRX 给没激活的地址时发送方额外付的费用（激活费 1 TRX + 创建账户的带宽 0.1 TRX） */
-  activationFee: bigint
+  /** 转 TRX 给没激活的地址时的激活费（1 TRX） */
+  newAccountFee: bigint
+  /** 创建账户的带宽：质押带宽不够时烧的 TRX（0.1 TRX） */
+  createAccountFee: bigint
 }
 
 /** 账户状态：余额和可用资源 */
@@ -294,6 +296,19 @@ function bandwidthBurn(r: { free: number; staked: number }, bytes: number, fee: 
   return BigInt(bytes) * fee
 }
 
+/**
+ * 转 TRX 的手续费：给没激活的地址转时，java-tron 按创建账户计费：激活费 + 创建账户的带宽（质押带宽够时用质押的，否则烧 createAccountFee），
+ * 不再收普通带宽费，也不能用免费带宽；给已激活的地址转时按普通带宽。会扣减 r 里的剩余带宽，返回要烧的 sun
+ */
+function transferBurn(r: { free: number; staked: number }, bytes: number, params: ChainParams, activates: boolean): bigint {
+  if (!activates) return bandwidthBurn(r, bytes, params.bandwidthFee)
+  if (r.staked >= bytes) {
+    r.staked -= bytes
+    return params.newAccountFee
+  }
+  return params.newAccountFee + params.createAccountFee
+}
+
 /** 按预估能量（× 1.2 余量）扣减账户能量，返回要烧的 sun */
 function energyBurn(r: { energy: number }, energy: number, fee: bigint): bigint {
   const need = Math.ceil(energy * 1.2)
@@ -317,12 +332,7 @@ class TronRpc {
   ) {}
 
   request<T = any>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-    return runOnNodes(this.rpc, path, (node) => {
-      if (!(node instanceof TronProvider)) {
-        return Promise.reject(new Error('Not a Tron node'))
-      }
-      return node.request(path, body) as Promise<T>
-    })
+    return runOnNodes(this.rpc, path, async (node) => tronNode(node).request(path, body) as Promise<T>)
   }
 
   /** 参考区块（缓存 3 秒） */
@@ -351,7 +361,8 @@ class TronRpc {
       return {
         energyFee: map.get('getEnergyFee') ?? 210n,
         bandwidthFee: map.get('getTransactionFee') ?? 1000n,
-        activationFee: (map.get('getCreateNewAccountFeeInSystemContract') ?? 1_000_000n) + (map.get('getCreateAccountFee') ?? 100_000n),
+        newAccountFee: map.get('getCreateNewAccountFeeInSystemContract') ?? 1_000_000n,
+        createAccountFee: map.get('getCreateAccountFee') ?? 100_000n,
       }
     })
     this.#params.catch(() => (this.#params = null))
@@ -406,8 +417,8 @@ class TronRpc {
    */
   async expiredForSure(txId: string, expiration: number): Promise<boolean> {
     try {
-      return await runOnNodes(this.rpc, 'walletsolidity', async (node) => {
-        if (!(node instanceof TronProvider)) throw new Error('Not a Tron node')
+      return await runOnNodes(this.rpc, 'walletsolidity', async (any) => {
+        const node = tronNode(any)
         const block = await node.request('walletsolidity/getblock', { detail: false }).catch(() => node.request('walletsolidity/getnowblock'))
         const time = block?.block_header?.raw_data?.timestamp
         if (typeof time !== 'number' || time <= expiration + 60_000) return false
@@ -463,6 +474,11 @@ class TronRpc {
 }
 
 class TronTxError extends Error {}
+
+function tronNode(node: EthersLikeProvider): TronProvider {
+  if (!(node instanceof TronProvider)) throw new Error('Not a Tron node')
+  return node
+}
 
 /** 确定交易没被收下的广播错误码 */
 const FINAL_BROADCAST_CODES = new Set(['SIGERROR', 'CONTRACT_VALIDATE_ERROR', 'CONTRACT_EXE_ERROR', 'BANDWITH_ERROR', 'TOO_BIG_TRANSACTION_ERROR', 'TOO_BIG_TRANSACTION_RESULT_ERROR'])
@@ -593,13 +609,14 @@ async function sendTronGroup(rpc: TronRpc, jobs: readonly TronJob[], options: Se
   const shortOf = async (job: TronJob, energy: number, feeLimit: bigint): Promise<string | null> => {
     const r = await (account ??= rpc.resources(job.signer.address))
     if (!r.exists) return 'account is not activated (it needs to receive TRX first)'
-    const { energyFee, bandwidthFee, activationFee } = await rpc.params()
+    const params = await rpc.params()
     const next = { ...r }
-    let spend = bandwidthBurn(next, transactionBytes(job.contract, feeLimit), bandwidthFee)
+    const bytes = transactionBytes(job.contract, feeLimit)
+    let spend: bigint
     if (job.contract.type === 'trigger') {
-      spend += energyBurn(next, energy, energyFee) + job.contract.callValue
+      spend = bandwidthBurn(next, bytes, params.bandwidthFee) + energyBurn(next, energy, params.energyFee) + job.contract.callValue
     } else {
-      spend += job.contract.amount + ((await rpc.accountExists(job.contract.to)) ? 0n : activationFee)
+      spend = transferBurn(next, bytes, params, !(await rpc.accountExists(job.contract.to))) + job.contract.amount
     }
     if (next.balance < spend) return `insufficient TRX: this transaction needs about ${spend} sun (amount + fees), the wallet has ${next.balance} left`
     Object.assign(r, next, { balance: next.balance - spend })
@@ -936,7 +953,8 @@ export async function tronBatchCollect(provider: Provider, wallets: readonly Sig
   const active = (item: CollectItem) => item.result.error === null
 
   // 估算每个钱包的手续费：模拟能量 + 带宽
-  const { energyFee, bandwidthFee, activationFee } = await rpc.params()
+  const params = await rpc.params()
+  const { energyFee, bandwidthFee } = params
   const byWallet = new Map<string, CollectItem[]>()
   items.filter((i) => !i.native && active(i)).forEach((i) => byWallet.set(i.signer.address, [...(byWallet.get(i.signer.address) ?? []), i]))
   /** 每项的 fee_limit：按全部预估能量算（fee_limit 限制的是总能量，包括账户质押得到的能量），只是上限，实际按用量扣 */
@@ -983,7 +1001,7 @@ export async function tronBatchCollect(provider: Provider, wallets: readonly Sig
       const gasAccount = await rpc.resources(gas.address)
       const total = short.reduce((sum, p) => {
         const bytes = transactionBytes({ type: 'transfer', owner: gas.address, to: p.address, amount: p.shortfall }, 0n)
-        return sum + p.shortfall + (p.exists ? 0n : activationFee) + bandwidthBurn(gasAccount, bytes, bandwidthFee)
+        return sum + p.shortfall + transferBurn(gasAccount, bytes, params, !p.exists)
       }, 0n)
       if (gasAccount.balance < total) {
         throw new Error(`Insufficient TRX in gasWallet: the top-ups need about ${total} sun (including activation and bandwidth fees), it has ${gasAccount.balance}`)
@@ -1028,7 +1046,14 @@ export async function tronBatchCollect(provider: Provider, wallets: readonly Sig
   const sweepItems = items.filter((i) => i.native && active(i))
   if (!sweepItems.length || options.signal?.aborted) return { results, topUps }
   // 扫空 TRX：最新余额减去这笔的手续费（带宽够用时为 0；归集地址是合约时用合约调用，还要算能量）
-  const targetIsContract = await rpc.isContract(target)
+  let targetIsContract: boolean
+  try {
+    targetIsContract = await rpc.isContract(target)
+  } catch (err) {
+    // 代币归集已经发出：不能整体抛错，扫 TRX 的项标记失败
+    sweepItems.forEach((i) => report(i, emptyOutcome('failed', `cannot check the collect address: ${errorText(err)}`)))
+    return { results, topUps }
+  }
   const sweepJobs = await mapPool(sweepItems, options.concurrency ?? 8, async (item): Promise<TronJob | null> => {
     const owner = item.signer.address
     try {

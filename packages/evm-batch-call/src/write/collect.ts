@@ -2,6 +2,7 @@ import { Interface, getAddress, getBigInt, type BigNumberish } from 'ethers'
 
 import { ERC20_ABI, NATIVE_TOKEN, formatUnits, type TokenBalance } from '../erc20.js'
 import type { Provider } from '../provider.js'
+import { isExecutionError } from '../errors.js'
 import { WriteRpc, failureText, l1Fee } from './rpc.js'
 import { FeeSource, applyGasMultiplier, emptyOutcome, mapPool, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxFees, type TxJob, type TxOutcome, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
@@ -237,16 +238,35 @@ export async function batchCollect(provider: Provider, wallets: readonly SignerI
   // 扫空主币：按最新余额（不早于该钱包最后一笔确认交易的区块）减去这笔的手续费
   const sweepItems = items.filter((i) => i.native && active(i))
   if (sweep && sweepItems.length && !options.signal?.aborted) {
-    const sweepFee = await new FeeSource(rpc, options).get()
+    // 代币归集已经发出：这一阶段出错不能整体抛错（调用方会拿不到这些结果），扫主币的项标记失败
+    const failSweep = (error: string) => {
+      sweepItems.forEach((i) => report(i, emptyOutcome('failed', error)))
+      return { results, topUps }
+    }
+    let sweepFee: TxFees
+    try {
+      sweepFee = await new FeeSource(rpc, options).get()
+    } catch (err) {
+      return failSweep(`cannot get the fee data: ${failureText(err)}`)
+    }
     let gasLimit = 21_000n
     try {
       gasLimit = applyGasMultiplier(await rpc.estimateGas({ from: (sweepItems[0] as Item).signer.address, to: target, value: 1n }), multiplier)
-    } catch {
-      // 预估失败时按普通转账
+    } catch (err) {
+      // 归集地址拒收主币（如没有 receive 的合约）：发了也必然 revert，白付手续费
+      if (isExecutionError(err)) return failSweep(`the collect address cannot receive the native coin: ${failureText(err)}`)
+      // 节点暂时出错：按普通转账
     }
     const sweepJobs = await mapPool(sweepItems, options.concurrency ?? 8, async (item): Promise<TxJob | null> => {
       const block = minBlock.get(item.signer.address)
-      const [balance] = await provider.balances(item.signer.address, [NATIVE_TOKEN], block === undefined ? {} : { minBlock: block })
+      let balance: TokenBalance | undefined
+      try {
+        ;[balance] = await provider.balances(item.signer.address, [NATIVE_TOKEN], block === undefined ? {} : { minBlock: block })
+      } catch (err) {
+        // 代币归集已经发出：不能整体抛错（调用方会拿不到这些结果），这一项标记失败
+        report(item, emptyOutcome('failed', `cannot read balance: ${failureText(err)}`))
+        return null
+      }
       if (!balance?.success) {
         report(item, emptyOutcome('failed', `cannot read balance: ${balance?.error ?? 'unknown error'}`))
         return null

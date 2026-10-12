@@ -152,10 +152,6 @@ export class WriteRpc {
     this.#nextNonce.set(key, Math.max(this.#nextNonce.get(key) ?? 0, nonce + 1))
   }
 
-  balance(address: string): Promise<bigint> {
-    return this.#run('getBalance', (node) => node.getBalance(address, 'latest'))
-  }
-
   code(address: string): Promise<string> {
     return this.#run('getCode', (node) => node.getCode(address))
   }

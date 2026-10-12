@@ -417,6 +417,8 @@ async function minedState(rpc: WriteRpc, hash: string, options: SendOptions): Pr
   let errors = 0
   for (let i = 0; i < 5; i++) {
     if (i > 0) await sleep(options.pollInterval ?? 2_000, options.signal)
+    // 已取消：不再发新交易，也就不需要判断是否换 nonce 重发；没查够几轮也不能断定没上链
+    if (options.signal?.aborted) return 'unknown'
     try {
       if (await rpc.receipt(hash)) return 'mined'
     } catch {
