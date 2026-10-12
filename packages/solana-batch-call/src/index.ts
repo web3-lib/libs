@@ -72,6 +72,7 @@ export {
   parseMint,
   parseTokenAccount,
   parseTransferFeeConfig,
+  parseUnits,
   type AccountInfo,
   type MetaplexMetadata,
   type MintInfo,

@@ -1,5 +1,18 @@
 # Changelog
 
+## 未发布
+
+### 新功能
+
+- 批量写操作，子路径 `@w3lib/solana-batch-call/write`（只做查询时打包不会带上；不依赖 Solana SDK，私钥用 WebCrypto 的 Ed25519 签名，没有新增依赖）：
+  - `batchTransfer`：一对多转账（SOL / SPL Token / Token-2022，可混合），多个收款人打包进同一笔交易，收款人没有 ATA 时自动创建
+  - `batchCollect`：多钱包归集，`feePayer` 付全部手续费（子钱包不需要 SOL），可选关闭清空的代币账户、扫空 SOL
+  - `batchCall`：批量调用程序，指令可以是 web3.js / @solana/kit / 本库格式
+  - 每笔先模拟，失败的调用单独剔除；计算单元上限按模拟结果设置，优先费用默认按最近费用自动设置；blockhash 过期未上链时自动换新 blockhash 重发
+  - 浏览器钱包：Wallet Standard 钱包、@solana/wallet-adapter 的 adapter / useWallet()、@solana/kit 的 TransactionSigner，可以和私钥混用；同一批交易钱包只确认一次
+  - 指令工具：`systemTransfer`、`transferChecked`、`createAssociatedTokenAccountIdempotent`、`closeAccount`、`setComputeUnitLimit`、`setComputeUnitPrice`
+- `parseUnits`（`formatUnits` 的逆运算）；`SolanaClient.isNativeMint(mint)`、`SolanaClient.commitment`
+
 ## 0.2.2
 
 - 修复：服务端临时故障（-32000 server busy / overloaded / temporarily unavailable / timeout，或 HTTP 5xx + -32603）不再暂停批量 10 分钟，按节点故障处理、换节点（与限频一样不降级，降级只会加重负载）。批量收到 5xx + -32603 时先重试一次批量（偶发故障这次就成功）；仍失败时逐条发送，逐条成功说明节点用 5xx 拒绝批量，才暂停批量。5xx 下的其他错误（方法数量超限、账户数超限、参数错误、minContextSlot 等）照常按类型处理

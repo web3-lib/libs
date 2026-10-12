@@ -1,6 +1,6 @@
 # @w3lib/solana-batch-call
 
-Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT。不依赖 Solana SDK，直接发 JSON-RPC。
+Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
 
 ```bash
 pnpm add @w3lib/solana-batch-call
@@ -239,6 +239,86 @@ new SolanaClient(provider?, {
 
 在 Node 里通过代理访问节点时：Node 自带的 `fetch` 默认不读 `HTTPS_PROXY`，Node 24+ 可以设置 `NODE_USE_ENV_PROXY=1`，或者通过 `fetch` 选项传入自定义实现。
 
+## 批量写操作
+
+子路径 `@w3lib/solana-batch-call/write`：只做查询时打包不会带上这部分代码。不依赖 Solana SDK，私钥签名用运行环境的 WebCrypto（Ed25519）。
+
+```ts
+import { NATIVE_MINT, SolanaClient } from '@w3lib/solana-batch-call'
+import { batchCall, batchCollect, batchTransfer } from '@w3lib/solana-batch-call/write'
+
+const client = new SolanaClient('https://my-rpc.example')
+
+// 一对多转账：多个收款人打包进同一笔交易（按 1232 字节上限自动分笔）；代币收款人没有 ATA 时自动创建
+await batchTransfer(client, secretKey, [
+  { to: a, formatted: '0.5' },                 // 默认 SOL（options.token）
+  { to: b, token: USDC, formatted: '20' },
+])
+
+// 归集：多个钱包 → 一个地址。feePayer 付所有手续费，子钱包不需要有 SOL，多个钱包的转账打包进同一笔交易
+const { results } = await batchCollect(client, [key1, key2, key3], hotWallet, {
+  tokens: [USDC, NATIVE_MINT],   // 包含 SOL：代币归集确认后扫空 SOL
+  feePayer: gasKey,
+  closeAccounts: true,           // 关闭清空的代币账户，租金（约 0.00204 SOL）退回钱包后一起扫走
+})
+
+// 批量调用程序：每个调用是一组原子执行的指令（web3.js / @solana/kit / 本库格式都可以）
+await batchCall(client, [
+  { from: key1, instructions: [ix1, ix2] },
+  { from: key2, instructions: ix3, signers: [newAccountKeypair] },
+], { feePayer: gasKey })
+```
+
+**钱包**：base58 私钥（Phantom 等导出的 64 字节格式或 32 字节种子）、solana-keygen 的 JSON 数组、`Uint8Array`（64 字节，或 32 字节种子）、web3.js 的 `Keypair`、@solana/kit 的 `KeyPairSigner`，或自定义 `{ address, sign(message) }`（KMS / 硬件钱包，或运行环境的 WebCrypto 不支持 Ed25519 时自己用 @noble/curves 签名）。错误信息里不会带出私钥。32 字节的 base58 字符串不接受（和地址长得一样，传错成地址时会悄悄变成另一个钱包），32 字节种子请传 `Uint8Array`。
+
+**浏览器钱包**：`from`、`feePayer`、`signers` 都可以直接传浏览器钱包，可以和私钥混用（如浏览器钱包当 `feePayer` 给一批子钱包付手续费）：
+
+```ts
+// @solana/wallet-adapter（React）：传 useWallet() 的返回值，或 wallet.adapter
+const wallet = useWallet()
+await batchTransfer(client, wallet, recipients)
+
+// 直接用 Wallet Standard（Phantom / Solflare / Backpack / OKX 等都实现了）
+import { getWallets } from '@wallet-standard/app'
+const phantom = getWallets().get().find((w) => w.name === 'Phantom')   // 已连接；指定账户传 { wallet: phantom, account }
+await batchCollect(client, [key1, key2], hotWallet, { tokens: [USDC], feePayer: phantom })
+
+// @solana/kit 的 TransactionSigner（如 @solana/react 的 useWalletAccountTransactionSigner）
+await batchCall(client, [{ from: signer, instructions }])
+```
+
+- **一次确认**：同一批交易先全部模拟，再让钱包一次签完（Wallet Standard 的 `signTransaction` 一次传多笔），然后发送。所以同一批里依赖前面交易结果的调用模拟会失败（钱包签名前还没有交易发出）：这类调用分成两次调用。例外：交易过期没上链时自动重发，每笔会再请求一次签名；同一个钱包出现在多个手续费支付者分组里时（如 batchCall 里不同调用的付款方不同），每组请求一次
+- 钱包先签、本地私钥后签（有的钱包只在交易没有其他签名时才会往里加指令）。钱包改了交易（如加了优先费用）时：只有它一个签名者就接受（用户在钱包里确认过，这时 `fee` 为 null）；还有其他签名者时这笔失败，不让本地私钥去签钱包改过的内容
+- 用户拒绝时这批交易都是 `failed`，`error` 为 `'rejected by user'`
+- 钱包换了交易的 blockhash 时，不知道新 blockhash 的有效期，这笔不会自动重发（误判过期再发一笔可能两笔都上链），等不到确认时为 `pending`
+- 钱包需要支持 Wallet Standard（主流钱包都支持）；不支持的 adapter（如部分硬件钱包 adapter）可以包成 @solana/kit 的 `TransactionPartialSigner`：`{ address, signTransactions: (txs) => … }`，`txs` 里是消息字节，返回 `{ [address]: 签名 }`
+
+**打包与发送**：
+- 同一手续费支付者的相邻调用打包进同一笔交易（`mode: 'pack'`，默认；`'tx'` 每个调用一笔）。Solana 一笔交易本来就能放多条指令，不需要 EVM 上 Disperse 那样的合约
+- 每笔先模拟：失败的调用（余额不足、账户冻结、SOL 转给新地址但低于免租下限等）单独标记 `failed`，其余重新模拟后照常发送；模拟失败且同一支付者还有未确认的交易时，先等它们确认再模拟一次（后一笔依赖前一笔的结果时自动正确处理）。节点暂时的问题（限频、高度落后）会重试，不当成调用失败
+- 计算单元上限按模拟结果设置（× 1.1 + 1000），优先费用默认 `'auto'`：按这笔交易可写账户的最近费用取 75 分位，不超过 `maxPriorityFee`（默认 1,000,000 micro-lamports / CU）。调用里自带的 SetComputeUnitLimit / SetComputeUnitPrice 指令会被去掉（和库加的重复会让交易失败），优先费用用 `priorityFee` 指定
+- 交易发出后不等确认就发下一笔；等待期间每两次轮询重发一次原交易，一次 `getSignatureStatuses` 查所有交易。blockhash 过期仍没上链时换新 blockhash 重新模拟、重发，最多 `retries` 次（默认 2）。判断过期时，再查一次历史的那个节点的数据必须不早于看到过期的那个 slot（多节点 / 负载均衡时落后的节点可能还没看到已上链的交易），否则这一轮先不判断，避免重复执行
+- Token-2022：有转账手续费的代币，`amount` 是转出的数量，收款方实际收到的更少；带 transfer hook 的代币，TransferChecked 需要额外的账户，本库不支持（模拟会失败，这一项 `failed`）
+- 同一笔交易上链后才失败时一起回滚，里面的调用都是 `reverted`
+
+**结果**：与输入一一对应，可以直接 `JSON.stringify`：
+
+```ts
+{ index: 0, from, status: 'confirmed', signature: '5x…', slot: 123, fee: '5000', computeUnits: 450, error: null }
+// batchTransfer 另有 to / token / native / amount / formatted / createdAccount；
+// batchCollect 另有 to / token / native / amount / formatted / close（关闭代币账户的结果）
+```
+
+`status` 与 EVM 版相同：`confirmed` / `reverted`（上链但失败，手续费已扣）/ `failed`（没有发出去，不花手续费）/ `sent`（`wait: false`；或广播时节点都连不上，交易可能已发出，`error` 里有说明）/ `pending`（等到 `timeout` 还没确认）/ `skipped` / `simulated`（`dryRun`）。`fee` 是整笔交易的手续费（每个签名 5000 lamports + 优先费用），同一笔交易里的调用相同，不含新建账户的租金。
+
+**归集流程**（`batchCollect`）：一次读出所有钱包的余额 → 归集地址没有该代币的 ATA 时创建（传了 `feePayer` 时随第一批转账创建；不传时先由第一个有这种代币的钱包单独创建，其他钱包只需付得起手续费）→ 打包发送代币转账（`closeAccounts` 时随后关闭代币账户）→ 包含 SOL 时等代币归集确认，按最新余额扫空 SOL：传了 `feePayer` 时整个余额转走，否则扣掉这笔的手续费后转走（余额归零）。代币没有全部归集成功的钱包不扫 SOL；余额为 0、低于 `minAmount`、钱包就是归集地址或 `feePayer` 的项为 `skipped`。Solana 上不需要先给子钱包补 gas，传 `feePayer` 即可；不传时没有 SOL 的钱包对应的项失败。`dryRun` 时代币转账照常模拟，扫 SOL 的金额要等归集之后才知道，只标记 `simulated`、不做模拟。
+
+**共同选项**（`SendOptions`）：`feePayer`、`priorityFee` / `maxPriorityFee`、`wait`（默认 true）、`timeout`（默认 120 秒）、`pollInterval`（默认 2 秒）、`retries`（默认 2）、`commitment`（`'confirmed'` / `'finalized'`）、`concurrency`（不同手续费支付者并发数，默认 8）、`dryRun`、`signal`、`onUpdate`。
+
+**指令工具**：`systemTransfer`、`transferChecked`、`createAssociatedTokenAccountIdempotent`、`closeAccount`、`setComputeUnitLimit`、`setComputeUnitPrice`，生成本库格式的指令，可直接放进 `batchCall`。
+
+**体积**（esbuild 打包、minify，对比只用 `SolanaClient`）：引入 `batchTransfer` 增加约 22KB（gzip 约 8KB），三个函数都引入增加约 28KB（gzip 约 10KB），含浏览器钱包适配；没有新增依赖。
+
 ## 工具函数
 
 ```ts
@@ -251,13 +331,14 @@ import {
   parseMint, parseTokenAccount, parseMetaplexMetadata, // 账户数据解析
   parseTransferFeeConfig,    // Token-2022 转账手续费扩展
   formatUnits,               // 按精度换算：formatUnits(1_500_000_000n, 9) === '1.5'（formatAmount 是同一个函数的旧名字，已不推荐）
+  parseUnits,                // 反过来：parseUnits('1.5', 9) === 1_500_000_000n
   TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, NATIVE_MINT, GENESIS_HASHES,
 } from '@w3lib/solana-batch-call'
 ```
 
 ## 运行环境
 
-Node 20.19+（依赖的 `@noble/hashes` 2.x 要求）、现代浏览器。
+Node 20.19+（依赖的 `@noble/hashes` 2.x 要求）、现代浏览器。写操作用私钥签名时需要 WebCrypto 支持 Ed25519（Node 20+、Chrome 137+、Firefox 129+、Safari 17+）；不支持的环境（如 React Native）传自定义 `{ address, sign }`。
 
 ## 开发
 

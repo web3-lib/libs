@@ -1,7 +1,7 @@
 {
   "name": "@w3lib/solana-batch-call",
   "version": "0.2.2",
-  "description": "Batched Solana reads: SOL / SPL / Token-2022 balances, token metadata, NFTs. Auto-batching JSON-RPC, getMultipleAccounts chunking, RPC failover. No Solana SDK dependency.",
+  "description": "Batched Solana reads: SOL / SPL / Token-2022 balances, token metadata, NFTs; batch transfer, collect and program calls (packed transactions, fee payer). Auto-batching JSON-RPC, getMultipleAccounts chunking, RPC failover. No Solana SDK dependency.",
   "keywords": [
     "solana",
     "spl-token",
@@ -9,7 +9,8 @@
     "metaplex",
     "batch",
     "getMultipleAccounts",
-    "json-rpc"
+    "json-rpc",
+    "batch-transfer"
   ],
   "license": "MIT",
   "author": "L",
@@ -20,6 +21,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./write": {
+      "types": "./dist/subpaths/write.d.ts",
+      "import": "./dist/subpaths/write.js"
     }
   },
   "files": [

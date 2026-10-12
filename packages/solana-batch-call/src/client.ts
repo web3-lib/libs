@@ -505,6 +505,16 @@ export class SolanaClient {
     return this.#cluster ?? clusterOfGenesis(await this.#genesis())
   }
 
+  /** 默认的 commitment（ClientConfig.commitment，默认 'confirmed'） */
+  get commitment(): Commitment {
+    return this.#commitment
+  }
+
+  /** 是否按原生 SOL 处理这个 mint（ClientConfig.nativeMints） */
+  isNativeMint(mint: string): boolean {
+    return this.#nativeMints.has(mint)
+  }
+
   /** 直接发 JSON-RPC 调用（同样参与自动合并与故障切换） */
   request<T = unknown>(method: string, params?: readonly unknown[], options: RequestOptions = {}): Promise<T> {
     return abortable(options.signal, () => this.transport.request<T>(method, params))

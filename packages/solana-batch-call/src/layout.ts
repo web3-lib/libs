@@ -314,6 +314,23 @@ export function formatUnits(value: bigint, decimals: number): string {
 }
 
 /**
+ * formatUnits 的逆运算（与 ethers 的 parseUnits 同名同义）：parseUnits('1.5', 9) === 1_500_000_000n。
+ * 小数位超过精度时报错（不四舍五入；多出的只有 0 时允许）
+ */
+export function parseUnits(value: string, decimals: number): bigint {
+  const match = /^(-)?(\d*)(?:\.(\d*))?$/.exec(value.trim())
+  if (!match || (!match[2] && !match[3])) {
+    throw new Error(`Invalid amount: ${JSON.stringify(value)}`)
+  }
+  const fraction = match[3] ?? ''
+  if (/[1-9]/.test(fraction.slice(decimals))) {
+    throw new Error(`Too many decimals: ${value} (max ${decimals})`)
+  }
+  const amount = BigInt((match[2] || '0') + fraction.slice(0, decimals).padEnd(decimals, '0'))
+  return match[1] ? -amount : amount
+}
+
+/**
  * 同 formatUnits。
  * @deprecated 改用 formatUnits：formatAmount 这个名字容易和项目里的数字展示函数撞名
  */
