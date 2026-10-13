@@ -12,6 +12,8 @@
   - Tron：同样的三个函数传 Tron 的 Provider 即可（TRX / TRC20 转账、合约调用、归集含补 gas 和激活账户）。交易本地编码签名、`broadcasthex` 广播，合约调用先模拟，过期按链上时间判断后自动重发；支持浏览器钱包（tronWeb / tronwallet-adapter）；这部分按需加载
   - 钱包可以传私钥或 ethers Signer（含浏览器钱包的 JsonRpcSigner）；结果可以直接 JSON 序列化，`onUpdate` 回调进度，支持 `dryRun` / `wait: false` / `signal`
 - `FallbackRpc.request(method, fn)`：用任意方法请求节点，与 call / getBalance 相同的故障切换
+- LP 仓位，子路径 `@w3lib/evm-batch-call/lp`：`getLpPositions` / `lpPositions` 查一个地址的 V2 LP 代币、V3 / V4 仓位 NFT，两种代币的数量、未领取手续费（与合约 `decreaseLiquidity` / `collect` 的结果逐位核对过）、可选美元价值。内置 Uniswap、PancakeSwap、SushiSwap（7 条 EVM 链）和 Tron 的 SunSwap；V4 支持传 tokenId 或扫描 Transfer 事件发现仓位
+- DefiLlama 价格源支持 Tron（资产列表在 Tron 上也可以带价格）
 
 ## 0.4.2
 

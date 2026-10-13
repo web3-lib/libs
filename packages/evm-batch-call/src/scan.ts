@@ -165,6 +165,139 @@ async function loadState(storage: TransferScanStorage, key: string): Promise<Tra
   }
 }
 
+/** 通用的增量扫描进度（transferScan 存储时把 items 存成 tokens） */
+export interface LogScanProgress {
+  startBlock: number
+  cursor: number
+  /** 扫描中收集到的条目（去重） */
+  items: string[]
+  blockRange: number
+  rangeLimit?: number
+  rangeLimitAt?: number
+  pausedUntil?: number
+}
+
+/** 能查日志的节点（Provider 满足） */
+export interface LogScanProvider {
+  getBlockNumber(): Promise<number>
+  getLogs(filter: { address?: string; fromBlock: number; toBlock: number; topics: Array<string | null> }): Promise<Array<{ address: string; topics: readonly string[] }>>
+}
+
+export interface LogScanRun {
+  provider: LogScanProvider
+  /** 存储里读出的进度（没有时从头开始） */
+  saved: LogScanProgress | undefined
+  /** 第一次扫描时的起点：返回 cursor（已扫到的区块，下一次从 cursor + 1 开始），参数是本次的目标区块 */
+  initialCursor(target: number): number
+  filter: { address?: string; topics: Array<string | null> }
+  /** 从一条日志里取出要收集的条目，不需要的返回 null */
+  collect(log: { address: string; topics: readonly string[] }): string | null
+  maxRange: number
+  maxRequests: number
+  timeBudget: number
+  confirmations: number
+  /** 已取消时不再发新的 getLogs（已扫到的进度照常返回） */
+  signal?: AbortSignal
+  /** 本次扫描结束时调用：cursor 是已扫到的区块，target 是本次的目标区块（cursor ≥ target 表示已扫到最新） */
+  onDone?(state: LogScanProgress, target: number): void
+}
+
+/**
+ * 增量扫描日志（transferScan、LP 仓位的 V4 扫描共用）：从上次的位置往后扫到最新区块前 confirmations 个区块，
+ * 区块范围按节点的限制自动调整，限频 / 超时退避重试，节点不开放 getLogs 时暂停一段时间。
+ * 返回新的进度；拿不到最新区块且没有旧进度时返回 null
+ */
+export async function runLogScan(run: LogScanRun): Promise<LogScanProgress | null> {
+  const { provider, saved, filter, collect, maxRange, maxRequests, timeBudget, confirmations } = run
+  if (saved?.pausedUntil && Date.now() < saved.pausedUntil) {
+    return saved
+  }
+  const startedAt = Date.now()
+  let target: number
+  try {
+    target = (await provider.getBlockNumber()) - confirmations
+  } catch {
+    return saved ?? null // 节点不支持 / 暂时不可用：返回已有的进度
+  }
+  const now = Date.now()
+  let state: LogScanProgress
+  if (saved) {
+    state = { ...saved, items: [...saved.items] }
+    delete state.pausedUntil
+    if (state.rangeLimitAt !== undefined && now - state.rangeLimitAt > RANGE_LIMIT_TTL) {
+      delete state.rangeLimit
+      delete state.rangeLimitAt
+    }
+  } else {
+    const cursor = Math.max(-1, Math.min(target, run.initialCursor(target)))
+    state = { startBlock: cursor + 1, cursor, items: [], blockRange: maxRange }
+  }
+  const items = new Set(state.items)
+  const cap = () => Math.min(maxRange, state.rangeLimit ?? maxRange)
+  const setLimit = (limit: number) => {
+    state.rangeLimit = limit
+    state.rangeLimitAt = Date.now()
+  }
+  let range = Math.min(state.blockRange, cap())
+  let successes = 0
+  let transient = 0
+
+  for (let requests = 0; requests < maxRequests && state.cursor < target; requests++) {
+    if ((timeBudget > 0 && Date.now() - startedAt >= timeBudget) || run.signal?.aborted) {
+      break // 超出时间预算 / 已取消，留到下次调用
+    }
+    const fromBlock = state.cursor + 1
+    const toBlock = Math.min(target, fromBlock + range - 1)
+    try {
+      const logs = await provider.getLogs({ ...(filter.address ? { address: filter.address } : {}), fromBlock, toBlock, topics: filter.topics })
+      for (const log of logs) {
+        const item = collect(log)
+        if (item !== null) {
+          items.add(item)
+        }
+      }
+      state.cursor = toBlock
+      transient = 0
+      if (++successes >= GROW_AFTER && range < cap()) {
+        range = Math.min(cap(), range * 2) // 之前缩小过（偶发错误 / 换了节点）：逐步放大回去
+        successes = 0
+      }
+    } catch (err) {
+      successes = 0
+      const texts = errorTexts(err)
+      const kinds = texts.map(kindOf)
+      // 上次成功的节点这次的错误最能说明问题（其他节点可能一直就不能用，它们的报错不代表当前范围有问题）
+      const preferred = err instanceof GetLogsError && err.preferred !== undefined ? kindOf(errorText(err.preferred)) : undefined
+      const limit = parseRangeLimit(texts)
+      if (limit !== null && limit < range) {
+        range = limit // 节点明确给了范围上限
+        setLimit(limit)
+      } else if (kinds.every((k) => k === 'unsupported')) {
+        // 所有节点都不开放 getLogs：暂停一段时间，避免每次调用都白发请求
+        state.pausedUntil = Date.now() + PAUSE_ON_UNSUPPORTED
+        break
+      } else if (preferred === 'transient' || (preferred === undefined && kinds.every((k) => k === 'transient' || k === 'unsupported'))) {
+        // 在用的节点只是限频 / 超时：不缩小范围，退避后重试；连续 3 次就留到下次调用
+        const remaining = timeBudget > 0 ? timeBudget - (Date.now() - startedAt) : Infinity
+        if (++transient >= 3 || remaining <= 0) {
+          break
+        }
+        await sleep(Math.min(500 * transient, remaining))
+      } else if (range > 1) {
+        range = Math.max(1, Math.floor(range / 2)) // 范围超限但没说上限：减半再试
+        setLimit(range)
+      } else {
+        state.pausedUntil = Date.now() + PAUSE_ON_UNSUPPORTED // 连 1 个区块都查不了
+        break
+      }
+    }
+  }
+  state.blockRange = range
+  state.items = [...items]
+  run.onDone?.(state, target)
+  return state
+}
+
 /**
  * 增量扫描地址收到的 ERC20 代币（Transfer 事件，to = 该地址）：第一次调用记下当前区块，之后每次从上次的位置往后扫。
  * 用来补充代币列表发现不了的新代币。作为代币来源使用：`combine(defaultTokenSource(), transferScan())`，
@@ -188,100 +321,36 @@ export function transferScan(options: TransferScanOptions = {}): TokenSource {
       }
       const key = `${chainId}:${owner.toLowerCase()}`
       const saved = await loadState(storage, key)
-      const toResult = (state: TransferScanState | undefined): DiscoveredToken[] => (state?.tokens ?? []).map((address) => ({ address }))
-      if (saved?.pausedUntil && Date.now() < saved.pausedUntil) {
-        return toResult(saved)
-      }
-
-      const startedAt = Date.now()
-      let target: number
-      try {
-        target = (await provider.getBlockNumber()) - confirmations
-      } catch {
-        return saved ? toResult(saved) : null // 节点不支持 / 暂时不可用：返回已发现的代币
-      }
-      const now = Date.now()
-      let state: TransferScanState
-      if (saved) {
-        state = { ...saved, tokens: [...saved.tokens] }
-        delete state.pausedUntil
-        if (state.rangeLimitAt !== undefined && now - state.rangeLimitAt > RANGE_LIMIT_TTL) {
-          delete state.rangeLimit
-          delete state.rangeLimitAt
-        }
-      } else {
-        const cursor = Math.max(-1, target - lookback)
-        state = { startBlock: cursor + 1, cursor, tokens: [], blockRange: maxRange }
-      }
-      const tokens = new Set(state.tokens)
+      const toResult = (tokens: readonly string[]): DiscoveredToken[] => tokens.map((address) => ({ address }))
       const ownerTopic = `0x${owner.slice(2).toLowerCase().padStart(64, '0')}`
-      const cap = () => Math.min(maxRange, state.rangeLimit ?? maxRange)
-      const setLimit = (limit: number) => {
-        state.rangeLimit = limit
-        state.rangeLimitAt = Date.now()
+      const savedProgress = saved && { ...saved, items: saved.tokens }
+      const progress = await runLogScan({
+        provider,
+        saved: savedProgress,
+        initialCursor: (target) => target - lookback,
+        filter: { topics: [TRANSFER_TOPIC, null, ownerTopic] },
+        // ERC20 的 Transfer 有 3 个 topic；ERC721 的 tokenId 也是 indexed，有 4 个，排除
+        collect: (log) => (log.topics.length === 3 ? log.address.toLowerCase() : null),
+        maxRange,
+        maxRequests,
+        timeBudget,
+        confirmations,
+      })
+      if (!progress) {
+        return null
       }
-      let range = Math.min(state.blockRange, cap())
-      let successes = 0
-      let transient = 0
-
-      for (let requests = 0; requests < maxRequests && state.cursor < target; requests++) {
-        if (timeBudget > 0 && Date.now() - startedAt >= timeBudget) {
-          break // 超出时间预算，留到下次调用
-        }
-        const fromBlock = state.cursor + 1
-        const toBlock = Math.min(target, fromBlock + range - 1)
-        try {
-          const logs = await provider.getLogs({ fromBlock, toBlock, topics: [TRANSFER_TOPIC, null, ownerTopic] })
-          for (const log of logs) {
-            // ERC20 的 Transfer 有 3 个 topic；ERC721 的 tokenId 也是 indexed，有 4 个，排除
-            if (log.topics.length === 3) {
-              tokens.add(log.address.toLowerCase())
-            }
-          }
-          state.cursor = toBlock
-          transient = 0
-          if (++successes >= GROW_AFTER && range < cap()) {
-            range = Math.min(cap(), range * 2) // 之前缩小过（偶发错误 / 换了节点）：逐步放大回去
-            successes = 0
-          }
-        } catch (err) {
-          successes = 0
-          const texts = errorTexts(err)
-          const kinds = texts.map(kindOf)
-          // 上次成功的节点这次的错误最能说明问题（其他节点可能一直就不能用，它们的报错不代表当前范围有问题）
-          const preferred = err instanceof GetLogsError && err.preferred !== undefined ? kindOf(errorText(err.preferred)) : undefined
-          const limit = parseRangeLimit(texts)
-          if (limit !== null && limit < range) {
-            range = limit // 节点明确给了范围上限
-            setLimit(limit)
-          } else if (kinds.every((k) => k === 'unsupported')) {
-            // 所有节点都不开放 getLogs：暂停一段时间，避免每次调用都白发请求
-            state.pausedUntil = Date.now() + PAUSE_ON_UNSUPPORTED
-            break
-          } else if (preferred === 'transient' || (preferred === undefined && kinds.every((k) => k === 'transient' || k === 'unsupported'))) {
-            // 在用的节点只是限频 / 超时：不缩小范围，退避后重试；连续 3 次就留到下次调用
-            const remaining = timeBudget > 0 ? timeBudget - (Date.now() - startedAt) : Infinity
-            if (++transient >= 3 || remaining <= 0) {
-              break
-            }
-            await sleep(Math.min(500 * transient, remaining))
-          } else if (range > 1) {
-            range = Math.max(1, Math.floor(range / 2)) // 范围超限但没说上限：减半再试
-            setLimit(range)
-          } else {
-            state.pausedUntil = Date.now() + PAUSE_ON_UNSUPPORTED // 连 1 个区块都查不了
-            break
-          }
-        }
+      // 暂停中 / 拿不到最新区块：进度没变，不用写回
+      if (progress === savedProgress) {
+        return toResult(progress.items)
       }
-      state.blockRange = range
-      state.tokens = [...tokens]
+      const { items, ...rest } = progress
+      const state: TransferScanState = { ...rest, tokens: items }
       try {
         await storage.set(key, state)
       } catch {
         // 存储不可用：只影响下次能否接着扫
       }
-      return toResult(state)
+      return toResult(state.tokens)
     },
   }
 }

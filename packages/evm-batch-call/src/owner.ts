@@ -2,7 +2,7 @@ import type { CallOverrides } from './aggregate.js'
 import { NATIVE_TOKEN, formatUnits, type BalanceToken } from './erc20.js'
 import type { Provider } from './provider.js'
 import { transferScan, type TransferScanOptions } from './scan.js'
-import { isTronAddress } from './tron.js'
+import { TRON_CHAIN_ID, isTronAddress, isTronChain, toTronAddress } from './tron.js'
 
 // ---------------------------------------------------------------------------
 // 代币来源：负责“这个地址可能持有哪些代币”。余额和精度一律由本库用 multicall 在链上核对。
@@ -425,7 +425,7 @@ export interface PriceSourceContext {
 
 export interface PriceSource {
   readonly name: string
-  /** 返回 去重键（0x 地址小写）→ 美元价格；主币用键 'native'。没有价格的不返回 */
+  /** 返回 去重键 → 美元价格：EVM 是小写 0x 地址；Tron 是 T 开头的 base58 地址（区分大小写）；主币用键 'native'。没有价格的不返回 */
   prices(ctx: PriceSourceContext): Promise<Map<string, number>>
 }
 
@@ -454,6 +454,7 @@ export const DEFILLAMA_CHAINS: Readonly<Record<number, string>> = {
   80094: 'berachain',
   81457: 'blast',
   534352: 'scroll',
+  [TRON_CHAIN_ID.mainnet]: 'tron',
 }
 
 /** 主币价格：按主币 symbol 对应 CoinGecko 的币种 id（DefiLlama 用 coingecko:<id> 查） */
@@ -484,7 +485,17 @@ export function defillamaPrices(options: { minConfidence?: number } = {}): Price
       const result = new Map<string, number>()
       const slug = DEFILLAMA_CHAINS[chainId]
       const nativeId = nativeSymbol ? NATIVE_PRICE_IDS[nativeSymbol.toUpperCase()] : undefined
-      const keys = [...(nativeId ? [`coingecko:${nativeId}`] : []), ...(slug ? tokens.map((t) => `${slug}:${t.toLowerCase()}`) : [])]
+      // 查询键 → 结果里用的去重键：EVM 地址小写；Tron 地址区分大小写，DefiLlama 要用原样的 base58（T…）地址
+      const resultKey = new Map<string, string>()
+      const tokenKeys = slug
+        ? tokens.map((t) => {
+            const tron = slug === 'tron'
+            const query = `${slug}:${tron ? toTronAddress(t) : t.toLowerCase()}`
+            resultKey.set(query.toLowerCase(), tron ? toTronAddress(t) : t.toLowerCase())
+            return query
+          })
+        : []
+      const keys = [...(nativeId ? [`coingecko:${nativeId}`] : []), ...tokenKeys]
       const batches: string[][] = []
       for (let i = 0; i < keys.length; i += 100) {
         batches.push(keys.slice(i, i + 100))
@@ -497,7 +508,7 @@ export function defillamaPrices(options: { minConfidence?: number } = {}): Price
           if (typeof coin.price !== 'number' || !Number.isFinite(coin.price) || (coin.confidence !== undefined && coin.confidence < minConfidence)) {
             continue
           }
-          result.set(key.startsWith('coingecko:') ? 'native' : key.slice(key.indexOf(':') + 1).toLowerCase(), coin.price)
+          result.set(key.startsWith('coingecko:') ? 'native' : (resultKey.get(key.toLowerCase()) ?? key.slice(key.indexOf(':') + 1).toLowerCase()), coin.price)
         }
       }
       return result
@@ -603,8 +614,10 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
     held.length ? provider.tokens(held.map((x) => x.meta.address), { ...overrides, fields: ['decimals', 'name', 'symbol'] }) : Promise.resolve([]),
     nativeAddress ? provider.tokens([nativeAddress], { fields: ['name', 'symbol'] }) : Promise.resolve([undefined]),
   ])
+  // 价格源的键：Tron 上统一用 T 地址（代币来源给的可能是 0x 格式）
+  const priceKey = (address: string) => (isTronChain(chainId) ? toTronAddress(address) : addressKey(address))
   const priceMap = priceSource
-    ? await priceSource.prices({ chainId, tokens: held.map((x) => x.meta.address), nativeSymbol: nativeAddress ? (nativeInfo?.symbol ?? null) : null, fetch: fetchFn })
+    ? await priceSource.prices({ chainId, tokens: held.map((x) => (isTronChain(chainId) ? toTronAddress(x.meta.address) : x.meta.address)), nativeSymbol: nativeAddress ? (nativeInfo?.symbol ?? null) : null, fetch: fetchFn })
     : new Map<string, number>()
   const valueOf = (formatted: string, price: number | undefined) => (price === undefined ? null : Number(formatted) * price)
 
@@ -616,7 +629,7 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
     }
     const decimals = chain.decimals
     const formatted = decimals === balance.decimals ? balance.formatted : formatUnits(BigInt(balance.balance), decimals)
-    const price = priceMap.get(addressKey(meta.address))
+    const price = priceMap.get(priceKey(meta.address))
     return [
       {
         token: meta.address,

@@ -28,6 +28,10 @@
       "types": "./dist/subpaths/nft.d.ts",
       "import": "./dist/subpaths/nft.js"
     },
+    "./lp": {
+      "types": "./dist/subpaths/lp.d.ts",
+      "import": "./dist/subpaths/lp.js"
+    },
     "./owner": {
       "types": "./dist/subpaths/owner.d.ts",
       "import": "./dist/subpaths/owner.js"

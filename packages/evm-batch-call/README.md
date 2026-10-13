@@ -50,8 +50,9 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | `getNftTokenUris(items, opts)` | `nftTokenUris(multi, items, opts)` | **`/nft`**。元数据地址：自动兼容 ERC721 `tokenURI` 与 ERC1155 `uri`（`{id}` 按规范替换），`ipfsGateway` 转换 `ipfs://`；首次查询顺带识别集合标准并缓存，之后只发对应的调用 |
 | `getErc1155Balances(owner, items, opts)` | `erc1155Balances(multi, owner, items)` | **`/nft`**。ERC1155 余额 |
 | `getOwnerTokens(owner, opts)` | `ownerTokens(multi, owner, opts)` | **子路径 `/owner`**。资产列表：地址持有的代币（**不推荐使用**，结果不保证完整，见[资产列表](#资产列表)） |
+| `getLpPositions(owner, opts)` | `lpPositions(multi, owner, opts)` | **子路径 `/lp`**。LP 仓位：V2 的 LP 代币、V3 / V4 的仓位 NFT，代币数量、未领取手续费、可选美元价值，见 [LP 仓位](#lp-仓位) |
 
-**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`，批量写操作在 `@w3lib/evm-batch-call/write`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 44KB、gzip 约 16KB，均不含 ethers）。
+**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`，LP 仓位在 `@w3lib/evm-batch-call/lp`，批量写操作在 `@w3lib/evm-batch-call/write`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 50KB、gzip 约 17KB，均不含 ethers）。
 
 共同的规则：
 
@@ -236,6 +237,64 @@ await getOwnerTokens(user, { chainId: 1, scanTransfers: { lookbackBlocks: 20_000
 6. **只包含 ERC20 代币**，不含 NFT（NFT 请用 `getNftBalances` 等）；Tron 链没有默认来源，需要自己传 `source`
 7. 使用 Alchemy / NodeReal 时受它们的免费额度和限频约束，翻页次数默认最多 20 页（2000 个代币），可用 `maxPages` 调整
 8. 开启 `scanTransfers` 时另有局限，见上面「增量扫描」
+
+## LP 仓位
+
+查一个地址在各 DEX 的流动性仓位（子路径 `@w3lib/evm-batch-call/lp`）：V2 的 LP 代币、V3 / V4 的仓位 NFT，每个仓位的两种代币数量、未领取的手续费，可选美元价值。所有合约读取都用 multicall 批量完成（整个查询通常 4~6 次请求）。
+
+```ts
+import { getLpPositions } from '@w3lib/evm-batch-call/lp'
+
+await getLpPositions(user, { chainId: 56 })                    // 这条链上内置的全部协议
+await getLpPositions(user, { chainId: 56, prices: true })      // 带美元价值（DefiLlama），按价值排序
+await getLpPositions(user, { chainId: 56, tokens: heldTokens }) // V2：再用这些代币 × 计价币找池子
+await getLpPositions(user, { chainId: 1, v4: { tokenIds: [12345n] } })        // V4：已知的仓位
+await getLpPositions(user, { chainId: 1, v4: { scan: { storage } } })        // V4：扫描 Transfer 事件发现仓位
+// [
+//   { version: 'v3', protocol: 'pancakeswap-v3', protocolName: 'PancakeSwap V3', pool: '0x…', tokenId: '123', positionManager: '0x…',
+//     token0: { address, symbol: 'WBNB', decimals: 18, native: false }, token1: { symbol: 'USDT', … },
+//     amount0: '1200000000000000000', amount0Formatted: '1.2', amount1Formatted: '700',
+//     fees0Formatted: '0.003', fees1Formatted: '1.8', fee: 500, tickLower, tickUpper, tick, inRange: true,
+//     liquidity, price: 583.2, priceLower: 500, priceUpper: 650, valueUsd: 1400, feesUsd: 3.6, chainId: 56 },
+//   { version: 'v2', protocol: 'pancakeswap-v2', pool: '0x…', balance, totalSupply, share: 0.0001, amount0Formatted, amount1Formatted, valueUsd, … },
+// ]
+```
+
+### 内置的协议
+
+| 链 | V2 | V3 | V4 |
+| --- | --- | --- | --- |
+| Ethereum | Uniswap、SushiSwap、PancakeSwap | Uniswap、PancakeSwap | Uniswap |
+| BSC | PancakeSwap、Uniswap、SushiSwap | PancakeSwap、Uniswap | Uniswap |
+| Base | Uniswap、PancakeSwap | Uniswap、PancakeSwap | Uniswap |
+| Arbitrum | Uniswap、SushiSwap、PancakeSwap | Uniswap、PancakeSwap | Uniswap |
+| Optimism | Uniswap | Uniswap | Uniswap |
+| Polygon | Uniswap、SushiSwap | Uniswap | Uniswap |
+| Avalanche | | Uniswap | |
+| Tron | SunSwap | SunSwap | |
+
+地址都在链上核对过（2026-10）。其他 DEX / 链传自己的协议：`protocols: [{ id: 'my-dex', name: 'My DEX', version: 'v3', chainId, positionManager, factory }]`（V2 只需要 `factory`；V3 需要 `positionManager` 和 `factory`，ABI 与 Uniswap V3 相同的分叉都可以；V4 需要 `positionManager` 和 `stateView`，`deployBlock` 可选）。`protocols: ['uniswap-v3']` 只查某些协议，`versions: ['v3']` 只查某些类型。
+
+### 每种类型怎么查、能不能查全
+
+| 类型 | 能否查全 | 做法 |
+| --- | --- | --- |
+| **V3**（仓位 NFT） | 能 | 仓位合约可以按地址列出 NFT：`balanceOf` → `tokenOfOwnerByIndex` → `positions`，再读池子的价格和手续费增长。仓位很多的地址只核对按持有顺序最后的 `maxPositions` 个（默认 500，大致是最近的） |
+| **V2**（LP 代币） | **尽量** | 链上没有“地址持有哪些代币”的索引。默认用计价币之间的组合（WETH/USDT、WBNB/USDT…）在各工厂里找池子；`tokens` 传入更多代币（如资产列表里的）一起组合；`pools` 直接传池子地址；`source: alchemy({ apiKey })` 用代币来源列出地址持有的全部 ERC20（包括 LP 代币，见[资产列表](#资产列表)）。找到的 LP 代币按 `token0` / `token1` / `factory` 识别池子和协议，工厂不在协议表里的显示为 `Unknown V2` |
+| **V4**（仓位 NFT） | **需要配置** | V4 的仓位合约不能按地址列出 NFT。`v4.tokenIds` 传已知的仓位；`v4.scan` 扫描仓位合约发给该地址的 NFT（`Transfer` 事件），扫到的再核对是否仍归这个地址（已转走 / 销毁的从进度里去掉）。两个都不传时不查 V4；候选太多时只核对 tokenId 最大的 `maxPositions` 个 |
+
+**V4 扫描**（`v4: { scan: true }` 或传选项）：每次调用从上次的位置往后扫，进度默认在内存里，`storage: keyValueLpScanStorage(localStorage)` 可以跨页面刷新接着扫。`fromBlock`：`'deployment'`（默认，从仓位合约部署的区块开始扫全部历史；自定义协议没传 `deployBlock` 时等同于 `'latest'`）、`'latest'`（只发现之后的新仓位）或区块号。只查仓位合约的事件，单次范围默认 10000 个区块，节点有上限时自动缩小，限频 / 超时自动退避（与[增量扫描](#增量扫描可选)相同）。扫全部历史在公共节点上很慢（BSC 公共节点每次只能查几百个区块），每次调用只推进 `maxRequests` 个请求 / `timeBudget` 时间，建议用自己的节点或把进度存起来。**没扫到最新区块之前 V4 的结果不完整**（从旧往新扫，最近铸造的仓位最后才扫到）：`onProgress: ({ cursor, target, done, pausedUntil }) => …` 可以拿到进度，没扫完时提示用户或再调用几次（节点不开放 getLogs 时会暂停一段时间：触发暂停的那次带 `pausedUntil`，暂停期间的调用 `target` 为 null；拿不到最新区块时 `target` 也为 null）。`confirmations`（默认 5）不要设为 0：刚出的区块可能被重组。已转走 / 销毁的仓位只在节点跟上扫描进度时才从进度里去掉，节点落后时照常返回结果、这次不清理。改 `fromBlock` 只对还没有进度的地址生效（进度按链 + 仓位合约 + 地址保存）。
+
+### 数值
+
+- **数量**（`amount0` / `amount1`）：V2 按份额（`储备 × 持有 / 总量`）；V3 / V4 是在当前价格下撤出全部流动性能拿到的数量（与合约的 `decreaseLiquidity` 结果逐位一致，不含手续费）
+- **手续费**（`fees0` / `fees1`，V3 / V4）：未领取的手续费，按池子的手续费增长计算，不用发交易。V3 与仓位合约记的账一致；仓位合约按每个仓位单独取整、池子按同一区间合并记账，实际能领到的偶尔会少几 wei。V2 的手续费已经计入份额，没有单独的未领取手续费
+- **价格**（`price` / `priceLower` / `priceUpper`）：token1 / token0，按精度换算的浮点数，只用于展示；`inRange` 表示当前价格在仓位区间内（在区间内才赚手续费）
+- **已清空的仓位**：V3 / V4 撤出全部流动性、手续费也领完后 NFT 还在，默认不返回；`includeClosed: true` 时返回
+- **美元价值（可选）**：默认不查；价格源出错（服务不可用、被拦截等）时照样返回仓位，只是 `valueUsd` / `feesUsd` 为 `null`；传 `onPriceError: (err) => …` 可以知道是价格服务出错（而不是代币没有价格）。`prices: true` 用 DefiLlama（与资产列表相同），也可以传自己的 `PriceSource`。`valueUsd` 是仓位里两种代币的价值，`feesUsd` 是未领取手续费的价值；数量不为 0 的代币没有价格时为 `null`；开启后结果按价值从高到低排序
+- **Tron**：地址（池子、代币、仓位合约）都是 T 开头的格式；价格用 DefiLlama 的 Tron 数据
+
+**局限**：PancakeSwap 等质押到农场（MasterChef）的仓位 NFT 不在用户名下，查不到；V2 只能尽量查（见上表）；V4 需要传 `tokenIds` 或开启扫描。
 
 ## 功能
 
