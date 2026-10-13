@@ -6,6 +6,8 @@
 pnpm add @w3lib/evm-batch-call ethers
 ```
 
+**在线 demo**：<https://web3-lib.github.io/libs/evm/>（余额、代币信息、资产列表、LP 仓位、NFT，8 条链含 Tron，显示每次查询实际发出的节点请求数）。本地运行：`pnpm --filter @w3lib/evm-batch-call demo`（http://localhost:5174）
+
 ## 快速上手
 
 ### 常用查询

@@ -60,14 +60,17 @@
     "test:live": "LIVE=1 vitest run test/live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "build:contracts": "node scripts/build-contracts.mjs",
-    "check:rpc": "node scripts/check-rpc-nodes.mjs"
+    "check:rpc": "node scripts/check-rpc-nodes.mjs",
+    "demo": "vite demo",
+    "demo:build": "vite build demo"
   },
   "peerDependencies": {
     "ethers": "^6.0.0"
   },
   "devDependencies": {
     "ethers": "^6.17.0",
-    "solc": "0.8.30"
+    "solc": "0.8.30",
+    "vite": "^8.3.4"
   },
   "publishConfig": {
     "access": "public"

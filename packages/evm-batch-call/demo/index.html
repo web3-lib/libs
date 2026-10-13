@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/evm-batch-call demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h14' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/evm-batch-call <small>demo</small></h1>
+      <p>EVM / Tron 批量查询：所有合约读取经 Multicall3 合并，下面每次查询都会显示实际发出的节点请求数。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>设置</h2>
+        <div class="row">
+          <label for="chain">链</label>
+          <select id="chain"></select>
+        </div>
+        <div class="row">
+          <label for="rpc">节点</label>
+          <input id="rpc" placeholder="RPC URL（可选，不填用内置公共节点；Tron 填全节点 HTTP 地址，如 https://api.trongrid.io）" />
+        </div>
+        <div class="row">
+          <label for="owner">地址</label>
+          <div class="inline">
+            <input id="owner" placeholder="要查询的钱包地址（Tron 用 T 开头的地址）" spellcheck="false" />
+            <button id="sample">示例地址</button>
+          </div>
+        </div>
+        <p class="hint">内置公共节点限频较严，偶尔失败时库会自动换节点；频繁使用请填自己的节点。设置保存在本地浏览器。</p>
+      </section>
+
+      <section class="card">
+        <h2>余额 <small class="muted">getBalances：主币 + 代币，一次 multicall</small></h2>
+        <div class="row">
+          <label for="balanceTokens">代币</label>
+          <textarea id="balanceTokens" placeholder="代币地址，每行一个（默认是这条链的常用代币）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runBalances">查询余额</button>
+          <span class="stats" id="balancesStats"></span>
+        </div>
+        <div class="result" id="balancesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币信息 <small class="muted">getTokens：name / symbol / decimals / totalSupply</small></h2>
+        <div class="row">
+          <label for="tokenList">代币</label>
+          <textarea id="tokenList" placeholder="代币地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runTokens">查询代币</button>
+          <span class="stats" id="tokensStats"></span>
+        </div>
+        <div class="result" id="tokensResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>资产列表 <small class="muted">getOwnerTokens（子路径 /owner）：从公开代币列表发现代币，链上核对余额</small></h2>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="ownerPrices" checked /> 美元价值（DefiLlama）</label></span>
+          <button class="primary" id="runOwner">查询资产</button>
+          <span class="stats" id="ownerStats"></span>
+        </div>
+        <p class="hint">只能发现公开代币列表里的代币，结果不保证完整；要查几千个代币的余额，可能需要几秒。Tron 没有默认的代币来源（需要在代码里传 <code>source</code>）。</p>
+        <div class="result" id="ownerResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：V2 LP 代币、V3 / V4 仓位 NFT</small></h2>
+        <div class="row">
+          <label for="v4TokenIds">V4 tokenId</label>
+          <input id="v4TokenIds" placeholder="可选：Uniswap V4 仓位的 tokenId，逗号分隔（V4 的仓位合约不能按地址列出 NFT）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="lpPrices" checked /> 美元价值（DefiLlama）</label></span>
+          <span class="checks"><label><input type="checkbox" id="lpClosed" /> 包含已清空的仓位</label></span>
+          <button class="primary" id="runLp">查询 LP</button>
+          <span class="stats" id="lpStats"></span>
+        </div>
+        <p class="hint">V2 用常用计价币之间的组合找池子，只能尽量查；质押到农场（MasterChef）的仓位 NFT 不在用户名下，查不到。</p>
+        <div class="result" id="lpResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>NFT <small class="muted">子路径 /nft：集合信息、持有人、元数据地址</small></h2>
+        <div class="row">
+          <label for="nftContract">合约</label>
+          <input id="nftContract" placeholder="ERC721 / ERC1155 合约地址" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="nftTokenIds">tokenId</label>
+          <input id="nftTokenIds" placeholder="逗号分隔，如 1, 2, 3" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNft">查询 NFT</button>
+          <span class="stats" id="nftStats"></span>
+        </div>
+        <div class="result" id="nftResult"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/web3-lib/libs/tree/main/packages/evm-batch-call">源码和文档</a> ·
+      <a href="../">全部 demo</a>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

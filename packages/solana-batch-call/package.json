@@ -47,7 +47,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "LIVE=1 vitest run test/live.test.ts",
-    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
+    "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
+    "demo": "vite demo",
+    "demo:build": "vite build demo"
   },
   "repository": {
     "type": "git",
@@ -66,6 +68,7 @@
     "@scure/base": "^2.4.0"
   },
   "devDependencies": {
-    "@noble/curves": "^2.4.0"
+    "@noble/curves": "^2.4.0",
+    "vite": "^8.3.4"
   }
 }

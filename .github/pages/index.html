@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>web3-lib demos</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3C/svg%3E" />
+    <!-- GitHub Pages 站点首页：列出各库的 demo（各 demo 在子目录里，由 .github/workflows/demos.yml 组装） -->
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --card: #fff;
+        --fg: #111827;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --accent: #2563eb;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f0f12;
+          --card: #18181b;
+          --fg: #f4f4f5;
+          --muted: #a1a1aa;
+          --border: #2e2e33;
+          --accent: #60a5fa;
+          color-scheme: dark;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      }
+      main {
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 32px 16px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      p {
+        margin: 0 0 20px;
+        color: var(--muted);
+      }
+      ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 12px;
+      }
+      a.card {
+        display: block;
+        padding: 16px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: var(--card);
+        color: inherit;
+        text-decoration: none;
+      }
+      a.card:hover {
+        border-color: var(--accent);
+      }
+      a.card strong {
+        color: var(--accent);
+        font-size: 15px;
+      }
+      a.card span {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+      }
+      footer {
+        margin-top: 24px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      footer a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>web3-lib demos</h1>
+      <p>@w3lib 各个库的在线 demo，直接用浏览器访问公共节点（也可以填自己的节点）。</p>
+      <ul>
+        <li>
+          <a class="card" href="./wallet/">
+            <strong>@w3lib/wallet</strong>
+            <span>浏览器钱包连接：EVM、Solana、Sui、Tron、TON，自带连接弹窗、single / multi 模式、签名、切链、事件</span>
+          </a>
+        </li>
+        <li>
+          <a class="card" href="./evm/">
+            <strong>@w3lib/evm-batch-call</strong>
+            <span>EVM / Tron 批量查询（Multicall3）：余额、代币信息、资产列表、LP 仓位（V2 / V3 / V4）、NFT</span>
+          </a>
+        </li>
+        <li>
+          <a class="card" href="./solana/">
+            <strong>@w3lib/solana-batch-call</strong>
+            <span>Solana 批量查询：SOL / SPL / Token-2022 余额、代币信息、资产列表、NFT、LP 仓位</span>
+          </a>
+        </li>
+      </ul>
+      <footer><a href="https://github.com/web3-lib/libs">源码和文档（GitHub）</a></footer>
+    </main>
+  </body>
+</html>

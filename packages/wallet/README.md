@@ -13,7 +13,7 @@
 - **错误统一**：用户拒绝、请求已挂起、没安装、链不支持… 都是带 `code` 的 `WalletError`
 - **按需打包、体积小**：每条链一个子路径，只用到的才打包
 
-**在线 demo**：<https://web3-lib.github.io/libs/>（自带弹窗的两种选择方式、浅色 / 深色主题、single / multi 模式、签名、切链、自己画钱包列表、事件日志）。本地运行：
+**在线 demo**：<https://web3-lib.github.io/libs/wallet/>（自带弹窗的两种选择方式、浅色 / 深色主题、single / multi 模式、签名、切链、自己画钱包列表、事件日志）。本地运行：
 
 ```bash
 pnpm --filter @w3lib/wallet demo        # http://localhost:5173

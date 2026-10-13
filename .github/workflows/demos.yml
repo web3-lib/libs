@@ -1,0 +1,76 @@
+# 构建各库的 demo，合成一个站点发布到 GitHub Pages（https://<owner>.github.io/<repo>/）：
+#   /            .github/pages/index.html（demo 列表）
+#   /wallet/     @w3lib/wallet
+#   /evm/        @w3lib/evm-batch-call
+#   /solana/     @w3lib/solana-batch-call
+# 需要先在仓库 Settings → Pages 里把 Source 设为 “GitHub Actions”
+name: Demos (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/wallet/**'
+      - 'packages/evm-batch-call/**'
+      - 'packages/solana-batch-call/**'
+      - '.github/pages/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/demos.yml'
+  workflow_dispatch:
+
+# 构建只需要读代码；写 Pages 的权限只给部署那一步
+permissions:
+  contents: read
+
+# 同一时间只部署一次；进行中的部署不取消（避免发布到一半）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # 读 package.json 的 packageManager（pnpm 12 需要 v6.1+）
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # 测试不过不发布（实时节点的测试默认跳过）
+      - run: pnpm --filter @w3lib/wallet --filter @w3lib/evm-batch-call --filter @w3lib/solana-batch-call test
+      # vite build 不做类型检查，demo 单独检查一次
+      - run: for p in wallet evm-batch-call solana-batch-call; do pnpm exec tsc -p packages/$p/demo/tsconfig.json --noEmit || exit 1; done
+      - run: pnpm --filter @w3lib/wallet demo:build
+        env:
+          # TON Connect 的 manifest 里要写 demo 实际的地址（用自定义域名时改成那个域名）
+          DEMO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/wallet/
+      - run: pnpm --filter @w3lib/evm-batch-call demo:build
+      - run: pnpm --filter @w3lib/solana-batch-call demo:build
+      # 各 demo 用相对路径（base: './'），放进子目录就能用
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp .github/pages/index.html _site/
+          cp -r packages/wallet/demo/dist _site/wallet
+          cp -r packages/evm-batch-call/demo/dist _site/evm
+          cp -r packages/solana-batch-call/demo/dist _site/solana
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

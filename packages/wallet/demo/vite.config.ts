@@ -5,7 +5,7 @@ import { defineConfig, type Plugin } from 'vite'
 const src = (path: string) => fileURLToPath(new URL(`../src/${path}`, import.meta.url))
 
 /** demo 部署的地址（GitHub Pages），TON Connect 的 manifest 里要写它 */
-const DEMO_URL = process.env.DEMO_URL ?? 'https://web3-lib.github.io/libs/'
+const DEMO_URL = process.env.DEMO_URL ?? 'https://web3-lib.github.io/libs/wallet/'
 
 /** tonconnect-manifest.json：开发时用本地地址，构建时用部署地址（钱包会核对 manifest 里的 url） */
 function tonManifest(): Plugin {
@@ -32,7 +32,7 @@ function tonManifest(): Plugin {
 
 // demo 直接用库的源码：import 写法和正式使用时一样（@w3lib/wallet、@w3lib/wallet/evm…），改了源码刷新就能看到
 export default defineConfig({
-  // 相对路径：部署在 GitHub Pages 的子路径（/libs/）下也能用
+  // 相对路径：部署在 GitHub Pages 的子路径（/libs/wallet/）下也能用
   base: './',
   resolve: {
     alias: [

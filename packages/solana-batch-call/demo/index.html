@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/solana-batch-call demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M10 11h13l-3 3H7zM7 18h13l3 3H10z' fill='%23fff'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/solana-batch-call <small>demo</small></h1>
+      <p>Solana 批量查询：账户用 getMultipleAccounts 一次读一批，同一时刻的调用合并成一个 JSON-RPC 批量请求。下面每次查询都会显示实际发出的节点请求数。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>设置</h2>
+        <div class="row">
+          <label for="rpc">节点</label>
+          <input id="rpc" placeholder="RPC URL（可选，如 Helius / QuickNode / Triton；不填用内置公共节点）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="owner">地址</label>
+          <div class="inline">
+            <input id="owner" placeholder="要查询的钱包地址" spellcheck="false" />
+            <button id="sample">示例地址</button>
+          </div>
+        </div>
+        <p class="hint">
+          内置公共节点（publicnode）限频严，也不支持 <code>getTokenAccountsByOwner</code> 等索引方法：余额、代币信息、NFT 详情可以直接查，
+          <b>资产列表、持有的 NFT、NFT 持有人</b>需要填自己的节点（Helius 等的免费额度即可）。官方节点 api.mainnet-beta 拒绝浏览器里的请求。设置保存在本地浏览器。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>余额 <small class="muted">getBalances：SOL + SPL Token / Token-2022，本地推导 ATA 地址，一次 getMultipleAccounts</small></h2>
+        <div class="row">
+          <label for="balanceMints">代币</label>
+          <textarea id="balanceMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runBalances">查询余额</button>
+          <span class="stats" id="balancesStats"></span>
+        </div>
+        <div class="result" id="balancesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币信息 <small class="muted">getTokens：name / symbol / decimals / supply / 所属程序 / 转账手续费</small></h2>
+        <div class="row">
+          <label for="tokenMints">代币</label>
+          <textarea id="tokenMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runTokens">查询代币</button>
+          <span class="stats" id="tokensStats"></span>
+        </div>
+        <div class="result" id="tokensResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>资产列表 <small class="muted">getOwnerTokens：地址持有的全部代币（需要自己的节点）</small></h2>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="includeNfts" /> 包含 NFT</label></span>
+          <span class="checks"><label><input type="checkbox" id="includeZero" /> 包含余额为 0 的账户</label></span>
+          <button class="primary" id="runOwner">查询资产</button>
+          <span class="stats" id="ownerStats"></span>
+        </div>
+        <div class="result" id="ownerResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：Raydium CLMM / Orca Whirlpool 仓位 NFT，Raydium AMM v4 / CPMM 的 LP 代币</small></h2>
+        <div class="row">
+          <label for="lpMints">mint</label>
+          <textarea id="lpMints" placeholder="仓位 NFT / LP 代币的 mint，每行一个（可选）。留空时扫描地址的全部代币账户，需要自己的节点" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="lpPools">池子</label>
+          <textarea id="lpPools" placeholder="Raydium AMM v4 / CPMM 的池子地址，每行一个（可选）。持有它们的 LP 代币时不用 getProgramAccounts 找池子" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button id="lpSample">示例仓位</button>
+          <span class="checks"><label><input type="checkbox" id="lpPrices" checked /> 美元价值（DefiLlama）</label></span>
+          <button class="primary" id="runLp">查询 LP</button>
+          <span class="stats" id="lpStats"></span>
+        </div>
+        <div class="result" id="lpResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>NFT <small class="muted">getNfts / getNftOwners / getOwnerNfts：Metaplex 元数据、持有人</small></h2>
+        <div class="row">
+          <label for="nftMints">mint</label>
+          <textarea id="nftMints" placeholder="NFT 的 mint 地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNft">查询 NFT</button>
+          <span class="checks"><label><input type="checkbox" id="nftOwners" /> 同时查持有人（需要自己的节点）</label></span>
+          <span class="stats" id="nftStats"></span>
+        </div>
+        <div class="result" id="nftResult"></div>
+        <div class="actions">
+          <button class="primary" id="runOwnerNfts">查询地址持有的 NFT</button>
+          <span class="stats" id="ownerNftsStats"></span>
+        </div>
+        <div class="result" id="ownerNftsResult"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/web3-lib/libs/tree/main/packages/solana-batch-call">源码和文档</a> ·
+      <a href="../">全部 demo</a>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

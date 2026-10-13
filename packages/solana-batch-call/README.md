@@ -6,6 +6,8 @@ Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情
 pnpm add @w3lib/solana-batch-call
 ```
 
+**在线 demo**：<https://web3-lib.github.io/libs/solana/>（余额、代币信息、资产列表、NFT、LP 仓位，显示每次查询实际发出的 RPC 调用数）。本地运行：`pnpm --filter @w3lib/solana-batch-call demo`（http://localhost:5175）
+
 - **一次请求查一批**：账户读取用 `getMultipleAccounts`（自动去重、按 100 个一组拆分、最多同时 3 个请求）；同一 tick 内发起的 RPC 调用合并成一个 JSON-RPC 批量请求
 - **免费节点也能查余额**：指定代币时在本地推导关联代币账户（ATA）地址，和 mint 账户一起用 `getMultipleAccounts` 读完，不需要 `getTokenAccountsByOwner` 这类索引方法
 - **只查主币不读账户数据**：SOL 余额（`getSolBalances`、单币模式里的主币）用带 `dataSlice` 的 `getMultipleAccounts` 只取 lamports，与代币账户分开两组、同一个批量请求发出——钱包是数据很大的程序账户时也不会拖慢或超时
