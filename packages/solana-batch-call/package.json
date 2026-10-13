@@ -25,6 +25,10 @@
     "./write": {
       "types": "./dist/subpaths/write.d.ts",
       "import": "./dist/subpaths/write.js"
+    },
+    "./lp": {
+      "types": "./dist/subpaths/lp.d.ts",
+      "import": "./dist/subpaths/lp.js"
     }
   },
   "files": [

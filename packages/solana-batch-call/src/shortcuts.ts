@@ -81,7 +81,7 @@ function sourceKey(source: ShortcutOptions['provider']): string | object | null 
  * 拆出节点参数和函数自己的参数（ownKeys），其余作为客户端配置；值为 undefined 的参数忽略。
  * signal 总是作为函数自己的参数（放进客户端配置会让每次调用都新建客户端）
  */
-function resolve<T extends ShortcutOptions, K extends keyof T & string = never>(
+export function resolve<T extends ShortcutOptions, K extends keyof T & string = never>(
   options: T,
   ownKeys: readonly K[] = [],
 ): { client: SolanaClient; own: Pick<T, K> } {

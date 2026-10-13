@@ -1,6 +1,6 @@
 # @w3lib/solana-batch-call
 
-Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
+Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT、[LP 仓位](#lp-仓位)（子路径 `/lp`）；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
 
 ```bash
 pnpm add @w3lib/solana-batch-call
@@ -86,6 +86,53 @@ await getOwnerNfts(owner)    // 某地址持有的全部 NFT（需要支持索�
 持仓很多时读元数据较慢：读取账户最多同时 3 个请求、每个 100 个地址，以避免限频（实测 4000 个代币在官方节点上约 80 秒，不读元数据约 4 秒）。可以先用 `metadata: false` 拿到列表，再对需要展示的代币调用 `getTokens`。元数据读取遇到限频等节点问题时不再继续请求，对应代币的 `metadataStatus` 为 `failed`、`name` / `symbol` 为 `null`，余额列表照常返回；之后可以对这些代币单独重查。
 
 需要支持 `getTokenAccountsByOwner` 的节点，内置的免费公共节点大多不支持。
+
+## LP 仓位
+
+查一个地址的流动性仓位（子路径 `@w3lib/solana-batch-call/lp`，不用时打包不会带上，约 14KB / gzip 约 5.5KB）：**Raydium CLMM**、**Orca Whirlpool** 的仓位 NFT，**Raydium AMM v4**、**Raydium CPMM** 的 LP 代币。返回两种代币的数量、未领取的手续费（集中流动性），可选美元价值。
+
+```ts
+import { getLpPositions } from '@w3lib/solana-batch-call/lp'
+
+// 扫描地址的全部代币账户找仓位 NFT 和 LP 代币（需要支持 getTokenAccountsByOwner 的节点）
+await getLpPositions(owner, { provider: 'https://my-rpc.example' })
+// [
+//   { type: 'clmm', protocol: 'raydium-clmm', protocolName: 'Raydium CLMM', pool: '3ucNos…', positionMint: '6MZXir…', position: '18Pfqm…',
+//     token0: { mint: So111…, symbol: 'SOL', decimals: 9 }, token1: { mint: EPjF…, symbol: 'USDC', decimals: 6 },
+//     amount0: '140261364355', amount0Formatted: '140.261364355', amount1Formatted: '6852.200542',
+//     fees0Formatted: '0.546399344', fees1Formatted: '59.504301', fee: 400, tickSpacing: 1, tickLower: -23362, tickUpper: -19392, tick: -22166,
+//     inRange: true, liquidity: '357565923571', price: 108.99, priceLower: 96.7, priceUpper: 143.8 },
+//   { type: 'amm', protocol: 'raydium-amm', pool: '58oQCh…', lpMint: '8HoQne…', balance, totalSupply, share: 0.18, amount0Formatted, amount1Formatted, … },
+// ]
+
+// 免费公共节点：指定仓位 NFT / LP 代币的 mint（按 ATA 读余额），AMM v4 / CPMM 再指定池子
+await getLpPositions(owner, { mints: [positionNft, lpMint], pools: [ammPool] })
+
+// 美元价值（DefiLlama，默认不查）：valueUsd、feesUsd，结果按价值排序
+await getLpPositions(owner, { provider, prices: true })
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `mints` | 只看这些代币（仓位 NFT 的 mint、LP 代币的 mint），按 ATA 读余额，免费节点也能用。不传时扫描全部代币账户（需要支持 `getTokenAccountsByOwner` 的节点） |
+| `pools` | Raydium AMM v4 / CPMM 的池子地址。LP 代币要找到对应的池子：不在这里的按 LP mint 用 `getProgramAccounts` 查找（免费公共节点大多不支持，这时报错并提示传 `pools`，或用 `protocols` 只查 CLMM / Whirlpool）；不是 AMM v4 / CPMM 池子的地址会报错；不持有 Raydium 的 LP 代币时不会用到 |
+| `protocols` | 只查某些协议：`'raydium-clmm'`、`'orca-whirlpool'`、`'raydium-amm'`、`'raydium-cpmm'`，默认全部 |
+| `includeClosed` | 返回已清空的仓位（流动性为 0、手续费也领完，NFT 还在），默认 false |
+| `prices` | `true` 用 DefiLlama，也可以传自己的 `SolanaPriceSource`；默认不查。价格源出错时照样返回仓位，只是 `valueUsd` / `feesUsd` 为 null |
+| `onPriceError` | 价格源出错时调用（传入错误），用来区分“价格服务出错”和“代币没有价格” |
+| `fetch` | 自定义 fetch（如走代理）：快捷函数里同时用于节点请求和查价 |
+| `signal` | 取消查询（AbortSignal） |
+
+**怎么找仓位**：精度 0、数量 1 的代币按 PDA `["position", mint]` 推导 Raydium / Orca 的仓位账户，存在就是仓位；其他代币读 mint，mint 权限是 AMM v4（`5Q544f…`）或 CPMM 的权限地址时是 Raydium 的 LP 代币。整个查询一般 4~5 次请求（扫描 / 读余额、仓位账户和 mint、池子、tick 数组和金库、代币信息），每次都是批量读取。
+
+**数值**（与链上程序的计算逐位一致，测试用主网账户快照与官方 SDK 核对过）：
+
+- 集中流动性：数量是撤出全部流动性能拿到的数量（向下取整，不含手续费）；手续费 = 已记账的 + 流动性 × 区间内手续费增长的变化，与程序领取时的计算相同，不含挖矿奖励。Orca 固定大小和可变大小（DynamicTickArray）的 tick 数组都支持；有流动性却读不到两端的 tick 数据时（极少见）`fees0` / `fees1` 为 null，不会只报已记账的部分
+- AMM v4 / CPMM：LP 份额 × （金库余额 − 不属于 LP 的部分）向下取整，与撤出流动性时一致。AMM v4 扣掉待提取的收益（need_take_pnl），CPMM 扣掉协议 / 基金 / 创建者手续费；总量用池子记录的 LP 数量。AMM v4 的池子还能用 OpenBook 挂单时（status 不是 6 SwapOnly，现在很少见），挂单里的资金没算进来，数量会略少
+- `fee` 是手续费率（百万分之一，400 = 0.04%）；价格都是 token1 / token0，按精度换算的浮点数，只用于展示
+- Wrapped SOL 显示为 SOL（按客户端的 `nativeMints` 配置），价格就是 SOL 的价格
+
+**局限**：质押在农场里的 LP 代币、Orca 的仓位组合（Position Bundle）、锁仓的 Raydium 仓位（NFT 不在用户名下）查不到；Meteora 等其他 DEX 暂不支持。免费公共节点不支持扫描（`getTokenAccountsByOwner`）和按 LP mint 找池子（`getProgramAccounts`），需要传 `mints` / `pools` 或用自己的节点（官方节点 `api.mainnet-beta.solana.com` 两个方法都支持，但只能在服务端用，且按方法限频：同一个批量请求里有两个 `getTokenAccountsByOwner` 就会被拒，可以用 `new HttpRpc(url, { batch: false })` 关闭合并）。
 
 ## 余额的三种模式
 

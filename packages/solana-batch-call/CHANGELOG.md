@@ -11,6 +11,7 @@
   - 每笔先模拟，失败的调用单独剔除；计算单元上限按模拟结果设置，优先费用默认按最近费用自动设置；blockhash 过期未上链时自动换新 blockhash 重发
   - 浏览器钱包：Wallet Standard 钱包、@solana/wallet-adapter 的 adapter / useWallet()、@solana/kit 的 TransactionSigner，可以和私钥混用；同一批交易钱包只确认一次
   - 指令工具：`systemTransfer`、`transferChecked`、`createAssociatedTokenAccountIdempotent`、`closeAccount`、`setComputeUnitLimit`、`setComputeUnitPrice`
+- LP 仓位，子路径 `@w3lib/solana-batch-call/lp`：`getLpPositions` / `lpPositions` 查一个地址的 Raydium CLMM、Orca Whirlpool 仓位 NFT 和 Raydium AMM v4、CPMM 的 LP 代币，两种代币的数量、未领取手续费、可选美元价值（DefiLlama）。账户布局和计算用主网快照与官方 SDK 逐位核对；免费公共节点可以用 `mints` / `pools` 指定代币和池子
 - `parseUnits`（`formatUnits` 的逆运算）；`SolanaClient.isNativeMint(mint)`、`SolanaClient.commitment`
 
 ## 0.2.2
