@@ -4,11 +4,13 @@ Web3 工具库 monorepo（pnpm workspace），每个库独立发布到 npm。
 
 | 包 | 说明 |
 | --- | --- |
-| [@w3lib/evm-batch-call](packages/evm-batch-call) | 基于 Multicall3 的 EVM / Tron 批量只读请求与预执行，API 兼容 ethcall；LP 仓位（V2 / V3 / V4，子路径 `/lp`）；批量转账 / 归集 / 批量调用合约，EVM 与 Tron（子路径 `/write`）；[在线 demo](https://web3-lib.github.io/libs/evm/) |
-| [@w3lib/solana-batch-call](packages/solana-batch-call) | Solana 批量读取：SOL / SPL / Token-2022 余额、代币详情、NFT，不依赖 Solana SDK；LP 仓位（Raydium、Orca，子路径 `/lp`）；子路径 `/write`：批量转账、归集、批量调用程序；[在线 demo](https://web3-lib.github.io/libs/solana/) |
+| [@w3lib/evm-batch-call](packages/evm-batch-call) | 基于 Multicall3 的 EVM / Tron 批量只读请求与预执行，API 兼容 ethcall；LP 仓位（V2 / V3 / V4，子路径 `/lp`）；添加 / 移除流动性（子路径 `/liquidity`）；批量转账 / 归集 / 批量调用合约，EVM 与 Tron（子路径 `/write`）；[在线 demo](https://web3-lib.github.io/libs/evm/) |
+| [@w3lib/solana-batch-call](packages/solana-batch-call) | Solana 批量读取：SOL / SPL / Token-2022 余额、代币详情、NFT，不依赖 Solana SDK；LP 仓位（Raydium、Orca，子路径 `/lp`）；添加 / 移除流动性（子路径 `/liquidity`）；子路径 `/write`：批量转账、归集、批量调用程序；[在线 demo](https://web3-lib.github.io/libs/solana/) |
+| [@w3lib/sui-batch-call](packages/sui-batch-call) | Sui 批量读取：SUI / 代币余额、代币信息、对象、NFT（Display），gRPC-web 直连全节点、多节点故障切换，不依赖 Sui SDK；子路径 `/write` 批量转账 / 归集（赞助 gas）/ 批量交易，`/lp`、`/liquidity` LP 仓位和加减流动性（Cetus、Bluefin、Momentum、Turbos、Magma、FlowX）；[在线 demo](https://web3-lib.github.io/libs/sui/) |
+| [@w3lib/ton-batch-call](packages/ton-batch-call) | TON 批量读取：TON / Jetton 余额（多个地址合成一个请求）、Jetton 信息、NFT、钱包状态，基于 toncenter v3 索引器，自动限频、多节点故障切换，不依赖 TON SDK；子路径 `/write` 批量转账 / 归集 / 批量交易（钱包 v4r2 / v5r1、TON Connect），`/lp`、`/liquidity` STON.fi / DeDust 的 LP 仓位和加减流动性；[在线 demo](https://web3-lib.github.io/libs/ton/) |
 | [@w3lib/wallet](packages/wallet) | 浏览器钱包连接：EVM（EIP-6963、WalletConnect）、Solana、Sui、Tron、TON，自动恢复、统一事件和错误；框架无关，可选的自带连接弹窗（浅色 / 深色）、Vue / React hook、内置常用链；[在线 demo](https://web3-lib.github.io/libs/wallet/) |
 
-**在线 demo**：<https://web3-lib.github.io/libs/>（[wallet](https://web3-lib.github.io/libs/wallet/) · [evm-batch-call](https://web3-lib.github.io/libs/evm/) · [solana-batch-call](https://web3-lib.github.io/libs/solana/)），push 到 main 时由 `.github/workflows/demos.yml` 构建发布到 GitHub Pages。
+**在线 demo**：<https://web3-lib.github.io/libs/>（[wallet](https://web3-lib.github.io/libs/wallet/) · [evm-batch-call](https://web3-lib.github.io/libs/evm/) · [solana-batch-call](https://web3-lib.github.io/libs/solana/) · [ton-batch-call](https://web3-lib.github.io/libs/ton/) · [sui-batch-call](https://web3-lib.github.io/libs/sui/)），push 到 main 时由 `.github/workflows/demos.yml` 构建发布到 GitHub Pages。
 
 ## 目录结构
 
@@ -34,7 +36,7 @@ pnpm install
 pnpm -r test                             # 所有包跑测试
 pnpm -r build                            # 所有包构建
 pnpm --filter @w3lib/evm-batch-call test:live   # 单个包执行脚本
-pnpm --filter @w3lib/evm-batch-call demo        # 本地运行某个包的 demo（wallet / evm-batch-call / solana-batch-call）
+pnpm --filter @w3lib/evm-batch-call demo        # 本地运行某个包的 demo（每个包都有 demo/）
 ```
 
 ## 新增一个库

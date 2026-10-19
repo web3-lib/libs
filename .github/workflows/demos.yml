@@ -3,6 +3,8 @@
 #   /wallet/     @w3lib/wallet
 #   /evm/        @w3lib/evm-batch-call
 #   /solana/     @w3lib/solana-batch-call
+#   /ton/        @w3lib/ton-batch-call
+#   /sui/        @w3lib/sui-batch-call
 # 需要先在仓库 Settings → Pages 里把 Source 设为 “GitHub Actions”
 name: Demos (GitHub Pages)
 
@@ -13,6 +15,8 @@ on:
       - 'packages/wallet/**'
       - 'packages/evm-batch-call/**'
       - 'packages/solana-batch-call/**'
+      - 'packages/ton-batch-call/**'
+      - 'packages/sui-batch-call/**'
       - '.github/pages/**'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -41,15 +45,17 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # 测试不过不发布（实时节点的测试默认跳过）
-      - run: pnpm --filter @w3lib/wallet --filter @w3lib/evm-batch-call --filter @w3lib/solana-batch-call test
+      - run: pnpm --filter @w3lib/wallet --filter @w3lib/evm-batch-call --filter @w3lib/solana-batch-call --filter @w3lib/ton-batch-call --filter @w3lib/sui-batch-call test
       # vite build 不做类型检查，demo 单独检查一次
-      - run: for p in wallet evm-batch-call solana-batch-call; do pnpm exec tsc -p packages/$p/demo/tsconfig.json --noEmit || exit 1; done
+      - run: for p in wallet evm-batch-call solana-batch-call ton-batch-call sui-batch-call; do pnpm exec tsc -p packages/$p/demo/tsconfig.json --noEmit || exit 1; done
       - run: pnpm --filter @w3lib/wallet demo:build
         env:
           # TON Connect 的 manifest 里要写 demo 实际的地址（用自定义域名时改成那个域名）
           DEMO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/wallet/
       - run: pnpm --filter @w3lib/evm-batch-call demo:build
       - run: pnpm --filter @w3lib/solana-batch-call demo:build
+      - run: pnpm --filter @w3lib/ton-batch-call demo:build
+      - run: pnpm --filter @w3lib/sui-batch-call demo:build
       # 各 demo 用相对路径（base: './'），放进子目录就能用
       - name: Assemble site
         run: |
@@ -58,6 +64,8 @@ jobs:
           cp -r packages/wallet/demo/dist _site/wallet
           cp -r packages/evm-batch-call/demo/dist _site/evm
           cp -r packages/solana-batch-call/demo/dist _site/solana
+          cp -r packages/ton-batch-call/demo/dist _site/ton
+          cp -r packages/sui-batch-call/demo/dist _site/sui
       - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
