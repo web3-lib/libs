@@ -29,6 +29,10 @@
     "./lp": {
       "types": "./dist/subpaths/lp.d.ts",
       "import": "./dist/subpaths/lp.js"
+    },
+    "./liquidity": {
+      "types": "./dist/subpaths/liquidity.d.ts",
+      "import": "./dist/subpaths/liquidity.js"
     }
   },
   "files": [
@@ -47,6 +51,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "LIVE=1 vitest run test/live.test.ts",
+    "test:live:lp": "LIVE=1 vitest run test/lp-live.test.ts",
+    "test:live:liquidity": "LIVE=1 vitest run test/liquidity-live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "demo": "vite demo",
     "demo:build": "vite build demo"

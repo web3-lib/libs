@@ -6,6 +6,8 @@ import { ASSOCIATED_TOKEN_PROGRAM_ID, MIN_CONTEXT_SLOT_NOT_REACHED, RpcError, SY
 import { COMPUTE_BUDGET_PROGRAM_ID } from '../src/write/instructions.js'
 import { createMockNode, mintData, tokenAccountData, type MockAccount } from './mock.js'
 
+const NATIVE_MINT_ADDRESS = 'So11111111111111111111111111111111111111112'
+
 /** 新建代币账户的租金（165 字节） */
 export const TOKEN_ACCOUNT_RENT = 2_039_280n
 /** 0 字节系统账户的免租下限 */
@@ -35,6 +37,11 @@ export interface FakeSolanaOptions {
   systemTransferUnits?: number
   /** 确认状态逐步推进：上链后第一次查询为 processed，之后 confirmed，再过 finalizeAfter 次（默认 3）为 finalized。默认直接 confirmed */
   progression?: { finalizeAfter?: number }
+  /**
+   * 其他程序的假实现（如 DEX）：按指令修改状态（state 是这笔交易执行中的状态，可以直接改）；抛错时整笔交易失败。
+   * keys / signers 是指令的账户和是否签名
+   */
+  programs?: Record<string, (ix: { keys: string[]; signers: boolean[]; data: Uint8Array }, state: Record<string, MockAccount>) => void>
 }
 
 /** 拦截请求：返回 undefined 时照常处理；可以抛错、返回别的结果，或调用 next 后再处理 */
@@ -226,17 +233,36 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
             new DataView(dst!.data!.buffer).setBigUint64(64, u64(dst!.data!, 64) + amount, true)
             return
           }
+          if (ix.data[0] === 17) {
+            // SyncNative：wSOL 账户的代币余额 = lamports − 免租
+            use(3000)
+            const acc = next[key(0)]
+            if (!acc?.data || base58.encode(acc.data.slice(0, 32)) !== NATIVE_MINT_ADDRESS) fail({ Custom: 19 }, 'Program log: Error: Instruction does not support non-native tokens')
+            new DataView(acc!.data!.buffer).setBigUint64(64, (acc!.lamports ?? 0n) - TOKEN_ACCOUNT_RENT, true)
+            return
+          }
           if (ix.data[0] === 9) {
             use(3000)
             const [account, dest, authority] = [0, 1, 2].map(key) as [string, string, string]
             const acc = next[account]
             if (!acc?.data) fail('InvalidAccountData')
-            if (u64(acc!.data!, 64) !== 0n) fail({ Custom: 11 }, 'Program log: Error: Non-native account can only be closed if its balance is zero')
+            // wSOL 账户可以带余额关闭（lamports 全部退回）
+            if (u64(acc!.data!, 64) !== 0n && base58.encode(acc!.data!.slice(0, 32)) !== NATIVE_MINT_ADDRESS) fail({ Custom: 11 }, 'Program log: Error: Non-native account can only be closed if its balance is zero')
             if (base58.encode(acc!.data!.slice(32, 64)) !== authority || !isSigner(2)) fail({ Custom: 4 }, 'Program log: Error: owner does not match')
             credit(dest, acc!.lamports ?? 0n)
             delete next[account]
             return
           }
+        }
+        const custom = options.programs?.[ix.program]
+        if (custom) {
+          use(50_000)
+          try {
+            custom({ keys: ix.accounts.map((_, k) => key(k)), signers: ix.accounts.map((_, k) => isSigner(k)), data: ix.data }, next)
+          } catch (err) {
+            fail({ Custom: 6000 }, `Program log: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          return
         }
         fail('InvalidInstructionData', `Program ${ix.program} failed: unsupported by the fake`)
       })

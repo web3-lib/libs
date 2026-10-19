@@ -1,5 +1,17 @@
 # Changelog
 
+## 未发布
+
+### 新功能
+
+- 添加 / 移除流动性，子路径 `@w3lib/solana-batch-call/liquidity`（不依赖各 DEX 的 SDK）：
+  - `buildAddLiquidity` / `buildRemoveLiquidity` / `buildCollectFees` 只构建（报价 + 按顺序执行的指令），`addLiquidity` / `removeLiquidity` / `collectFees` 构建后签名发送（钱包同 `/write`）
+  - Raydium CLMM、Orca Whirlpool：新建仓位（价格区间 / tick / 全区间，给一边算另一边）、追加、按比例移除、全部移除并关闭仓位、领取手续费和挖矿奖励；Orca 自动初始化缺少的 tick 数组
+  - Raydium CPMM、AMM v4：存入（给一边，另一边按储备比例）、按比例取出
+  - SOL 自动包装 / 解包，缺少的代币账户自动创建；滑点按价格范围算集中流动性的上下限
+- `createProgramAddress`（按给定种子算 PDA）
+- `/lp` 的数学工具新增 `getLiquidityForAmounts`、`getMintAmounts`、`tickAtSqrtPrice`、`priceToTick`、`getMinAmounts` / `getMaxAmounts` 等
+
 ## 0.3.0
 
 ### 新功能

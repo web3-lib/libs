@@ -12,9 +12,9 @@ export const ORCA_WHIRLPOOL_PROGRAM_ID = 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3u
 export const RAYDIUM_AMM_PROGRAM_ID = '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'
 export const RAYDIUM_CPMM_PROGRAM_ID = 'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C'
 /** AMM v4 的 LP mint 权限（固定地址） */
-const RAYDIUM_AMM_AUTHORITY = '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1'
+export const RAYDIUM_AMM_AUTHORITY = '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1'
 /** CPMM 的 LP mint 权限：PDA ["vault_and_lp_mint_auth_seed"] */
-const RAYDIUM_CPMM_AUTHORITY = 'GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL'
+export const RAYDIUM_CPMM_AUTHORITY = 'GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL'
 
 export type SolanaLpProtocol = 'raydium-clmm' | 'orca-whirlpool' | 'raydium-amm' | 'raydium-cpmm'
 
@@ -167,7 +167,8 @@ export interface LpPositionsOptions extends RequestOptions {
 // 账户布局（各程序的 Anchor / 原生账户，偏移量含 8 字节判别符）
 // ---------------------------------------------------------------------------
 
-class Bytes {
+/** 小端读取账户数据（添加 / 移除流动性也用） */
+export class Bytes {
   readonly #view: DataView
   constructor(readonly data: Uint8Array) {
     this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength)
@@ -300,7 +301,7 @@ function orcaPool(b: Bytes): ClmmPoolState {
   }
 }
 
-interface AmmPoolState {
+export interface AmmPoolState {
   protocol: 'raydium-amm' | 'raydium-cpmm'
   address: string
   lpMint: string
@@ -350,7 +351,7 @@ function cpmmPool(address: string, b: Bytes): AmmPoolState {
   }
 }
 
-function parseAmmPool(account: AccountInfo): AmmPoolState | null {
+export function parseAmmPool(account: AccountInfo): AmmPoolState | null {
   const b = new Bytes(account.data)
   if (account.owner === RAYDIUM_AMM_PROGRAM_ID && account.data.length === AMM_POOL_SIZE) {
     return ammPool(account.address, b)
@@ -361,14 +362,14 @@ function parseAmmPool(account: AccountInfo): AmmPoolState | null {
   return null
 }
 
-const utf8 = (s: string) => new TextEncoder().encode(s)
+export const utf8 = (s: string) => new TextEncoder().encode(s)
 
 function floorDiv(a: number, b: number): number {
   return Math.floor(a / b) * b
 }
 
 /** Raydium tick 数组：PDA ["tick_array", pool, start（i32 大端）]，每个数组 60 个 tick */
-function raydiumTickArray(pool: string, tick: number, spacing: number): { address: string; start: number } {
+export function raydiumTickArray(pool: string, tick: number, spacing: number): { address: string; start: number } {
   const start = floorDiv(tick, spacing * RAYDIUM_TICK_ARRAY_SIZE)
   const be = new Uint8Array(4)
   new DataView(be.buffer).setInt32(0, start, false)
@@ -376,7 +377,7 @@ function raydiumTickArray(pool: string, tick: number, spacing: number): { addres
 }
 
 /** Orca tick 数组：PDA ["tick_array", whirlpool, start（十进制字符串）]，每个数组 88 个 tick */
-function orcaTickArray(pool: string, tick: number, spacing: number): { address: string; start: number } {
+export function orcaTickArray(pool: string, tick: number, spacing: number): { address: string; start: number } {
   const start = floorDiv(tick, spacing * ORCA_TICK_ARRAY_SIZE)
   return { address: findProgramAddress([utf8('tick_array'), decodeAddress(pool), utf8(String(start))], ORCA_WHIRLPOOL_PROGRAM_ID), start }
 }

@@ -1,6 +1,6 @@
 # @w3lib/solana-batch-call
 
-Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT、[LP 仓位](#lp-仓位)（子路径 `/lp`）；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
+Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT、[LP 仓位](#lp-仓位)（子路径 `/lp`）；[添加 / 移除流动性](#添加--移除流动性)（子路径 `/liquidity`）；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
 
 ```bash
 pnpm add @w3lib/solana-batch-call
@@ -135,6 +135,76 @@ await getLpPositions(owner, { provider, prices: true })
 - Wrapped SOL 显示为 SOL（按客户端的 `nativeMints` 配置），价格就是 SOL 的价格
 
 **局限**：质押在农场里的 LP 代币、Orca 的仓位组合（Position Bundle）、锁仓的 Raydium 仓位（NFT 不在用户名下）查不到；Meteora 等其他 DEX 暂不支持。免费公共节点不支持扫描（`getTokenAccountsByOwner`）和按 LP mint 找池子（`getProgramAccounts`），需要传 `mints` / `pools` 或用自己的节点（官方节点 `api.mainnet-beta.solana.com` 两个方法都支持，但只能在服务端用，且按方法限频：同一个批量请求里有两个 `getTokenAccountsByOwner` 就会被拒，可以用 `new HttpRpc(url, { batch: false })` 关闭合并）。
+
+## 添加 / 移除流动性
+
+子路径 `@w3lib/solana-batch-call/liquidity`：**Raydium CLMM**、**Orca Whirlpool**（仓位 NFT），**Raydium AMM v4**、**Raydium CPMM**（LP 代币），与 [LP 仓位](#lp-仓位) 相同的四个协议。不依赖各 DEX 的 SDK，指令按程序的格式本地编码。
+
+- `buildAddLiquidity` / `buildRemoveLiquidity` / `buildCollectFees`：只读取、不签名，返回预计的数量和按顺序执行的指令（`steps`），可以当作报价，也可以自己组交易发送
+- `addLiquidity` / `removeLiquidity` / `collectFees`：构建后签名发送，钱包与 `/write` 的 `batchCall` 相同（私钥、Keypair、Wallet Standard 钱包、wallet-adapter、@solana/kit 签名器）。准备工作（创建代币账户、初始化 Orca 的 tick 数组）和主指令能放进同一笔交易时合成一笔、原子执行（主指令模拟失败时什么都不发）；放不下时先发准备工作。SOL 的包装和解包始终和主指令在同一步里，不会留下包装好的 SOL
+
+```ts
+import { SolanaClient } from '@w3lib/solana-batch-call'
+import { getLpPositions } from '@w3lib/solana-batch-call/lp'
+import { addLiquidity, buildAddLiquidity, collectFees, removeLiquidity } from '@w3lib/solana-batch-call/liquidity'
+
+const client = new SolanaClient(rpcUrl)
+
+// 报价：新建集中流动性仓位。池子按地址指定，价格是“1 个 token0 值多少个 token1”（池子的方向），给一边的数量
+const plan = await buildAddLiquidity(client, owner, {
+  protocol: 'raydium-clmm', pool, priceLower: 140, priceUpper: 160,   // 或 fullRange: true，或 tickLower / tickUpper
+  amount0Formatted: '1',                                               // 或 amount0（最小单位）；也可以两边都给
+})
+// { type: 'clmm', token0: { mint, symbol: 'SOL', decimals: 9 }, token1, tickLower, tickUpper, tick, price, liquidity,
+//   amount0Formatted, amount1Formatted, amount0Max, amount1Max, native: 'token0', positionMint,
+//   steps: [{ kind: 'setup', instructions }, { kind: 'add', instructions }],
+//   signers: [{ address: positionMint, secretKey }] }   // 新仓位 NFT 的临时密钥，主指令所在的交易要它签名
+
+// 发送：SOL 自动包装 / 解包
+await addLiquidity(client, secretKey, { protocol: 'orca-whirlpool', pool, fullRange: true, amount0Formatted: '0.5' })
+await addLiquidity(client, secretKey, { protocol: 'raydium-cpmm', pool, amount1Formatted: '100' })   // AMM：给一边，另一边按储备比例
+
+// 已有仓位：直接用 getLpPositions 的结果（或 { protocol, positionMint } / { protocol, pool }）
+const [position] = await getLpPositions(owner, { provider: rpcUrl })
+await addLiquidity(client, secretKey, { position, amount0Formatted: '0.1' })     // 追加
+await removeLiquidity(client, secretKey, { position, percent: 50 })              // 按比例移除（集中流动性同时领取手续费和挖矿奖励）
+await removeLiquidity(client, secretKey, { position, burn: true })               // 全部移除、关闭仓位（退回租金）
+await collectFees(client, secretKey, { position })                               // 只领取手续费和奖励
+```
+
+| | Raydium CLMM | Orca Whirlpool | Raydium CPMM | Raydium AMM v4 |
+| --- | --- | --- | --- | --- |
+| 新建 / 追加 | `open_position_with_token22_nft`（NFT 用 Token-2022，tick 数组由程序创建）/ `increase_liquidity_v2` | 初始化缺少的 tick 数组 → `open_position_with_token_extensions` → `increase_liquidity_v2` | `deposit`（按 LP 数量，两边按上限） | `deposit`（固定一边，另一边按上限和最小值） |
+| 移除 | `decrease_liquidity_v2`（同时领取手续费、奖励）+ `close_position` | `decrease_liquidity_v2` + `collect_fees_v2` + `collect_reward_v2` + `close_position` | `withdraw` | `withdraw`（带 OpenBook 市场账户） |
+| 领取 | 流动性为 0 的 `decrease_liquidity_v2` | `update_fees_and_rewards` + `collect_fees_v2` + `collect_reward_v2` | 计入 LP 份额 | 计入 LP 份额 |
+
+选项（构建和发送都可以传）：
+
+- `slippage`：价格滑点，默认 `0.005`。集中流动性添加按价格在 `[p × (1 − s), p × (1 + s)]` 内最不利时需要的数量给出 `amount0Max` / `amount1Max`（实际只扣按成交价格算的部分），移除给出 `amount0Min` / `amount1Min`；AMM 按数量 × (1 ± s)，两边都给时，按较少的一边算，另一边的上限不超过给的数量
+- `native`：wSOL 那一边用 SOL 支付 / 收取，默认 `true`。用的是 wSOL 的关联代币账户：原来没有时创建、用完关闭（剩下的换回 SOL）；原来就有时只补差额、不关闭（收到的留在 wSOL 账户里）
+- `recipient`：新建仓位的 NFT 归谁，默认发送者（Orca 要求是发送者：开仓和加流动性在同一笔交易里，要 NFT 持有者签名）
+- 发送时还有 `/write` 的发送参数（`feePayer`、`priorityFee`、`wait`、`onUpdate`…）和 `checkBalance`（默认 true：代币按预计数量、SOL 按上限减去已有的 wSOL 检查）
+
+数值与说明：
+
+- **流动性**：集中流动性的 `liquidity` 与程序算出来的逐位一致；CPMM 存入拿到的 LP 与计划一致；AMM v4 的 LP 按储备比例预计（储备随交易变化）
+- **仓位**：往已有仓位追加、移除、领取都要求发送者在关联代币账户里持有仓位 NFT / LP 代币（与 `getLpPositions` 传 `mints` 时相同）
+- **全部移除并关闭**（`burn: true`）：同一笔交易里先领取手续费和奖励，再关闭仓位账户和 NFT，退回租金
+- **奖励**：池子有挖矿奖励时一并领取（`rewardMints`），收到发送者的关联代币账户（没有时创建）；数量要等交易执行后才知道
+- **Token-2022**：代币按各自的代币程序处理；带转账手续费的代币不支持（程序按扣费前 / 后的数量检查上下限，构建时直接报错）；挖矿奖励的代币不限
+
+核对方式：在主网上以真实仓位持有人 / 交易所热钱包的身份模拟执行（`simulateTransaction`，取回执行后的账户）：Raydium CLMM 和 Orca 的新建、追加、部分移除、全部移除并关闭、领取，AMM v4 和 CPMM 的存入、取出，流动性 / LP 数量与计划逐位核对，收到的数量不少于最小值。
+
+**局限**：
+
+- 不使用地址查找表（ALT），一步的指令要能放进一笔 legacy 交易（最坏情况：Raydium 移除带 3 个奖励、位图扩展、关闭仓位约 1180 字节，在 1232 以内）
+- 带转账钩子（transfer hook）的 Token-2022 代币不支持
+- 奖励金库余额不足时程序只发放一部分、剩下的继续记账，这时 `burn: true` 关闭仓位会失败（不会扣代币），先不带 `burn` 移除
+- AMM v4 执行前会结算待提取的收益，储备可能比读到的略少：`slippage: 0` 时存入 / 取出可能失败
+- 新建集中流动性仓位需要 NFT mint 的临时密钥一起签名：会修改交易的钱包（如自动加优先费用）不能用于新建，追加 / 移除不受影响
+- `dryRun: true` 时如果准备工作和主指令放不进一笔交易，主指令的模拟看不到准备工作的结果，会报失败
+
+打包：在已经用到 `SolanaClient` 的基础上，只用 `build*` 约增加 43KB（minify，gzip 约 14KB，含 `/lp` 的仓位查询），加上发送约 66KB（gzip 约 22KB，含 `/write` 的发送代码）。
 
 ## 余额的三种模式
 
@@ -394,6 +464,9 @@ Node 20.19+（依赖的 `@noble/hashes` 2.x 要求）、现代浏览器。写操
 ```bash
 pnpm test        # 单元测试（模拟节点，不需要网络）
 pnpm test:live   # 连真实节点（SOLANA_RPC 指定支持索引方法的节点；需要代理时加 NODE_USE_ENV_PROXY=1）
+pnpm test:live:lp          # LP 仓位连主网核对
+pnpm test:live:liquidity   # 加减流动性在主网上模拟（simulateTransaction，不发送）
+pnpm demo        # 本地运行 demo（demo/，直接用 src 的源码）
 pnpm build
 ```
 

@@ -64,7 +64,7 @@ export {
   clusterOfGenesis,
   type Cluster,
 } from './constants.js'
-export { decodeAddress, encodeAddress, findProgramAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress, isOnCurve } from './address.js'
+export { createProgramAddress, decodeAddress, encodeAddress, findProgramAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress, isOnCurve } from './address.js'
 export {
   formatAmount,
   formatUnits,

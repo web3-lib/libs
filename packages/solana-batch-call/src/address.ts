@@ -130,6 +130,15 @@ export function findProgramAddress(seeds: Uint8Array[], programId: string): stri
   throw new Error('Unable to find a viable program address bump seed')
 }
 
+/** createProgramAddress：用给定的种子（含 bump / nonce）算 PDA；落在曲线上时报错（与 web3.js PublicKey.createProgramAddressSync 相同） */
+export function createProgramAddress(seeds: Uint8Array[], programId: string): string {
+  const hash = sha256(concat([...seeds, decodeAddress(programId), PDA_MARKER]))
+  if (isOnCurve(hash)) {
+    throw new Error('Invalid seeds: address is on the ed25519 curve')
+  }
+  return encodeAddress(hash)
+}
+
 /** 关联代币账户（ATA）地址 */
 export function getAssociatedTokenAddress(owner: string, mint: string, tokenProgram: string): string {
   return findProgramAddress([decodeAddress(owner), decodeAddress(tokenProgram), decodeAddress(mint)], ASSOCIATED_TOKEN_PROGRAM_ID)
