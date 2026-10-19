@@ -3,15 +3,23 @@ import { bluefinTx } from './bluefin.js'
 import { cetusTx, magmaTx } from './cetusTx.js'
 import { flowxTx } from './flowx.js'
 import { READERS } from './index.js'
-import { momentumTx } from './momentum.js'
+import { kriyaClmmTx, momentumTx } from './momentumTx.js'
 import { turbosTx } from './turbos.js'
-import type { DexAdapter, DexWriter, SuiLpProtocol } from './types.js'
+import type { DexAdapter, DexWriter, SuiClmmProtocol } from './types.js'
 
-const WRITERS: Readonly<Record<SuiLpProtocol, DexWriter>> = { cetus: cetusTx, bluefin: bluefinTx, momentum: momentumTx, turbos: turbosTx, flowx: flowxTx, magma: magmaTx }
+const WRITERS: Readonly<Record<SuiClmmProtocol, DexWriter>> = {
+  cetus: cetusTx,
+  bluefin: bluefinTx,
+  momentum: momentumTx,
+  turbos: turbosTx,
+  flowx: flowxTx,
+  magma: magmaTx,
+  'kriya-clmm': kriyaClmmTx,
+}
 
 export const ADAPTERS = Object.fromEntries(
-  (Object.keys(READERS) as SuiLpProtocol[]).map((p) => [p, { ...READERS[p], ...WRITERS[p], packages: [...READERS[p].packages, ...WRITERS[p].packages] }]),
-) as unknown as Readonly<Record<SuiLpProtocol, DexAdapter>>
+  (Object.keys(READERS) as SuiClmmProtocol[]).map((p) => [p, { ...READERS[p], ...WRITERS[p], packages: [...READERS[p].packages, ...WRITERS[p].packages] }]),
+) as unknown as Readonly<Record<SuiClmmProtocol, DexAdapter>>
 
 /** 按对象类型找协议 */
 export const adapterForPosition = (type: string | null) => Object.values(ADAPTERS).find((a) => a.positionType === type) ?? null

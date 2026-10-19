@@ -1,6 +1,6 @@
 # @w3lib/sui-batch-call
 
-Sui 批量读取和批量写操作库：SUI / 代币余额、代币信息、对象、NFT（Display）；一对多转账、多钱包归集、批量执行交易；Cetus、Bluefin、Momentum、Turbos、Magma、FlowX 的 LP 仓位和加减流动性。通过 **gRPC-web** 直接访问全节点（Sui 已于 2026 年停用 JSON-RPC），多节点故障切换。不依赖 Sui SDK，浏览器和 Node（≥ 20.19）都能用。
+Sui 批量读取和批量写操作库：SUI / 代币余额、代币信息、对象、NFT（Display）；一对多转账、多钱包归集、批量执行交易；Cetus、Bluefin、Momentum、Turbos、Magma、FlowX、Kriya（集中流动性），Cetus DLMM，DipCoin、FlowX V2、Kriya（传统 AMM），Aftermath（多币池）的 LP 仓位和加减流动性。通过 **gRPC-web** 直接访问全节点（Sui 已于 2026 年停用 JSON-RPC），多节点故障切换。不依赖 Sui SDK，浏览器和 Node（≥ 20.19）都能用。
 
 ```sh
 pnpm add @w3lib/sui-batch-call
@@ -8,7 +8,7 @@ pnpm add @w3lib/sui-batch-call
 
 只做查询时打包后约 17KB（minify，gzip 约 7KB），不带任何依赖；写操作在子路径 `/write`（见[批量写操作](#批量写操作)）。
 
-**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（6 个 DEX）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
+**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（集中流动性、DLMM、传统 AMM、多币池，12 个协议）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
 
 ## 快速上手
 
@@ -116,7 +116,13 @@ await sui.balances(recipient, [SUI_COIN_TYPE], { minCheckpoint: checkpoint })
 
 ## LP 仓位
 
-子路径 `@w3lib/sui-batch-call/lp`：Sui 上六个集中流动性 DEX 的仓位：**Cetus**、**Bluefin Spot**、**Momentum**（MMT）、**Turbos**、**Magma**、**FlowX CLMM**（按 2026-10 的 TVL，约占 Sui 上有 LP 仓位的 DEX 的九成）。未领取的手续费和挖矿奖励由合约自己算：一次只读调用（不检查交易的模拟，不需要 gas）里对每个仓位执行各 DEX 的领取 / 计算函数，读返回的数量，与真正领取时的结果相同。可选美元价值。
+子路径 `@w3lib/sui-batch-call/lp`：
+- 集中流动性（`type: 'clmm'`）：**Cetus**、**Bluefin Spot**、**Momentum**（MMT）、**Turbos**、**Magma**、**FlowX CLMM**、**Kriya CLMM** 的仓位对象
+- bin 式集中流动性（`type: 'dlmm'`）：**Cetus DLMM** 的仓位对象
+- 传统 AMM（`type: 'amm'`）：**DipCoin**、**FlowX V2**、**Kriya** 的 LP
+- 多币池（`type: 'multi'`）：**Aftermath** 的 LP（2~8 种币的加权池 / 稳定池，含 DAO 费池子）
+
+集中流动性和 DLMM：未领取的手续费和挖矿奖励由合约自己算：一次只读调用（不检查交易的模拟，不需要 gas）里对每个仓位执行各 DEX 的领取 / 计算函数，读返回的数量，与真正领取时的结果相同。传统 AMM：撤出能拿到的数量 = LP × 储备 / LP 总量（手续费已经计入储备）。可选美元价值。
 
 ```ts
 import { getLpPositions, lpPositions } from '@w3lib/sui-batch-call/lp'
@@ -128,7 +134,14 @@ await lpPositions(sui, owner, { positions: [id] })   // 只看指定的仓位对
 //    amount0, amount1, amount0Formatted, amount1Formatted, fee: 2000, tickSpacing: 40, tickLower, tickUpper, tick, inRange, liquidity,
 //    price, priceLower, priceUpper, fees0, fees1, fees0Formatted, fees1Formatted,
 //    rewards: [{ coinType, symbol, decimals, amount, formatted, valueUsd }], restricted: false,
-//    valueUsd, feesUsd, rewardsUsd }]
+//    valueUsd, feesUsd, rewardsUsd },
+//  { type: 'dlmm', protocol: 'cetus-dlmm', position, binStep: 50, binLower, binUpper, activeBin, inRange, price, priceLower, priceUpper,
+//    amount0, amount1, fees0, fees1, rewards, fee: 4000, … },
+//  { type: 'amm', protocol: 'dipcoin', pool, position: null, lpCoinType: '0x…::manage::LP<…>', balance, totalSupply, share: 0.0123,
+//    amount0, amount1, reserve0, reserve1, fee: 500, stable: false, price, valueUsd },
+//  { type: 'multi', protocol: 'aftermath', pool, position: null, lpCoinType: '0x…::af_lp::AF_LP', balance, totalSupply, share,
+//    coins: [{ coinType, symbol, decimals, weight: 0.2, reserve, amount, amountFormatted, valueUsd }, …],
+//    fee: 2500, stable: false, protocolFee: 500, daoFee: null, valueUsd }]
 ```
 
 | 协议 | 仓位 | 手续费 / 奖励怎么算 |
@@ -139,30 +152,39 @@ await lpPositions(sui, owner, { positions: [id] })   // 只看指定的仓位对
 | `momentum` | 地址拥有的 Position | `collect::fee` / `collect::reward`（只读调用里领取，读 Coin 的数量） |
 | `turbos` | 地址拥有的仓位 NFT（仓位在共享的 Positions 里） | `position_manager::collect_with_return_` / `collect_reward_with_return_`；tick 和流动性用 `get_position_info` 读 |
 | `flowx` | 地址拥有的 Position（池子在 PoolRegistry 里） | `position_manager::collect` / `collect_pool_reward` |
+| `kriya-clmm` | 地址拥有的 Position（与 Momentum 的接口相同） | `collect::fee` / `collect::reward` |
+| `cetus-dlmm` | 地址拥有的 Position（区间 [lower_bin, upper_bin]） | `pool::refresh_position_info_v2` 一次给出数量、手续费、奖励 |
+| `dipcoin` | LP 代币 `Coin<manage::LP<X, Y>>`（从地址余额里认出来，一次 `ListBalances`） | 计入储备；池子按 Global 里 registered_pools 表的条目找（条目的对象 ID 本地算出） |
+| `flowx-v2` | LP 代币 `Coin<pair::LP<X, Y>>` | 计入储备；池子是 Container 里 pairs 表的条目（本地算出对象 ID，`pool` 是这个 ID） |
+| `kriya-amm` | 地址拥有的 `KriyaLPToken<X, Y>` 对象（每个对象一个仓位） | 计入储备 |
+| `aftermath` | LP 代币（每个池子一种，如 `Coin<…::af_lp::AF_LP>`）：余额里没有类型参数的代币，按 PoolRegistry 的 lp_coin_map 表认出来（条目的对象 ID 本地算出） | 计入储备；取回的数量扣协议手续费和 DAO 费 |
 
 | 选项 | 说明 |
 | --- | --- |
-| `positions` | 只查这些仓位对象 ID（Turbos 是仓位 NFT 的 ID），不扫描地址拥有的对象 |
-| `protocols` | 只查某些协议：`'cetus'` / `'bluefin'` / `'momentum'` / `'turbos'` / `'magma'` / `'flowx'`，默认全部（每个协议扫描一次地址拥有的对象） |
-| `includeClosed` | 返回已清空的仓位（流动性为 0、手续费和奖励也领完，仓位对象还在），默认 false |
+| `positions` | 只查这些仓位对象 ID（Turbos 是仓位 NFT 的 ID，Kriya AMM 是 KriyaLPToken 的 ID），不扫描地址拥有的对象；这时 LP 是普通代币的 AMM（DipCoin、FlowX V2）不查 |
+| `protocols` | 只查某些协议：`'cetus'` / `'bluefin'` / `'momentum'` / `'turbos'` / `'magma'` / `'flowx'` / `'kriya-clmm'` / `'cetus-dlmm'` / `'dipcoin'` / `'flowx-v2'` / `'kriya-amm'` / `'aftermath'`，默认全部（仓位对象每个协议扫描一次地址拥有的对象；LP 代币一次 `ListBalances`）。`SUI_LP_PROTOCOLS` 有各协议的名称、类型和对象 / 代币类型 |
+| `includeClosed` | 返回已清空的仓位（流动性为 0、手续费和奖励也领完，仓位对象还在；Kriya AMM 是 LP 为 0 的 KriyaLPToken），默认 false |
 | `prices` | `true` 用 DefiLlama，也可以传自己的 `SuiPriceSource`；默认不查。价格源出错时照样返回仓位，美元价值为 null（`onPriceError` 可以拿到错误） |
 | `onError` | 某个协议读取出错时调用 `(protocol, err)`：扫描、准备工作出错时跳过这个协议（照样返回其他协议的仓位）；只读调用时节点出错，仓位照样返回、手续费和奖励为 null |
 | `fetch` / `signal` | 查价用的 fetch、取消查询 |
 
 - 撤出能拿到的数量：Cetus / Magma 用合约的 `get_position_amounts(_v2)`；其他协议按 tick 和流动性用集中流动性的公式算（与合约相同的整数算法；tick → sqrt 价格用 Cetus 的 tick_math，六个 DEX 都是它，主网上逐位核对过）
 - 合约会升级：调用时用包的最新版本（`ListPackageVersions` 查，进程内缓存 10 分钟）
-- `fee` 是手续费率（百万分之一，2500 = 0.25%）；价格都是 token1 / token0，按精度换算的浮点数，只用于展示
+- `fee` 是手续费率（百万分之一，2500 = 0.25%；DLMM 是基础手续费率，另有随波动变化的部分）；价格都是 token1 / token0，按精度换算的浮点数，只用于展示（传统 AMM 是储备的比例，DLMM 是 bin 的价格 (1 + binStep / 10000)^bin）
 - 一次只读调用最多算 50 个仓位，整批执行失败时逐个再算；个别仓位出错时它的手续费 / 奖励为 null，不影响其他仓位。节点出错（限频、超时）时不逐个重试，这些仓位的手续费 / 奖励为 null，错误交给 `onError`。某个协议的扫描出错时只少它的仓位，读不到池子的仓位跳过（都会调用 `onError`）；`positions` 里重复的 ID 只返回一次
 - Turbos 的 tick 和流动性用单独的只读调用读（与领取分开）；读不到时数量和区间为 null
 - 用 `positions` 指定别人的仓位时，只读调用以仓位的持有人为发送者
 - `restricted`：Cetus 标记的受 2025 年 5 月攻击事件影响的仓位（`pool::is_attacked_position`），合约不允许一次移除全部流动性；其他协议为 false
 - Turbos 的两个池子有已停用的奖励（与官方 SDK 相同的列表），不领取，数量记为 0；这样的仓位如果还有已停用奖励没领，合约不允许关闭（`burn`），只能移除流动性
 - FlowX 的手续费用 `position_manager::collect` 读，它返回仓位全部待领取的币：在别处移除了流动性、还没领取的本金也算在手续费里
-- **局限**：只认地址直接拥有的仓位对象；质押在农场 / 金库里的仓位查不到。传统 AMM（LP 代币）暂不支持
+- 传统 AMM：DipCoin、FlowX V2 的 LP 是普通代币，地址持有的同一种 LP 合计一个仓位（`position` 为 null）；`balance` 含地址余额里的部分
+- FlowX V2 的协议手续费（Uniswap V2 式的 `mint_fee`）在移除时先增发给协议，实际取回的数量比 `amount0` / `amount1` 略少
+- Aftermath：`coins[].amount` 是按比例取回全部币时能拿到的，按合约的算法（r = LP / 总量，每种币 = 储备 × r）扣掉协议手续费（`protocolFee`，0.05%，读 ProtocolFeeVault；有推荐人时略少）和 DAO 费（`daoFee`），主网上与模拟执行的结果逐位一致。约 20% 的池子是 DAO 费池子（池子放在 DaoFeePool 里，`pool` 仍是 Pool 的 ID）。`fee` 是 swap 手续费率，`weight` 是权重（稳定池也照样返回）
+- **局限**：只认地址直接拥有的仓位对象 / LP；质押在农场 / 金库里的查不到（如 Aftermath 的 afLP 金库）。BlueMove、STEAMM 等暂不支持
 
 ## 添加 / 移除流动性
 
-子路径 `@w3lib/sui-batch-call/liquidity`：与 `/lp` 相同的六个 DEX。报价按集中流动性的公式在本地算；交易调用各 DEX 合约的函数，合约检查数量上限 / 下限，超出滑点时整笔失败。
+子路径 `@w3lib/sui-batch-call/liquidity`：与 `/lp` 相同的协议。集中流动性的报价按集中流动性的公式在本地算；交易调用各 DEX 合约的函数，合约检查数量上限 / 下限，超出滑点时整笔失败。DLMM 和传统 AMM 见下面各自的说明。计划（plan）的 `type` 是 `'clmm'` / `'dlmm'` / `'amm'`，只适用于某一种的字段在其他类型里为 null。
 
 - `buildAddLiquidity` / `buildRemoveLiquidity` / `buildCollectFees`：只读取、不签名，返回报价和交易内容（`kind`，按发送者当前的 Coin 构建、发送者自己付 gas），可以交给 `batchCall` 或自己签名
 - `addLiquidity` / `removeLiquidity` / `collectFees`：报价后签名发送，钱包和发送参数与 `/write` 相同（还可以传 `sponsor` 赞助 gas）
@@ -205,9 +227,64 @@ await collectFees(sui, key, { position })                                   // �
 - 发送前按上限检查余额，SUI 另外留出约 0.05 SUI 的 gas（`checkBalance: false` 关闭）
 - Cetus 受攻击影响的仓位（`restricted`）全部移除或关闭时提前报错，只能部分移除
 
-核对方式：六个 DEX 都在主网上以真实仓位持有人 / 持币地址的身份模拟执行：仓位读取（手续费、奖励）、新建（区间内两边、区间一侧）、追加、部分移除、领取、全部移除并关闭。
+**Cetus DLMM**（router 的 spot 策略：区间内平均分配，当前 bin 以上的 bin 只放 token0，以下的只放 token1，当前 bin 两种都放）：
 
-打包（esbuild、minify，对比只用 `SuiClient`）：`/lp` 约增加 31KB（gzip 约 11KB，六个 DEX 的读取 + 只读调用的交易编码），再加上 `build*` 共约 51KB（gzip 约 17KB），再加上发送函数共约 78KB（gzip 约 27KB，含 `/write` 的发送代码）。只用 `/lp` 时不会打包各 DEX 的交易命令。
+```ts
+await addLiquidity(sui, key, { pool, priceLower: 0.9, priceUpper: 1.1, amount0Formatted: '100', amount1Formatted: '100' })  // 两边各自给
+await addLiquidity(sui, key, { pool, tickLower: bin + 2, tickUpper: bin + 20, amount0Formatted: '100' })               // 区间在当前价格上方：只放 token0（tick 就是 bin id）
+await addLiquidity(sui, key, { position, amount0: 1000n, amount1: 1000n })                                              // 追加（仓位的区间）
+await removeLiquidity(sui, key, { position, percent: 30 })                                                              // 按比例移除（先领取手续费和奖励）
+await removeLiquidity(sui, key, { position, burn: true })                                                               // 全部移除并关闭
+```
+
+- 新建：`router::spot::open_position`；追加：`router::spot::add_liquidity`；移除：`pool::remove_liquidity_by_percent`；关闭：`close_position` + `destroy_close_position_cert`；领取：`update_position_fee_and_rewards` + `collect_position_fee` / `collect_position_reward`
+- 一个仓位最多 1000 个 bin（不支持 `fullRange`）；价格按 bin 向下取整（价格所在的 bin）
+- 合约的加减流动性没有数量上下限：用 `binShift` 防价格变动（`slippage` 换算成允许当前 bin 偏离报价时的 bin 数，至少 1 个；`router::utils::validate_active_id_slippage` / router 参数检查，超出时整笔失败）。移除时另在交易里检查取回的数量不少于 `amount0Min` / `amount1Min`（预计 × (1 − `slippage`)；从取回的币里拆出下限再合并回去，不够时整笔失败）；添加的计划里下限为 `'0'`
+- 池子关闭了领取（`disable_collect_fee` / `disable_collect_reward`）时：部分移除和领取跳过被关闭的那部分，关闭仓位报错；空仓位按比例移除时报错
+- 移除只能按比例（`percent`，万分之一精度）或 `burn`，计划的 `liquidity` 是移除的比例（万分之一）；添加的计划 `liquidity` 为 `'0'`（每个 bin 各有份额）
+
+**传统 AMM**（DipCoin、FlowX V2、Kriya）：
+
+```ts
+await addLiquidity(sui, key, { pool, amount0Formatted: '100' })                        // 给一边，另一边按储备比例（向上取整）
+await addLiquidity(sui, key, { position, amount1Formatted: '5' })                      // lpPositions 的结果：往它的池子里加
+await removeLiquidity(sui, key, { position, percent: 50 })                              // 或 liquidity: LP 数量
+await removeLiquidity(sui, key, { pool, percent: 100 })                                 // DipCoin、FlowX V2：只给池子，移除持有的这个池子的 LP
+```
+
+| | 添加 | 移除 |
+| --- | --- | --- |
+| DipCoin | `router::add_liquidity`（两边的币 + 下限，入口函数；LP 和多余的币转给发送者） | `router::remove_liquidity`（LP 数量 + 下限） |
+| FlowX V2 | `router::add_liquidity`（传 Container，带截止时间） | `router::remove_liquidity`（拆出正好的 LP） |
+| Kriya | `spot_dex::add_liquidity`（返回新的 KriyaLPToken，多余的币转给发送者） | `spot_dex::remove_liquidity`（部分移除时剩下的 KriyaLPToken 转回发送者；合约没有数量下限，取回后在交易里检查） |
+
+- 预计的 LP = min(数量 / 储备 × 总量)；两边都给时按比例实际用掉的部分是 `amount0` / `amount1`，给的数量是 `amount0Max` / `amount1Max`，下限 = 实际用掉的 × (1 − `slippage`)
+- 移除：预计数量 = LP × 储备 / 总量（向下取整），下限 = 预计 × (1 − `slippage`)；有一边会取回 0 时报错（数量太少）
+- DipCoin、FlowX V2 用的是入口函数：付款的币只能来自 Coin 对象（不能用地址余额，发送前的余额检查也只算 Coin 对象；SUI 在自己付 gas 时从 gas 币拆）；LP 也只算 Coin 对象里的
+- 手续费已经计入 LP 份额：`collectFees` / `buildCollectFees` 报错；不支持新建池子（池子为空时报错）；DipCoin 每次添加至少要铸造池子规定的最少 LP
+
+**多币池（Aftermath）**：计划的 `type` 是 `'multi'`，每种币的数量在 `coins` 里（`token0` / `token1`、`amount0` / `amount1` 是前两种）：
+
+```ts
+await addLiquidity(sui, key, { pool, coin: USDC, amountFormatted: '100' })                    // 按比例：给一种币，其余按储备比例
+await addLiquidity(sui, key, { pool, coin: SUI_COIN_TYPE, amountFormatted: '10', single: true })  // 只存一种币
+await removeLiquidity(sui, key, { position, percent: 50 })                                     // 按比例取回全部币（或 liquidity: LP 数量）
+await removeLiquidity(sui, key, { pool, protocol: 'aftermath', percent: 100, outCoin: USDC })   // 只取回一种币
+```
+
+| | 调用 | 报价 / 保护 |
+| --- | --- | --- |
+| 按比例存入 | `deposit::all_coin_deposit_N_coins`（全部币，`&mut`，按最少的比例取，剩下的退回） | 预计的 LP 按合约的算法估算（扣协议手续费和 DAO 费）；合约没有下限，在交易里检查拿到的 LP 不少于预计 × (1 − `slippage`) |
+| 只存一种币 | `deposit::deposit_1_coins_direct`（带 LP 下限） | 按模拟执行的结果报价（发送者要有这些币），LP 下限 = 报价 × (1 − `slippage`) |
+| 按比例取回 | `withdraw::all_coin_withdraw_N_coins` | 按合约的算法算出（与模拟结果逐位一致）；合约没有下限，在交易里检查每种币不少于预计 × (1 − `slippage`)（`coins[].amountMin`） |
+| 只取一种币 | `withdraw::withdraw_1_coin_direct`（带数量下限） | 按模拟执行的结果报价，下限 = 报价 × (1 − `slippage`) |
+
+- DAO 费池子调用外壳包（`0x6f60a0…`）的同名函数（多传 DaoFeePool 和 Version），存取时多收 `fee_bps`；`pool` 传 Pool 的 ID 或 DaoFeePool 的 ID 都可以
+- 每次存取都收协议手续费（0.05%，按比例存入时从给的全部币上收）；`collectFees` 报错（手续费已经计入 LP 份额）
+
+核对方式：每个协议都在主网上以真实仓位持有人 / 持币地址的身份模拟执行：仓位读取（手续费、奖励）、新建（区间内两边、区间一侧）、追加、部分移除、领取、全部移除并关闭；传统 AMM 是 LP 读取、按比例移除、添加。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：`/lp` 约增加 55KB（gzip 约 20KB，十二个协议的读取、只读调用的交易编码、算动态字段 ID 的 blake2b），再加上 `build*` 共约 98KB（gzip 约 32KB），再加上发送函数共约 117KB（gzip 约 38KB，含 `/write` 的发送代码）。只用 `/lp` 时不会打包各 DEX 的交易命令。
 
 `addLiquidity` 等发送函数结果里的 `plan.kind` 是实际发出的交易。
 
@@ -224,7 +301,7 @@ await collectFees(sui, key, { position })                                   // �
 ```sh
 pnpm test                  # 单元测试（假的 gRPC-web 节点，不需要网络）
 pnpm test:live             # 连主网（SUI_GRPC 可以指定节点；需要代理时加 NODE_USE_ENV_PROXY=1），写操作只模拟
-pnpm test:live:liquidity   # 各 DEX 的 LP 仓位和加减流动性（主网模拟；DEX=bluefin 时 dex-live 只跑这一个 DEX）
+pnpm test:live:liquidity   # 各 DEX 的 LP 仓位和加减流动性（主网模拟；DEX=bluefin 时 dex-live / amm-live 只跑这一个 DEX）
 SUI_DEVNET_KEY=suiprivkey1… pnpm test:devnet   # 在 devnet 真实执行写操作（这个私钥要有几个 devnet SUI）
 pnpm demo                  # 本地运行 demo（demo/，直接用 src 的源码）
 ```

@@ -6,8 +6,14 @@ import type { SuiClient } from '../client.js'
 import type { SuiObject } from '../services.js'
 import type { Argument, ObjectRef } from '../write/bcs.js'
 import type { PtbBuilder } from '../write/ptb.js'
+import type { SuiAmmProtocol } from '../amm/types.js'
+import type { SuiDlmmProtocol } from '../dlmm.js'
+import type { SuiMultiProtocol } from '../aftermath.js'
 
-export type SuiLpProtocol = 'cetus' | 'bluefin' | 'momentum' | 'turbos' | 'flowx' | 'magma'
+/** 集中流动性 DEX */
+export type SuiClmmProtocol = 'cetus' | 'bluefin' | 'momentum' | 'turbos' | 'flowx' | 'magma' | 'kriya-clmm'
+/** 支持的全部协议：集中流动性 + 传统 AMM */
+export type SuiLpProtocol = SuiClmmProtocol | SuiDlmmProtocol | SuiAmmProtocol | SuiMultiProtocol
 
 export interface SharedRef {
   objectId: string
@@ -15,7 +21,7 @@ export interface SharedRef {
 }
 
 export interface DexPool {
-  protocol: SuiLpProtocol
+  protocol: SuiClmmProtocol
   id: string
   /** Move 类型参数（Turbos 的第三个是手续费类型） */
   typeArgs: string[]
@@ -37,7 +43,7 @@ export interface DexPool {
 }
 
 export interface DexPosition {
-  protocol: SuiLpProtocol
+  protocol: SuiClmmProtocol
   /** 用户拥有的对象：仓位，或 Turbos 的仓位 NFT */
   id: string
   ref: ObjectRef | null
@@ -105,7 +111,7 @@ export interface WithdrawArgs {
 
 /** 读取部分（/lp 用） */
 export interface DexReader {
-  protocol: SuiLpProtocol
+  protocol: SuiClmmProtocol
   name: string
   /** 原始包 id（类型名用它） */
   original: string

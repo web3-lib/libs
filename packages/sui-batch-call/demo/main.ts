@@ -17,13 +17,21 @@ const SAMPLE_COINS = [
 const SAMPLE_OBJECTS = ['0x6', '0x5', '0x51e883ba7c0b566a26cbc8a94cd33eb0abd418a77cc1e60ad22fd9b1f29cd2ab']
 
 /** LP 示例：各 DEX 有仓位的地址和其中一个仓位（2026-10 时的真实仓位，之后可能撤出） */
-const SAMPLE_LP: Array<{ protocol: SuiLpProtocol; owner: string; position: string }> = [
+const SAMPLE_LP: Array<{ protocol: SuiLpProtocol; owner: string; position: string | null }> = [
   { protocol: 'cetus', owner: '0x4ae27fc3d16fd33bc017ceaed23d5b6242cfe95b9c073a3546b2242f6b354b50', position: '0xfffa73532099a5b655d5d0c3a7827780718c9df98625edc19d61ed4ef617c215' },
   { protocol: 'bluefin', owner: '0x95b9f5ad34c4c987d011e00472591b835906ff2c0381409ccf7038b7c54ebec7', position: '0x00071152cab50d0d2708765869273818e9aa1ec982fc88c93fc6331b1765f478' },
   { protocol: 'momentum', owner: '0xd296f7f43c8c48f1de676eb898398bd36401a16cec5000245c19626b2897c359', position: '0x00017c08b581aef1bb6e742cc072b1c2c17d9cec629fa5f9dbaad466f47c620e' },
   { protocol: 'turbos', owner: '0xa7b9ddd98dbcde45276dc204a1a20a1ff15c129da6a5ec997301cbc9ba179a24', position: '0xd4f9ddf81688146dd1843d00e9ff3f092ce6b55a7d01f4d337e2df05255e32b2' },
   { protocol: 'magma', owner: '0x9b42721c812a1eccf083038313b05833c0c7bd1be47d77382066e77623329b0f', position: '0xfe57d2b1cd66230b0b157b92b710183f8a333742c1bdec57a383b23b7a097ab7' },
   { protocol: 'flowx', owner: '0xc02b3a404ff72ffede0f6ebf0356f4f5c0ba5431c0e052fb1eb086ebf0713334', position: '0x09adb02c9a250c04360da87466bd15500d5b8b8fffcc42f79092f80e2a803d92' },
+  { protocol: 'kriya-clmm', owner: '0x0f2671a9f2aa80018889ade3e6d5a2222cb015c5e45d7ecd8dd4f2209137b6d9', position: '0xffcf4aaed73c787c271d6d980cb4af01e520d732867ec492cc05c056870a9866' },
+  { protocol: 'cetus-dlmm', owner: '0x68e3d704f4ca71a3188a5b1a4e4899e6e59d3ceff0e1cb6e23121f2fe88012b4', position: '0xff7e679577e2541720a2c23b95f574e35e898da5ac7f0b9871d15c8d74e6fa80' },
+  // 传统 AMM：LP 是代币（DipCoin、FlowX V2）或 KriyaLPToken 对象
+  { protocol: 'dipcoin', owner: '0x3283b58910842620120028e8f0300781dac502be1d5350f95b75c38c044472eb', position: null },
+  { protocol: 'flowx-v2', owner: '0x2568ff0ef7709f5a7ca5fea3ae5766cfe64e1fe94ca48552395744dba1c5e30a', position: null },
+  { protocol: 'kriya-amm', owner: '0x8eaa6a3d4fa4a5a41e6f78c1c4ce7e887ac3f980ca558a6df053bf1d78907783', position: null },
+  // 多币池：5 种稳定币的池子
+  { protocol: 'aftermath', owner: '0x8c90d1c14730cc251d15e7d228bf2f34266cbbc2ee4b1518fd34b1cd96acb238', position: null },
 ]
 
 // ---- 设置（存在 localStorage，刷新后保留） ----
@@ -304,16 +312,43 @@ bind('runLp', 'lp', async () => {
   })
   const sym = (t: { symbol: string | null }) => t.symbol ?? '?'
   const view = table(
-    ['协议', '交易对', '数量', '未领取手续费', '奖励', '区间', '价值', '仓位'],
+    ['协议', '交易对', '数量', '未领取手续费', '奖励', '区间 / 份额', '价值', '仓位'],
     list.map((p) => {
+      if (p.type === 'multi') {
+        // 多币池：每种币一项；手续费已经计入 LP 份额
+        return [
+          p.protocolName,
+          `${p.coins.map(sym).join(' / ')} · ${p.fee / 10_000}%${p.stable ? ' · stable' : ''}${p.daoFee ? ` · DAO ${p.daoFee / 10_000}%` : ''}`,
+          p.coins.map((c) => `${amount(c.amountFormatted)} ${sym(c)}`).join(' + '),
+          '计入份额',
+          '—',
+          `${(p.share * 100).toLocaleString('en-US', { maximumSignificantDigits: 3 })}%`,
+          prices ? usd(p.valueUsd) : null,
+          addr(p.pool),
+        ]
+      }
       const amounts = p.amount0Formatted === null ? null : `${amount(p.amount0Formatted)} ${sym(p.token0)} + ${amount(p.amount1Formatted)} ${sym(p.token1)}`
+      if (p.type === 'amm') {
+        // 传统 AMM：手续费已经计入 LP 份额
+        return [
+          p.protocolName,
+          `${sym(p.token0)} / ${sym(p.token1)} · ${p.fee / 10_000}%${p.stable ? ' · stable' : ''}`,
+          amounts,
+          '计入份额',
+          '—',
+          `${(p.share * 100).toLocaleString('en-US', { maximumSignificantDigits: 3 })}%`,
+          prices ? usd(p.valueUsd) : null,
+          // LP 是普通代币时没有仓位对象：显示池子
+          addr(p.position ?? p.pool),
+        ]
+      }
       const fees = p.fees0Formatted === null ? null : `${amount(p.fees0Formatted)} + ${amount(p.fees1Formatted)}${prices ? `（${usd(p.feesUsd)}）` : ''}`
       // 池子的奖励代币可能有好几个，只显示有未领取数量的（完整列表在原始 JSON 里）
       const pending = p.rewards?.filter((r) => r.amount !== '0') ?? null
       const rewards = pending === null ? null : pending.length ? pending.map((r) => `${amount(r.formatted)} ${r.symbol ?? '?'}`).join('、') : '—'
       const range = p.priceLower === null ? '—' : `${price(p.priceLower)} ~ ${price(p.priceUpper)}`
       return [
-        p.restricted ? wrapWith(p.protocolName, tag('受限', 'bad')) : p.protocolName,
+        p.type === 'clmm' && p.restricted ? wrapWith(p.protocolName, tag('受限', 'bad')) : p.protocolName,
         `${sym(p.token0)} / ${sym(p.token1)} · ${p.fee / 10_000}%`,
         amounts,
         fees,

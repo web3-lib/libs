@@ -6,11 +6,11 @@ import { normalizeSuiAddress } from '../address.js'
 import { CETUS } from '../cetus.js'
 import { pure } from '../write/bcs.js'
 import { big } from './env.js'
-import type { DexPool, DexReader, SharedRef, SuiLpProtocol } from './types.js'
+import type { DexPool, DexReader, SharedRef, SuiClmmProtocol } from './types.js'
 import { coinTypeOf, i32, json, refOf, sharedOf, typeArgs } from './util.js'
 
 export interface CetusLike {
-  protocol: SuiLpProtocol
+  protocol: SuiClmmProtocol
   name: string
   /** 核心包（原始 id） */
   clmm: string

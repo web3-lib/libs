@@ -5,9 +5,13 @@
 import { describe, expect, it } from 'vitest'
 
 import { SuiClient } from '../src/index.js'
-import { lpPositions } from '../src/lp.js'
+import { lpPositions as allPositions, type LpPositionsOptions, type SuiLpClmmPosition } from '../src/lp.js'
 import { addLiquidity, buildAddLiquidity, buildCollectFees, buildRemoveLiquidity, collectFees, removeLiquidity } from '../src/subpaths/liquidity.js'
 import { batchCall } from '../src/subpaths/write.js'
+
+/** 这里只看集中流动性的仓位 */
+const lpPositions = async (client: SuiClient, owner: string, options?: LpPositionsOptions) =>
+  (await allPositions(client, owner, options)).filter((p): p is SuiLpClmmPosition => p.type === 'clmm')
 
 const live = process.env.LIVE ? describe : describe.skip
 const sui = new SuiClient(process.env.SUI_GRPC)
@@ -98,7 +102,7 @@ live('Sui LP（主网）', { timeout: 120_000 }, () => {
     const both = await buildAddLiquidity(sui, HOLDER, { pool: POOL, priceLower: price * 1.05, priceUpper: price * 1.2, amount0Formatted: '1', amount1Formatted: '1' })
     expect([both.fixed, both.amount1Max]).toEqual(['token0', '0'])
     // 窄区间：当前 tick 离上边界一格，固定 token0，滑点场景不越过边界
-    const t = Math.floor(quote.tick / 10) * 10
+    const t = Math.floor((quote.tick as number) / 10) * 10
     const narrow = await buildAddLiquidity(sui, HOLDER, { pool: POOL, tickLower: t - 100, tickUpper: t + 10, amount0Formatted: '1' })
     const results = await batchCall(sui, [above, narrow].map((p) => ({ from: watchOnly(HOLDER), kind: p.kind })), { dryRun: true, continueOnError: true })
     expect(results.map((r) => [r.status, r.error])).toEqual([

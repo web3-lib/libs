@@ -6,9 +6,13 @@
 import { describe, expect, it } from 'vitest'
 
 import { SuiClient } from '../src/index.js'
-import { lpPositions } from '../src/lp.js'
+import { lpPositions as allPositions, type LpPositionsOptions, type SuiLpClmmPosition } from '../src/lp.js'
 import { addLiquidity, buildAddLiquidity, buildCollectFees, buildRemoveLiquidity, removeLiquidity } from '../src/subpaths/liquidity.js'
 import { batchCall } from '../src/subpaths/write.js'
+
+/** 这里只看集中流动性的仓位 */
+const lpPositions = async (client: SuiClient, owner: string, options?: LpPositionsOptions) =>
+  (await allPositions(client, owner, options)).filter((p): p is SuiLpClmmPosition => p.type === 'clmm')
 
 const live = process.env.LIVE ? describe : describe.skip
 const sui = new SuiClient(process.env.SUI_GRPC)
@@ -17,7 +21,7 @@ const HOLDER = '0x9f63425709069336fec108bd4ba69a8f3d23e8ab237311f3ce58ae2bb0ed4d
 const watchOnly = (address: string) => ({ address, signTransaction: async (): Promise<string> => Promise.reject(new Error('watch-only')) })
 
 interface Case {
-  protocol: 'bluefin' | 'momentum' | 'turbos' | 'flowx' | 'magma'
+  protocol: 'bluefin' | 'momentum' | 'turbos' | 'flowx' | 'magma' | 'kriya-clmm'
   /** 有仓位的地址和仓位 */
   owner: string
   position: string
@@ -57,6 +61,13 @@ const CASES: Case[] = [
     // USDC / SUI（token0 是 USDC）
     pool: '0xff8c47de1f04e4889bd3dbe06e87ceb61d44c2380f43d2a4fb2bc582ff8e51dd',
   },
+  {
+    protocol: 'kriya-clmm',
+    owner: '0x0f2671a9f2aa80018889ade3e6d5a2222cb015c5e45d7ecd8dd4f2209137b6d9',
+    position: '0xffcf4aaed73c787c271d6d980cb4af01e520d732867ec492cc05c056870a9866',
+    // SUI / wUSDC（Wormhole）
+    pool: '0x367e02acb99632e18db69c3e93d89d21eb721e1d1fcebc0f6853667337450acc',
+  },
 ]
 
 for (const c of CASES.filter((x) => !process.env.DEX || x.protocol === process.env.DEX)) {
@@ -90,7 +101,8 @@ for (const c of CASES.filter((x) => !process.env.DEX || x.protocol === process.e
       const balances = await sui.balances(c.owner, [position.token0.coinType, position.token1.coinType])
       const have = balances.map((b) => BigInt(b.balance))
       for (const side of [{ amount0: 1000n }, { amount1: 1000n }]) {
-        const plan = await buildAddLiquidity(sui, c.owner, { position, ...side }).catch(() => null)
+        // 数量很小、价格在窄区间里一直在动：滑点放宽到 5%（1000 个单位的 0.5% 只有 5）
+        const plan = await buildAddLiquidity(sui, c.owner, { position, slippage: 0.05, ...side }).catch(() => null)
         if (!plan || BigInt(plan.amount0Max) > (have[0] ?? 0n) / 2n || BigInt(plan.amount1Max) > (have[1] ?? 0n) / 2n) continue
         const [r] = await batchCall(sui, [{ from: watchOnly(c.owner), kind: plan.kind }], { dryRun: true })
         expect([r?.status, r?.error]).toEqual(['simulated', null])
