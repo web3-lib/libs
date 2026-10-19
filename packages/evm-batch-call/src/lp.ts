@@ -24,6 +24,13 @@ export interface LpProtocol {
   chainId: number
   /** V2：工厂合约（getPair、识别 LP 代币属于哪个协议）；V3：池子的工厂合约（getPool） */
   factory?: string
+  /** V2：Router 合约（添加 / 移除流动性用，见子路径 `/liquidity`） */
+  router?: string
+  /**
+   * V2：协议手续费开启（factory.feeTo 不为零）时，每次添加 / 移除前给 feeTo 增发的 LP 占 √k 增长的比例：
+   * Uniswap 及大多数分叉是 '1/6'，PancakeSwap 是 '8/25'。不填时按 '8/25'（增发得多，算出的移除数量偏少，最小值更宽松）
+   */
+  protocolFee?: '1/6' | '8/25'
   /** V3 / V4：仓位 NFT 合约（NonfungiblePositionManager / PositionManager） */
   positionManager?: string
   /** V4：StateView（读池子和仓位的状态） */
@@ -32,7 +39,15 @@ export interface LpProtocol {
   deployBlock?: number
 }
 
-const v2 = (id: string, name: string, chainId: number, factory: string): LpProtocol => ({ id, name, version: 'v2', chainId, factory })
+const v2 = (id: string, name: string, chainId: number, factory: string, router: string, protocolFee: '1/6' | '8/25'): LpProtocol => ({
+  id,
+  name,
+  version: 'v2',
+  chainId,
+  factory,
+  router,
+  protocolFee,
+})
 const v3 = (id: string, name: string, chainId: number, positionManager: string, factory: string): LpProtocol => ({ id, name, version: 'v3', chainId, positionManager, factory })
 const v4 = (chainId: number, positionManager: string, stateView: string, deployBlock?: number): LpProtocol => ({
   id: 'uniswap-v4',
@@ -49,41 +64,44 @@ const UNI_V3_FACTORY = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
 const CAKE_V3_NPM = '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364'
 const CAKE_V3_FACTORY = '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865'
 const SUSHI_V2_FACTORY = '0xc35DADB65012eC5796536bD9864eD8773aBc74C4'
+const SUSHI_V2_ROUTER = '0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506'
+const UNI_V2_ROUTER_L2 = '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24'
+const CAKE_V2_ROUTER_L2 = '0x8cFe327CEc66d1C090Dd72bd0FF11d690C33a2Eb'
 
 /**
- * 内置的 DEX 部署（2026-10 在链上逐个核对：V3 的 name / factory、V2 的 allPairsLength）。
+ * 内置的 DEX 部署（2026-10 在链上逐个核对：V3 的 name / factory、V2 的 allPairsLength、V2 Router 的 factory / WETH）。
  * 不在表里的 DEX / 链可以通过 `protocols` 选项传入自己的 LpProtocol。
  */
 export const LP_PROTOCOLS: readonly LpProtocol[] = [
   // Ethereum
-  v2('uniswap-v2', 'Uniswap V2', 1, '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f'),
-  v2('sushiswap-v2', 'SushiSwap', 1, '0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac'),
-  v2('pancakeswap-v2', 'PancakeSwap V2', 1, '0x1097053Fd2ea711dad45caCcc45EfF7548fCB362'),
+  v2('uniswap-v2', 'Uniswap V2', 1, '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f', '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D', '1/6'),
+  v2('sushiswap-v2', 'SushiSwap', 1, '0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac', '0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F', '1/6'),
+  v2('pancakeswap-v2', 'PancakeSwap V2', 1, '0x1097053Fd2ea711dad45caCcc45EfF7548fCB362', '0xEfF92A263d31888d860bD50809A8D171709b7b1c', '8/25'),
   v3('uniswap-v3', 'Uniswap V3', 1, UNI_V3_NPM, UNI_V3_FACTORY),
   v3('pancakeswap-v3', 'PancakeSwap V3', 1, CAKE_V3_NPM, CAKE_V3_FACTORY),
   // BSC
-  v2('pancakeswap-v2', 'PancakeSwap V2', 56, '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73'),
-  v2('uniswap-v2', 'Uniswap V2', 56, '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6'),
-  v2('sushiswap-v2', 'SushiSwap', 56, SUSHI_V2_FACTORY),
+  v2('pancakeswap-v2', 'PancakeSwap V2', 56, '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73', '0x10ED43C718714eb63d5aA57B78B54704E256024E', '8/25'),
+  v2('uniswap-v2', 'Uniswap V2', 56, '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6', UNI_V2_ROUTER_L2, '1/6'),
+  v2('sushiswap-v2', 'SushiSwap', 56, SUSHI_V2_FACTORY, SUSHI_V2_ROUTER, '1/6'),
   v3('pancakeswap-v3', 'PancakeSwap V3', 56, CAKE_V3_NPM, CAKE_V3_FACTORY),
   v3('uniswap-v3', 'Uniswap V3', 56, '0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613', '0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7'),
   // Base
-  v2('uniswap-v2', 'Uniswap V2', 8453, '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6'),
-  v2('pancakeswap-v2', 'PancakeSwap V2', 8453, '0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E'),
+  v2('uniswap-v2', 'Uniswap V2', 8453, '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6', UNI_V2_ROUTER_L2, '1/6'),
+  v2('pancakeswap-v2', 'PancakeSwap V2', 8453, '0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E', CAKE_V2_ROUTER_L2, '8/25'),
   v3('uniswap-v3', 'Uniswap V3', 8453, '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1', '0x33128a8fC17869897dcE68Ed026d694621f6FDfD'),
   v3('pancakeswap-v3', 'PancakeSwap V3', 8453, CAKE_V3_NPM, CAKE_V3_FACTORY),
   // Arbitrum
-  v2('uniswap-v2', 'Uniswap V2', 42161, '0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9'),
-  v2('sushiswap-v2', 'SushiSwap', 42161, SUSHI_V2_FACTORY),
-  v2('pancakeswap-v2', 'PancakeSwap V2', 42161, '0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E'),
+  v2('uniswap-v2', 'Uniswap V2', 42161, '0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9', UNI_V2_ROUTER_L2, '1/6'),
+  v2('sushiswap-v2', 'SushiSwap', 42161, SUSHI_V2_FACTORY, SUSHI_V2_ROUTER, '1/6'),
+  v2('pancakeswap-v2', 'PancakeSwap V2', 42161, '0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E', CAKE_V2_ROUTER_L2, '8/25'),
   v3('uniswap-v3', 'Uniswap V3', 42161, UNI_V3_NPM, UNI_V3_FACTORY),
   v3('pancakeswap-v3', 'PancakeSwap V3', 42161, CAKE_V3_NPM, CAKE_V3_FACTORY),
   // Optimism
-  v2('uniswap-v2', 'Uniswap V2', 10, '0x0c3c1c532F1e39EdF36BE9Fe0bE1410313E074Bf'),
+  v2('uniswap-v2', 'Uniswap V2', 10, '0x0c3c1c532F1e39EdF36BE9Fe0bE1410313E074Bf', '0x4A7b5Da61326A6379179b40d00F57E5bbDC962c2', '1/6'),
   v3('uniswap-v3', 'Uniswap V3', 10, UNI_V3_NPM, UNI_V3_FACTORY),
   // Polygon
-  v2('uniswap-v2', 'Uniswap V2', 137, '0x9e5A52f57b3038F1B8EeE45F28b3C1967e22799C'),
-  v2('sushiswap-v2', 'SushiSwap', 137, SUSHI_V2_FACTORY),
+  v2('uniswap-v2', 'Uniswap V2', 137, '0x9e5A52f57b3038F1B8EeE45F28b3C1967e22799C', '0xedf6066a2b290C185783862C7F4776A2C8077AD1', '1/6'),
+  v2('sushiswap-v2', 'SushiSwap', 137, SUSHI_V2_FACTORY, SUSHI_V2_ROUTER, '1/6'),
   v3('uniswap-v3', 'Uniswap V3', 137, UNI_V3_NPM, UNI_V3_FACTORY),
   // Avalanche
   v3('uniswap-v3', 'Uniswap V3', 43114, '0x655C406EBFa14EE2006250925e54ec43AD184f8B', '0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD'),
@@ -94,8 +112,8 @@ export const LP_PROTOCOLS: readonly LpProtocol[] = [
   v4(42161, '0xd88f38f930b7952f2db2432cb002e7abbf3dd869', '0x76fd297e2d437cd7f76d50f01afe6160f86e9990', 297842893),
   v4(10, '0x3c3ea4b57a46241e54610e5f022e5c45859a1017', '0xc18a3169788f4f75a170290584eca6395c75ecdb', 130947681),
   v4(137, '0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9', '0x5ea1bd7974c8a611cbab0bdcafcb1d9cc9b3ba5a', 66980394),
-  // Tron：SunSwap（V2 工厂的 allPairsLength、V3 仓位合约的 name / factory 在链上核对过）
-  v2('sunswap-v2', 'SunSwap V2', TRON_CHAIN_ID.mainnet, 'TKWJdrQkqHisa1X8HUdHEfREvTzw4pMAaY'),
+  // Tron：SunSwap（协议手续费与 Uniswap 相同，1/6，用主网数据核对过；V2 工厂的 allPairsLength、V3 仓位合约的 name / factory 在链上核对过）
+  v2('sunswap-v2', 'SunSwap V2', TRON_CHAIN_ID.mainnet, 'TKWJdrQkqHisa1X8HUdHEfREvTzw4pMAaY', 'TNJVzGqKBWkJxJB5XYSqGAwUTV15U24pPq', '1/6'),
   v3('sunswap-v3', 'SunSwap V3', TRON_CHAIN_ID.mainnet, 'TLSWrv7eC1AZCXkRjpqMZUmvgd99cj7pPF', 'TThJt8zaJzJMhCEScH7zWKnp5buVZqys9x'),
 ]
 

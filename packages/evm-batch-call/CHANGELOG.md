@@ -1,5 +1,19 @@
 # Changelog
 
+## 未发布
+
+### 新功能
+
+- 添加 / 移除流动性，子路径 `@w3lib/evm-batch-call/liquidity`：
+  - `buildAddLiquidity` / `buildRemoveLiquidity` / `buildCollectFees` 只构建（报价 + 按顺序发送的交易，授权在前），`addLiquidity` / `removeLiquidity` / `collectFees` 构建后签名发送（钱包同 `/write`）
+  - V2：Router 的 `addLiquidity(ETH)` / `removeLiquidity(ETH)`，数量与 Router 的取整逐位一致；V3：`mint` / `increaseLiquidity` / `decreaseLiquidity` + `collect`（+ `burn`），池子不存在时可传 `initialPrice` 创建；V4：PositionManager 的 actions + Permit2 授权，主币池子
+  - 新建仓位按价格区间（tokenB / tokenA）、tick 或全区间，给一边的数量自动算另一边；往已有仓位追加、按比例移除可以直接传 `getLpPositions` 的结果
+  - 主币：V2 / V3 的包装币那一边可以用主币支付 / 收取；滑点按价格范围算 V3 的 `amountMin`、V4 的 `amountMax` 和移除的最小数量
+  - Tron 的 SunSwap V2 / V3 同样支持
+- `LpProtocol.router`：V2 协议的 Router（内置表里的 V2 协议都已填好、在链上核对过）。SunSwap V2 用 SunSwap 网页当前使用的 Router
+- `LpProtocol.protocolFee`：V2 协议手续费给 feeTo 增发的比例（`'1/6'` / `'8/25'`），添加 / 移除时按它算 LP 总量
+- `/lp` 的数学工具新增 `getLiquidityForAmounts`、`getMintAmounts`、`getTickAtSqrtRatio`、`priceToTick`、`priceToSqrtPriceX96`、`nearestUsableTick` 等（也从 `/liquidity` 导出）
+
 ## 0.5.0
 
 ### 新功能

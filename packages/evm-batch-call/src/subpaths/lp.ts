@@ -35,7 +35,26 @@ export {
   type V4ScanOptions,
   type V4ScanProgress,
 } from '../lpV4.js'
-export { MAX_TICK, MIN_TICK, getAmountsForLiquidity, getFeeGrowthInside, getFeesEarned, getSqrtRatioAtTick, sqrtPriceToPrice, tickToPrice } from '../lpMath.js'
+export {
+  MAX_SQRT_RATIO,
+  MAX_TICK,
+  MIN_SQRT_RATIO,
+  MIN_TICK,
+  getAmountsForLiquidity,
+  getFeeGrowthInside,
+  getFeesEarned,
+  getLiquidityForAmounts,
+  getMaxAmounts,
+  getMinAmounts,
+  getMintAmounts,
+  getSqrtRatioAtTick,
+  getTickAtSqrtRatio,
+  nearestUsableTick,
+  priceToSqrtPriceX96,
+  priceToTick,
+  sqrtPriceToPrice,
+  tickToPrice,
+} from '../lpMath.js'
 export { defillamaPrices, type PriceSource } from '../owner.js'
 
 export interface GetLpPositionsOptions extends LpPositionsOptions, ShortcutProviderOptions {}

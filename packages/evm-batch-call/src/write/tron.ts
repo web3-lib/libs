@@ -186,6 +186,11 @@ function resolveTronSigner(input: SignerInput, cache: Map<unknown, Promise<TronK
   return resolved
 }
 
+/** 签名器的地址（T 地址），不发交易、不弹钱包 */
+export async function tronSignerAddress(input: SignerInput): Promise<string> {
+  return (await resolveTronSigner(input, new Map())).address
+}
+
 // ---- 交易编码（protobuf） ----
 
 function varint(value: bigint | number): number[] {

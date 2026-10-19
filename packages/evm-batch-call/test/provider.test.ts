@@ -230,7 +230,8 @@ describe('deployless 大批量', () => {
     expect(mock.calls.length).toBeGreaterThan(1)
   })
 
-  it('按 initcode 大小（48KB）自动切片', async () => {
+  // 编码大批量的 initcode 较慢：和其他包的测试并行跑时超过默认的 5 秒
+  it('按 initcode 大小（48KB）自动切片', { timeout: 30_000 }, async () => {
     const mock = setup({ multicall: false })
     const multi = new Provider(UNKNOWN_CHAIN, mock)
     const a = new Contract(TOKEN_A, ERC20ABI)

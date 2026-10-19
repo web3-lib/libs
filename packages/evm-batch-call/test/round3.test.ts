@@ -292,7 +292,8 @@ describe('minBlock：落后但不报错的节点（返回较旧区块）时换�
 describe('minBlock（第三轮 review）', () => {
   const tokenAddr = (i: number) => '0x' + (0x2000 + i).toString(16).padStart(40, '0')
 
-  it('deployless 拆成多片时每片都校验区块号：落后节点的旧数据不会混进结果', async () => {
+  // 编码大批量的 initcode 较慢：和其他包的测试并行跑时超过默认的 5 秒
+  it('deployless 拆成多片时每片都校验区块号：落后节点的旧数据不会混进结果', { timeout: 30_000 }, async () => {
     const tokens = Array.from({ length: 600 }, (_, i) => tokenAddr(i))
     const mk = (height: number, balance: bigint) =>
       createMockProvider({

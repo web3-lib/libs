@@ -32,6 +32,10 @@
       "types": "./dist/subpaths/lp.d.ts",
       "import": "./dist/subpaths/lp.js"
     },
+    "./liquidity": {
+      "types": "./dist/subpaths/liquidity.d.ts",
+      "import": "./dist/subpaths/liquidity.js"
+    },
     "./owner": {
       "types": "./dist/subpaths/owner.d.ts",
       "import": "./dist/subpaths/owner.js"
@@ -58,6 +62,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:live": "LIVE=1 vitest run test/live.test.ts",
+    "test:live:lp": "LIVE=1 vitest run test/lp-live.test.ts",
+    "test:live:liquidity": "LIVE=1 vitest run test/liquidity-tron-live.test.ts",
+    "test:fork": "vitest run test/liquidity-fork.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "build:contracts": "node scripts/build-contracts.mjs",
     "check:rpc": "node scripts/check-rpc-nodes.mjs",

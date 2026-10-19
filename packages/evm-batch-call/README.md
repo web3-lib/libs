@@ -53,8 +53,9 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | `getErc1155Balances(owner, items, opts)` | `erc1155Balances(multi, owner, items)` | **`/nft`**。ERC1155 余额 |
 | `getOwnerTokens(owner, opts)` | `ownerTokens(multi, owner, opts)` | **子路径 `/owner`**。资产列表：地址持有的代币（**不推荐使用**，结果不保证完整，见[资产列表](#资产列表)） |
 | `getLpPositions(owner, opts)` | `lpPositions(multi, owner, opts)` | **子路径 `/lp`**。LP 仓位：V2 的 LP 代币、V3 / V4 的仓位 NFT，代币数量、未领取手续费、可选美元价值，见 [LP 仓位](#lp-仓位) |
+| | `addLiquidity` / `removeLiquidity` / `collectFees`（`build*` 只构建不发送） | **子路径 `/liquidity`**。添加 / 移除流动性、领取手续费，见[添加 / 移除流动性](#添加--移除流动性) |
 
-**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`，LP 仓位在 `@w3lib/evm-batch-call/lp`，批量写操作在 `@w3lib/evm-batch-call/write`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 50KB、gzip 约 17KB，均不含 ethers）。
+**子路径**：NFT 查询在 `@w3lib/evm-batch-call/nft`，资产列表（含代币来源、价格源、Transfer 增量扫描）在 `@w3lib/evm-batch-call/owner`，LP 仓位在 `@w3lib/evm-batch-call/lp`，添加 / 移除流动性在 `@w3lib/evm-batch-call/liquidity`，批量写操作在 `@w3lib/evm-batch-call/write`。不用这些功能时打包不会带上它们的代码（拆出后约少 15KB：只用 `getBalances` 时 minify 后约 50KB、gzip 约 17KB，均不含 ethers）。
 
 共同的规则：
 
@@ -275,7 +276,7 @@ await getLpPositions(user, { chainId: 1, v4: { scan: { storage } } })        // 
 | Avalanche | | Uniswap | |
 | Tron | SunSwap | SunSwap | |
 
-地址都在链上核对过（2026-10）。其他 DEX / 链传自己的协议：`protocols: [{ id: 'my-dex', name: 'My DEX', version: 'v3', chainId, positionManager, factory }]`（V2 只需要 `factory`；V3 需要 `positionManager` 和 `factory`，ABI 与 Uniswap V3 相同的分叉都可以；V4 需要 `positionManager` 和 `stateView`，`deployBlock` 可选）。`protocols: ['uniswap-v3']` 只查某些协议，`versions: ['v3']` 只查某些类型。
+地址都在链上核对过（2026-10）。其他 DEX / 链传自己的协议：`protocols: [{ id: 'my-dex', name: 'My DEX', version: 'v3', chainId, positionManager, factory }]`（V2 只需要 `factory`，添加 / 移除流动性还要 `router`；V3 需要 `positionManager` 和 `factory`，ABI 与 Uniswap V3 相同的分叉都可以；V4 需要 `positionManager` 和 `stateView`，`deployBlock` 可选）。`protocols: ['uniswap-v3']` 只查某些协议，`versions: ['v3']` 只查某些类型。
 
 ### 每种类型怎么查、能不能查全
 
@@ -297,6 +298,78 @@ await getLpPositions(user, { chainId: 1, v4: { scan: { storage } } })        // 
 - **Tron**：地址（池子、代币、仓位合约）都是 T 开头的格式；价格用 DefiLlama 的 Tron 数据
 
 **局限**：PancakeSwap 等质押到农场（MasterChef）的仓位 NFT 不在用户名下，查不到；V2 只能尽量查（见上表）；V4 需要传 `tokenIds` 或开启扫描。
+
+## 添加 / 移除流动性
+
+子路径 `@w3lib/evm-batch-call/liquidity`：V2（通过 Router）、V3（仓位 NFT）、Uniswap V4（PositionManager + Permit2），协议与 [LP 仓位](#内置的协议) 的内置表相同（含 Tron 的 SunSwap V2 / V3）。
+
+- `buildAddLiquidity` / `buildRemoveLiquidity` / `buildCollectFees`：只读取、不签名，返回预计的数量和要按顺序发送的交易（授权在前）。可以当作报价（输入一边的数量，看另一边要多少），也可以把 `transactions` 交给钱包自己发送
+- `addLiquidity` / `removeLiquidity` / `collectFees`：构建后签名发送，钱包与 `/write` 的 `batchCall` 相同（私钥、ethers Signer、浏览器钱包；Tron 上还可以是 tronWeb / tronwallet-adapter）。授权不够时先发授权交易，等它确认后再发主交易；授权失败时不发主交易
+
+```ts
+import { NATIVE_TOKEN, Provider } from '@w3lib/evm-batch-call'
+import { getLpPositions } from '@w3lib/evm-batch-call/lp'
+import { addLiquidity, buildAddLiquidity, collectFees, removeLiquidity } from '@w3lib/evm-batch-call/liquidity'
+
+const multi = new Provider(56, rpc)
+
+// 报价：新建 V3 仓位，价格区间是“1 个 tokenA 值多少个 tokenB”，给一边的数量
+const plan = await buildAddLiquidity(multi, owner, {
+  protocol: 'pancakeswap-v3', tokenA: WBNB, tokenB: USDT, fee: 500,
+  priceLower: 550, priceUpper: 650,              // 或 fullRange: true，或 tickLower / tickUpper
+  amountAFormatted: '1',                         // 或 amountA（最小单位）；也可以两边都给
+})
+// { version: 'v3', token0, token1, tickLower, tickUpper, tick, price, liquidity,
+//   amount0Formatted, amount1Formatted,            // 按当前价格预计存入的数量
+//   amount0Max, amount1Max, native: null, value: '0',
+//   transactions: [{ kind: 'approve', to: USDT, data, value: '0', token, spender, amount }, …, { kind: 'add', to: positionManager, data, value }] }
+
+// 发送：主币直接用 NATIVE_TOKEN（V2 / V3 换成包装币、附带主币支付；V4 是主币池子）
+const { status, tokenId, results } = await addLiquidity(multi, privateKey, {
+  protocol: 'uniswap-v2', tokenA: NATIVE_TOKEN, tokenB: USDT, amountAFormatted: '0.5',
+})
+
+// 已有仓位：直接用 getLpPositions 的结果（或 { protocol, tokenId } / { pool }）
+const [position] = await getLpPositions(owner, { chainId: 56 })
+await addLiquidity(multi, privateKey, { position, amount0Formatted: '0.1' })     // 追加，另一边按当前价格算
+await removeLiquidity(multi, privateKey, { position, percent: 50 })              // 按比例移除（V3 / V4 同时领取全部手续费）
+await removeLiquidity(multi, privateKey, { position, burn: true }, { native: true }) // 全部移除、销毁 NFT，包装币换成主币
+await collectFees(multi, privateKey, { position })                               // 只领取手续费
+```
+
+| | V2 | V3 | V4 |
+| --- | --- | --- | --- |
+| 新建 / 追加 | Router `addLiquidity(ETH)`，池子不存在时创建（两边数量都要给） | `mint` / `increaseLiquidity`；池子不存在时传 `initialPrice` 创建 | `MINT_POSITION` / `INCREASE_LIQUIDITY`；池子没初始化时传 `initialPrice` |
+| 移除 | Router `removeLiquidity(ETH)`，先授权 LP 代币 | `decreaseLiquidity` + `collect`（+ `burn`），用 multicall 合成一笔 | `DECREASE_LIQUIDITY` / `BURN_POSITION` + `TAKE_PAIR` |
+| 授权 | 代币授权给 Router | 代币授权给仓位合约 | 代币授权给 Permit2，再在 Permit2 里授权给仓位合约（30 天有效） |
+| 主币 | `native: true` 或 `tokenA` 传主币：包装币那一边用主币 | 同 V2（`refundETH` / `unwrapWETH9` + `sweepToken`） | 主币池子（`currency0` 是零地址）直接用主币 |
+| 手续费 | 已计入 LP 份额 | 追加不领取；移除时一并领取，`collectFees` 单独领取 | 修改流动性时自动领取（计划里的 `fees0` / `fees1`） |
+
+选项（构建和发送都可以传）：
+
+- `slippage`：价格滑点，默认 `0.005`（0.5%）。V2 是数量 × (1 − 滑点)；V3 / V4 按价格在 `[p × (1 − s), p × (1 + s)]` 内变动时的数量算：V3 添加给出 `amountMin`（三个价格下合约实际会用掉的最小值），V4 添加给出 `amountMax`（会多授权 / 附带一点，用不完的不扣、主币退回），移除给出 `amount0Min` / `amount1Min`
+- `deadline`：交易有效期（秒），默认 1200；`recipient`：收到 LP 代币 / NFT / 移除的代币的地址，默认发送者
+- `approve`：`'exact'`（默认，本次需要的数量）或 `'max'`。已有非零但不够的额度直接改成新额度；只有 Ethereum 上的 USDT 等要求先归零的代币才先 approve 0（有的代币反过来不允许 approve 0）
+- `native`：V2 / V3 的包装币那一边用主币支付 / 收取（新建时 `tokenA` / `tokenB` 传主币地址会自动开启）
+- `protocols`：内置表里没有的协议（自己的 `LpProtocol`，V2 要带 `router`）；`hookData`：V4 传给 hooks 的数据
+- 发送时还有 `/write` 的发送参数（`wait`、`timeout`、`gasPrice`、`signal`、`onUpdate`…）和 `checkBalance`（默认 true：代币按预计数量、主币按 `value` 检查余额，不够时直接报错，不发交易）
+
+数值：
+
+- **流动性**：V3 / V4 的 `liquidity` 与合约算出来的逐位一致；V2 的 LP 数量和移除数量已按协议手续费算过（`feeTo` 开启时每次添加 / 移除前先给手续费地址增发 LP：比例看 `LpProtocol.protocolFee`：内置的 Uniswap / SushiSwap / SunSwap 是 `'1/6'`，PancakeSwap 是 `'8/25'`；自定义协议没填时按 `'8/25'` 偏保守地算），Uniswap V2 和 SunSwap V2 上与实际逐位一致
+- **数量**：添加时 `amount0` / `amount1` 是按当前价格实际会用掉的（V2 与 Router 的取整一致；给了的一边可能因为取整少用几 wei），`amount0Max` / `amount1Max` 是传给合约的上限；移除时是按当前价格能拿到的（不含手续费），`fees0` / `fees1` 是一并领取的手续费
+- **区间**：价格按 tokenB / tokenA 给，换算成池子的 tick（token1 / token0 方向，tokenA 是 token1 时自动取倒数），再取最近的可用 tick（`tickSpacing` 的整数倍）；计划里的 `priceLower` / `priceUpper` 是取整后的实际区间（token1 / token0）。价格在区间外时只需要一种代币，给错了会报错并说明需要哪一种
+- **新仓位的 tokenId**：发送后从回执里读（EVM 上主交易 confirmed 时）；Tron 上为 null，用 `getLpPositions` 查
+- 往已有仓位追加、移除、领取都会先确认发送者是仓位的所有者（V3 也可以是被授权的 operator），不是时构建就报错（V3 的合约允许任何人往别人的仓位里加流动性，tokenId 写错时代币会白送给别人）
+- **V4 的上限可能超过给的数量**：V4 直接指定流动性，`amountMax` 是价格在滑点范围内最不利时需要的数量（与 Uniswap 的 SDK 相同），授权和附带的主币按它给，实际只扣按成交价格算的部分、主币多余的退回。主币池子要求余额够 `value`（= `amount0Max`），给的数量接近全部余额时请留出这部分或调小滑点。V3 传给合约的就是给的数量，不会超出
+- `dryRun: true` 时如果需要授权，主交易会预估失败（授权还没上链）；只想看数量用 `build*`
+
+核对方式：EVM 在 Base 主网分叉（anvil）上真实发交易，覆盖 Uniswap V2 / V3 / V4 和 PancakeSwap V3 的新建、追加、部分移除、全部移除并销毁；Tron 以近期真实用户的身份在主网预执行（SunSwap V2 添加 / 移除、V3 移除 / 追加），结果与计划逐位核对。
+
+**局限**：手续费转账代币（fee-on-transfer）不支持；V4 的 hooks 如果额外收取 / 返还代币，计划里的数量不含这部分（交易仍按 `amountMax` / `amountMin` 保护）；PancakeSwap 质押到农场的仓位要先取出。
+
+打包：在已经用到 `Provider` 的基础上，只用 `build*` 约增加 40KB（minify，gzip 约 13KB），加上发送约 77KB（gzip 约 26KB，其中大部分是 `/write` 的发送代码），均不含 ethers。
+
 
 ## 功能
 
@@ -655,6 +728,10 @@ await router.swap.staticCall(params, { value })
 ```bash
 pnpm test              # 单元测试（mock 节点，不需要网络）
 pnpm test:live         # 连真实节点：BSC / Ethereum / Tron 主网（BSC_RPC / ETH_RPC / TRON_HOST / TRON_API_KEY 可覆盖）
+pnpm test:live:lp      # LP 仓位连主网核对（Ethereum / BSC / Base）
+pnpm test:live:liquidity   # SunSwap 加减流动性：在 Tron 主网上以真实用户的地址模拟（不发送）
+pnpm test:fork         # 加减流动性在主网分叉上真实执行：先 anvil --fork-url https://mainnet.base.org --port 18545，再带 FORK_RPC=http://127.0.0.1:18545
+pnpm demo              # 本地运行 demo（demo/，直接用 src 的源码）
 pnpm build             # 编译到 dist
 pnpm build:contracts   # 修改 contracts/ 后重新生成 src/deployless.ts
 pnpm check:rpc         # 检查内置公共节点表的可用性（--chain=56 只查一条链）
