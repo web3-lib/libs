@@ -90,6 +90,82 @@
       </section>
 
       <section class="card">
+        <h2>添加 / 移除流动性 <small class="muted">子路径 /liquidity：build* 只构建（报价 + 要执行的指令），连接钱包后可以直接发送</small></h2>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（只构建时用上面“地址”栏的地址）</span>
+            <button id="connectWallet">连接钱包</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="liqAction">操作</label>
+          <select id="liqAction">
+            <option value="new">新建仓位（CLMM / Whirlpool）/ 加入池子（AMM）</option>
+            <option value="add">往已有仓位追加</option>
+            <option value="remove">移除</option>
+            <option value="collect">领取手续费和奖励（CLMM / Whirlpool）</option>
+          </select>
+        </div>
+        <div id="liqNew">
+          <div class="row">
+            <label for="liqProtocol">协议</label>
+            <select id="liqProtocol"></select>
+          </div>
+          <div class="row">
+            <label for="liqPool">池子</label>
+            <input id="liqPool" placeholder="池子地址（选协议时填入这个协议的 SOL / USDC 池子）" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label>价格区间</label>
+            <div class="inline">
+              <input id="liqPriceLower" placeholder="下限（1 个 token0 值多少 token1）" spellcheck="false" />
+              <input id="liqPriceUpper" placeholder="上限" spellcheck="false" />
+            </div>
+          </div>
+          <div class="row">
+            <label>数量</label>
+            <div class="inline">
+              <input id="liqAmountA" placeholder="token0 的数量（如 0.01）" spellcheck="false" />
+              <input id="liqAmountB" placeholder="或 token1 的数量" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+        <div id="liqExisting" hidden>
+          <div class="row">
+            <label for="liqPosition">仓位</label>
+            <select id="liqPosition"><option value="">先在上面“LP 仓位”里查询</option></select>
+          </div>
+          <div class="row" id="liqAddAmounts">
+            <label>数量</label>
+            <div class="inline">
+              <input id="liqAmount0" placeholder="token0 的数量" spellcheck="false" />
+              <input id="liqAmount1" placeholder="或 token1 的数量" spellcheck="false" />
+            </div>
+          </div>
+          <div class="row" id="liqRemoveOptions">
+            <label for="liqPercent">比例</label>
+            <div class="inline">
+              <input id="liqPercent" value="100" placeholder="移除的百分比（0~100）" spellcheck="false" />
+              <span class="checks"><label><input type="checkbox" id="liqBurn" /> 全部移除并关闭仓位（CLMM / Whirlpool，退回租金）</label></span>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="checks"><label>滑点 <input id="liqSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
+          <span class="checks"><label><input type="checkbox" id="liqNative" checked /> SOL 那一边自动包装 / 解包</label></span>
+          <button class="primary" id="runLiqBuild">报价（只构建）</button>
+          <button class="primary" id="runLiqSend">发送（钱包确认）</button>
+          <span class="stats" id="liqStats"></span>
+        </div>
+        <p class="hint">
+          集中流动性不填价格区间时是全区间（AMM 没有区间，给一边的数量，另一边按储备比例）；报价结果里有池子当前的价格。
+          发送会在钱包里确认，交易真实上链，请先用小额试。新建仓位时会生成仓位 NFT 的临时密钥，由本页面一起签名。
+        </p>
+        <div class="result" id="liqResult"></div>
+      </section>
+
+      <section class="card">
         <h2>NFT <small class="muted">getNfts / getNftOwners / getOwnerNfts：Metaplex 元数据、持有人</small></h2>
         <div class="row">
           <label for="nftMints">mint</label>

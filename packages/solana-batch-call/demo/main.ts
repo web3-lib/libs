@@ -8,11 +8,30 @@ import {
   getOwnerNfts,
   getOwnerTokens,
   getTokens,
+  SolanaClient,
+  formatUnits,
   onRequest,
   type NftDetails,
   type RequestEvent,
 } from '@w3lib/solana-batch-call'
-import { getLpPositions } from '@w3lib/solana-batch-call/lp'
+import {
+  addLiquidity,
+  buildAddLiquidity,
+  buildCollectFees,
+  buildRemoveLiquidity,
+  collectFees,
+  removeLiquidity,
+  type SolanaAddLiquidityParams,
+  type SolanaLiquidityOptions,
+  type SolanaLiquidityPlan,
+  type SolanaLiquidityResult,
+  type SolanaLiquidityStepResult,
+  type SolanaRemoveLiquidityParams,
+} from '@w3lib/solana-batch-call/liquidity'
+import { SOLANA_LP_PROTOCOLS, getLpPositions, type SolanaLpPosition, type SolanaLpProtocol } from '@w3lib/solana-batch-call/lp'
+import { createWallet } from '@w3lib/wallet'
+import { solana } from '@w3lib/wallet/solana'
+import { createWalletModal } from '@w3lib/wallet/ui'
 
 // ---- 示例数据 ----
 
@@ -326,7 +345,8 @@ bind('runLp', 'lp', async () => {
   const node = mints.length ? nodeOptions() : indexedNode()
   const prices = $<HTMLInputElement>('lpPrices').checked
   let priceError: unknown = null
-  const list = await getLpPositions(owner(), {
+  const from = owner()
+  const list = await getLpPositions(from, {
     ...node,
     ...(mints.length ? { mints } : {}),
     ...(pools.length ? { pools } : {}),
@@ -335,22 +355,15 @@ bind('runLp', 'lp', async () => {
       priceError = err
     },
   })
+  setPositions(list, from)
   const usd = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`)
-  // 价格可能很小（如 meme 币对 SOL），按有效数字显示
-  const price = (v: number | null) => {
-    if (v === null) return '—'
-    // 只去掉小数部分末尾的 0（150000 不能变成 15）
-    const [mantissa = '', exponent] = v.toPrecision(6).split('e')
-    const trimmed = mantissa.includes('.') ? mantissa.replace(/\.?0+$/, '') : mantissa
-    return exponent === undefined ? trimmed : `${trimmed}e${exponent}`
-  }
   return {
     data: list,
     view: withPriceWarning(
       table(
         ['协议', '交易对', '数量', '未领取手续费', '区间 / 份额', '价值', '仓位'],
         list.map((p) => {
-          const pair = `${p.token0.symbol ?? '?'} / ${p.token1.symbol ?? '?'}`
+          const pair = pairOf(p)
           const amounts = `${amount(p.amount0Formatted)} ${p.token0.symbol ?? ''} + ${amount(p.amount1Formatted)} ${p.token1.symbol ?? ''}`
           if (p.type === 'amm') {
             return [
@@ -373,6 +386,16 @@ bind('runLp', 'lp', async () => {
   }
 })
 
+const pairOf = (p: SolanaLpPosition) => `${p.token0.symbol ?? '?'} / ${p.token1.symbol ?? '?'}`
+
+/** 价格按有效数字显示（如 meme 币对 SOL 的价格很小）；只去掉小数部分末尾的 0（150000 不能变成 15） */
+function price(v: number | null): string {
+  if (v === null) return '—'
+  const [mantissa = '', exponent] = v.toPrecision(6).split('e')
+  const trimmed = mantissa.includes('.') ? mantissa.replace(/\.?0+$/, '') : mantissa
+  return exponent === undefined ? trimmed : `${trimmed}e${exponent}`
+}
+
 /** 价格服务出错时在结果上方提示（这时价值列显示 —，但不是代币没有价格） */
 function withPriceWarning(view: Node, error: unknown): Node {
   if (error === null) return view
@@ -383,3 +406,251 @@ function withPriceWarning(view: Node, error: unknown): Node {
   wrap.append(note, view)
   return wrap
 }
+
+// ---- 添加 / 移除流动性（子路径 /liquidity） ----
+
+/** 各协议的示例池子（SOL / USDC；CPMM 是 Raydium 上的一个活跃池子） */
+const SAMPLE_POOLS: Record<SolanaLpProtocol, string> = {
+  'raydium-clmm': '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv',
+  'orca-whirlpool': 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE',
+  'raydium-amm': '58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2',
+  'raydium-cpmm': '47hq28mcL7q5GhBg7epyGF2dnuJd4MKFt8QhT7CzYUp4',
+}
+
+const liq = {
+  action: $<HTMLSelectElement>('liqAction'),
+  protocol: $<HTMLSelectElement>('liqProtocol'),
+  pool: $<HTMLInputElement>('liqPool'),
+  priceLower: $<HTMLInputElement>('liqPriceLower'),
+  priceUpper: $<HTMLInputElement>('liqPriceUpper'),
+  amountA: $<HTMLInputElement>('liqAmountA'),
+  amountB: $<HTMLInputElement>('liqAmountB'),
+  position: $<HTMLSelectElement>('liqPosition'),
+  amount0: $<HTMLInputElement>('liqAmount0'),
+  amount1: $<HTMLInputElement>('liqAmount1'),
+  percent: $<HTMLInputElement>('liqPercent'),
+  burn: $<HTMLInputElement>('liqBurn'),
+  slippage: $<HTMLInputElement>('liqSlippage'),
+  native: $<HTMLInputElement>('liqNative'),
+}
+
+// 钱包：Solana 的 Wallet Standard 钱包（Phantom、Solflare、Backpack…），连接弹窗用 @w3lib/wallet/ui
+const wallet = createWallet({ connectors: [solana()] })
+const modal = createWalletModal(wallet)
+const connection = () => wallet.getConnection('solana')
+
+function renderWallet() {
+  const c = connection()
+  $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只构建时用上面“地址”栏的地址）'
+  $('connectWallet').textContent = c ? '切换 / 断开' : '连接钱包'
+}
+wallet.subscribe(() => renderWallet())
+void wallet.ready.then(renderWallet)
+$('connectWallet').addEventListener('click', () => void modal.open('solana'))
+
+// 同一个节点复用客户端（自动合并请求）
+let liqClient: { rpc: string; client: SolanaClient } | null = null
+function liquidityClient(): SolanaClient {
+  if (liqClient?.rpc !== settings.rpc) liqClient = { rpc: settings.rpc, client: new SolanaClient(settings.rpc || undefined) }
+  return liqClient.client
+}
+
+/** 上一次“查询 LP”的结果：追加、移除、领取从里面选仓位 */
+let lastPositions: SolanaLpPosition[] = []
+/** 仓位是哪个地址的（查询“LP 仓位”时的地址）：追加、移除、领取要用这个地址 */
+let positionsOwner = ''
+
+function setPositions(list: SolanaLpPosition[], of: string) {
+  lastPositions = list
+  positionsOwner = of
+  const options = list.map((p, i) => new Option(`${p.protocolName} · ${pairOf(p)} · ${p.type === 'amm' ? `份额 ${(p.share * 100).toPrecision(3)}%` : `仓位 ${p.positionMint.slice(0, 4)}…${p.positionMint.slice(-4)}`}`, String(i)))
+  liq.position.replaceChildren(...(options.length ? options : [new Option('先在上面“LP 仓位”里查询（用同一个地址）', '')]))
+}
+
+for (const [id, info] of Object.entries(SOLANA_LP_PROTOCOLS)) liq.protocol.append(new Option(`${info.name}（${info.type === 'clmm' ? '集中流动性' : 'AMM'}）`, id))
+
+function applyProtocol() {
+  const id = liq.protocol.value as SolanaLpProtocol
+  liq.pool.value = SAMPLE_POOLS[id] ?? ''
+  const clmm = SOLANA_LP_PROTOCOLS[id]?.type === 'clmm'
+  liq.priceLower.disabled = liq.priceUpper.disabled = !clmm
+}
+
+function applyAction() {
+  const action = liq.action.value
+  $('liqNew').hidden = action !== 'new'
+  $('liqExisting').hidden = action === 'new'
+  $('liqAddAmounts').hidden = action !== 'add'
+  $('liqRemoveOptions').hidden = action !== 'remove'
+}
+
+liq.protocol.addEventListener('change', applyProtocol)
+liq.action.addEventListener('change', applyAction)
+liq.amountA.value = '0.01'
+setPositions([], '')
+applyProtocol()
+applyAction()
+
+const text = (input: HTMLInputElement) => input.value.trim() || undefined
+
+/**
+ * 构建 / 发送用的地址：连了钱包用钱包地址（追加、移除、领取时要和仓位的地址一致）；
+ * 没连钱包时，追加、移除、领取用仓位的地址，新建用“地址”栏的
+ */
+function liquidityFrom(walletAddress?: string): string {
+  if (liq.action.value === 'new') return walletAddress ?? owner()
+  if (walletAddress && positionsOwner && walletAddress !== positionsOwner) {
+    throw new Error(`仓位是 ${positionsOwner} 的，钱包是 ${walletAddress}：换成仓位的账户，或用钱包地址重新查询 LP 仓位`)
+  }
+  return walletAddress ?? positionsOwner
+}
+
+function selectedPosition(): SolanaLpPosition {
+  const p = lastPositions[Number(liq.position.value)]
+  if (!liq.position.value || !p) throw new Error('请先在“LP 仓位”里查询，再选一个仓位')
+  return p
+}
+
+/** 选填的数字：不填时为 undefined（用库的默认值），填了不是数字时报错 */
+function numberOf(input: HTMLInputElement, label: string): number | undefined {
+  const value = text(input)
+  if (value === undefined) return undefined
+  const n = Number(value)
+  if (!Number.isFinite(n)) throw new Error(`${label}不是数字：${value}`)
+  return n
+}
+
+function liquidityOptions(): SolanaLiquidityOptions {
+  const percent = numberOf(liq.slippage, '滑点')
+  if (percent !== undefined && !(percent >= 0 && percent < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
+  return { ...(percent === undefined ? {} : { slippage: percent / 100 }), native: liq.native.checked }
+}
+
+function addParams(): SolanaAddLiquidityParams {
+  if (liq.action.value === 'add') return { position: selectedPosition(), amount0Formatted: text(liq.amount0), amount1Formatted: text(liq.amount1) }
+  const protocol = liq.protocol.value as SolanaLpProtocol
+  const pool = text(liq.pool)
+  if (!pool) throw new Error('请填写池子地址')
+  const lower = text(liq.priceLower)
+  const upper = text(liq.priceUpper)
+  const clmm = SOLANA_LP_PROTOCOLS[protocol].type === 'clmm'
+  return {
+    protocol,
+    pool,
+    ...(clmm ? (lower || upper ? { priceLower: lower, priceUpper: upper } : { fullRange: true }) : {}),
+    amount0Formatted: text(liq.amountA),
+    amount1Formatted: text(liq.amountB),
+  }
+}
+
+function removeParams(): SolanaRemoveLiquidityParams {
+  const percent = numberOf(liq.percent, '移除比例')
+  if (percent !== undefined && !(percent > 0 && percent <= 100)) throw new Error('移除比例要在 0 ~ 100% 之间')
+  return { position: selectedPosition(), ...(percent === undefined ? {} : { percent }), burn: liq.burn.checked }
+}
+
+/** 表单 → 要调用的函数和参数（连接钱包之前先检查表单） */
+function liquidityRequest() {
+  const action = liq.action.value
+  const options = liquidityOptions()
+  if (action === 'new' || action === 'add') return { action: 'add' as const, params: addParams(), options }
+  if (action === 'remove') return { action: 'remove' as const, params: removeParams(), options }
+  return { action: 'collect' as const, params: { position: selectedPosition() }, options }
+}
+
+/** 原始结果里不显示新仓位 NFT 的临时私钥 */
+const withoutSecrets = (plan: SolanaLiquidityPlan) => ({ ...plan, signers: plan.signers.map((s) => ({ address: s.address, secretKey: '（不显示）' })) })
+
+/** 按最小单位的数量按精度换算（显示用） */
+function units(value: string | null, decimals: number | null): string {
+  if (value === null) return '—'
+  return decimals === null ? value : amount(formatUnits(BigInt(value), decimals))
+}
+
+function link(signature: string): Node {
+  const a = document.createElement('a')
+  a.href = `https://solscan.io/tx/${signature}`
+  a.target = '_blank'
+  a.rel = 'noopener'
+  a.textContent = `${signature.slice(0, 10)}…`
+  return a
+}
+
+const STEP_NAMES: Record<string, string> = { setup: '准备（代币账户 / tick 数组）', add: '添加', remove: '移除', collect: '领取' }
+
+function planView(plan: SolanaLiquidityPlan, results?: SolanaLiquidityStepResult[]): Node {
+  const s0 = plan.token0.symbol ?? 'token0'
+  const s1 = plan.token1.symbol ?? 'token1'
+  const both = (a: string | null, b: string | null) => `${units(a, plan.token0.decimals)} ${s0} + ${units(b, plan.token1.decimals)} ${s1}`
+  const collect = plan.action === 'collect'
+  const rows: Array<[string, string | null]> = [
+    ['协议', plan.protocolName],
+    ['交易对', `${s0} / ${s1}${plan.native ? `（${plan.native === 'token0' ? s0 : s1} 自动包装 / 解包）` : ''}`],
+    ['当前价格', plan.price === null ? null : `1 ${s0} = ${price(plan.price)} ${s1}`],
+    ['区间', plan.priceLower === null ? (plan.type === 'amm' ? '全区间（AMM）' : null) : `${price(plan.priceLower)} ~ ${price(plan.priceUpper)}（tick ${plan.tickLower} ~ ${plan.tickUpper}）`],
+    [plan.action === 'add' ? '预计存入' : '预计取回', collect ? null : both(plan.amount0, plan.amount1)],
+    ['上限', plan.amount0Max === null ? null : both(plan.amount0Max, plan.amount1Max)],
+    ['下限', plan.amount0Min === null || collect ? null : both(plan.amount0Min, plan.amount1Min)],
+    [collect ? '领取的手续费' : '一并领取的手续费', plan.fees0 === '0' && plan.fees1 === '0' && !collect ? null : both(plan.fees0, plan.fees1)],
+    ['挖矿奖励', plan.rewardMints.length ? `${plan.rewardMints.length} 种（数量要等交易执行后才知道）` : null],
+    [plan.type === 'amm' ? 'LP 数量' : '流动性', collect ? null : plan.liquidity],
+    ['新仓位 NFT', plan.action === 'add' && plan.signers.length ? plan.positionMint : null],
+  ]
+  const wrap = document.createElement('div')
+  wrap.append(
+    table(
+      ['项目', '值'],
+      rows.filter(([, v]) => v !== null),
+    ),
+    table(
+      ['#', '步骤', '指令数', ...(results ? ['状态', '交易签名'] : [])],
+      plan.steps.map((step, i) => {
+        const r = results?.[i]
+        return [
+          i + 1,
+          STEP_NAMES[step.kind] ?? step.kind,
+          step.instructions.length,
+          ...(results ? [r ? tag(r.status + (r.error ? `：${r.error}` : ''), r.status === 'confirmed' ? 'ok' : r.status === 'failed' || r.status === 'reverted' ? 'bad' : '') : '等待', r?.signature ? link(r.signature) : null] : []),
+        ]
+      }),
+    ),
+  )
+  return wrap
+}
+
+bind('runLiqBuild', 'liq', async () => {
+  const { action, params, options } = liquidityRequest()
+  const from = liquidityFrom(connection()?.address)
+  const client = liquidityClient()
+  const plan =
+    action === 'add'
+      ? await buildAddLiquidity(client, from, params, options)
+      : action === 'remove'
+        ? await buildRemoveLiquidity(client, from, params, options)
+        : await buildCollectFees(client, from, params, options)
+  return { data: withoutSecrets(plan), view: planView(plan) }
+})
+
+bind('runLiqSend', 'liq', async () => {
+  const { action, params, options } = liquidityRequest()
+  const c = connection() ?? (await modal.open('solana'))
+  if (!c) throw new Error('没有连接钱包')
+  liquidityFrom(c.address)
+  // Wallet Standard 钱包直接当签名器，指定连接的账户（新仓位 NFT 的临时密钥由库一起签）
+  const signer = { wallet: c.provider, account: c.address } as never
+  const progress = $('liqStats')
+  const sendOptions = { ...options, onUpdate: (r: SolanaLiquidityStepResult) => (progress.textContent = `第 ${r.index + 1} 步（${STEP_NAMES[r.kind] ?? r.kind}）：${r.status}`) }
+  const client = liquidityClient()
+  const result: SolanaLiquidityResult =
+    action === 'add'
+      ? await addLiquidity(client, signer, params, sendOptions)
+      : action === 'remove'
+        ? await removeLiquidity(client, signer, params, sendOptions)
+        : await collectFees(client, signer, params, sendOptions)
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `结果：${result.status}（可以在“LP 仓位”里重新查询）`
+  view.append(note, planView(result.plan, result.results))
+  return { data: { ...result, plan: withoutSecrets(result.plan) }, view }
+})
