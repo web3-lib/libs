@@ -169,6 +169,9 @@ importers:
       '@noble/curves':
         specifier: ^2.4.0
         version: 2.4.0
+      '@tonconnect/sdk':
+        specifier: 3.4.1
+        version: 3.4.1
       vite:
         specifier: ^8.3.4
         version: 8.3.4(esbuild@0.28.2)

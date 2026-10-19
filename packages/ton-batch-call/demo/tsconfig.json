@@ -7,6 +7,8 @@
     "allowImportingTsExtensions": true,
     "types": ["vite/client"],
     "paths": {
+      "@w3lib/wallet": ["../../wallet/src/index.ts"],
+      "@w3lib/wallet/*": ["../../wallet/src/*/index.ts"],
       "@w3lib/ton-batch-call": ["../src/index.ts"],
       "@w3lib/ton-batch-call/*": ["../src/subpaths/*.ts"]
     }

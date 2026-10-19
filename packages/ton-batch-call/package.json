@@ -71,6 +71,7 @@
   },
   "devDependencies": {
     "@noble/curves": "^2.4.0",
+    "@tonconnect/sdk": "3.4.1",
     "vite": "^8.3.4"
   }
 }

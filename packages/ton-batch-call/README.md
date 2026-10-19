@@ -8,7 +8,7 @@ pnpm add @w3lib/ton-batch-call
 
 只做查询时打包后约 13KB（minify，gzip 约 5KB），不带任何依赖；写操作在子路径 `/write`（见[批量写操作](#批量写操作)）。
 
-**在线 demo**：<https://web3-lib.github.io/libs/ton/>（余额、多个地址、Jetton 信息、LP 仓位、NFT，显示每次查询实际发出的 toncenter 请求）。本地运行：`pnpm --filter @w3lib/ton-batch-call demo`（http://localhost:5176）
+**在线 demo**：<https://web3-lib.github.io/libs/ton/>（余额、多个地址、Jetton 信息、LP 仓位、添加 / 移除流动性（报价，用 TON Connect 连接钱包后可以发送）、NFT，显示每次查询实际发出的 toncenter 请求）。本地运行：`pnpm --filter @w3lib/ton-batch-call demo`（http://localhost:5176）
 
 ## 快速上手
 

@@ -55,6 +55,8 @@ jobs:
       - run: pnpm --filter @w3lib/evm-batch-call demo:build
       - run: pnpm --filter @w3lib/solana-batch-call demo:build
       - run: pnpm --filter @w3lib/ton-batch-call demo:build
+        env:
+          DEMO_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/ton/
       - run: pnpm --filter @w3lib/sui-batch-call demo:build
       # 各 demo 用相对路径（base: './'），放进子目录就能用
       - name: Assemble site
