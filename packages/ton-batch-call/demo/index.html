@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/ton-batch-call demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M8 10h16L16 24z' fill='none' stroke='%23fff' stroke-width='2.5' stroke-linejoin='round'/%3E%3Cpath d='M16 10v14' stroke='%23fff' stroke-width='2.5'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/ton-batch-call <small>demo</small></h1>
+      <p>TON 批量查询：通过 toncenter v3 索引器，多个地址、多个 Jetton 合成一个请求，自动限频排队。下面每次查询都会显示实际发出的请求数。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>设置</h2>
+        <div class="row">
+          <label for="url">节点</label>
+          <input id="url" placeholder="toncenter v3 URL（可选，不填用 https://toncenter.com/api/v3；测试网填 testnet.toncenter.com）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="apiKey">API Key</label>
+          <input id="apiKey" placeholder="toncenter API Key（可选；没有时每秒 1 次请求，查询会慢一些）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="owner">地址</label>
+          <div class="inline">
+            <input id="owner" placeholder="要查询的钱包地址（UQ… / EQ… / 0:…）" spellcheck="false" />
+            <button id="sample">示例地址</button>
+          </div>
+        </div>
+        <p class="hint">
+          没有 API Key 时 toncenter 限制每秒 1 次请求，库会自动排队（LP 查询要读多个池子，可能要十几秒）。API Key 在 Telegram 的 @tonapibot 免费申请。设置保存在本地浏览器。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>余额 <small class="muted">getBalances：TON + Jetton，一次 accountStates + 一次 jetton/wallets</small></h2>
+        <div class="row">
+          <label for="balanceTokens">Jetton</label>
+          <textarea id="balanceTokens" placeholder="Jetton 主合约地址，每行一个（留空：返回持有的全部 Jetton）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runBalances">查询余额</button>
+          <span class="stats" id="balancesStats"></span>
+        </div>
+        <div class="result" id="balancesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>多个地址 <small class="muted">getMultiBalances / getWalletStates：TON + 指定 Jetton，钱包类型和 seqno</small></h2>
+        <div class="row">
+          <label for="multiOwners">地址</label>
+          <textarea id="multiOwners" placeholder="钱包地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runMulti">查询多个地址</button>
+          <span class="stats" id="multiStats"></span>
+        </div>
+        <div class="result" id="multiResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>Jetton 信息 <small class="muted">getJettons：名称 / symbol / 精度 / 总量 / 是否诈骗代币</small></h2>
+        <div class="row">
+          <label for="jettons">Jetton</label>
+          <textarea id="jettons" placeholder="Jetton 主合约地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runJettons">查询 Jetton</button>
+          <span class="stats" id="jettonsStats"></span>
+        </div>
+        <div class="result" id="jettonsResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：STON.fi v1 / v2、DeDust 的 LP Jetton，按份额算出撤出能拿到的数量</small></h2>
+        <div class="actions">
+          <button id="lpSample">示例仓位</button>
+          <span class="checks"><label><input type="checkbox" id="lpPrices" checked /> 美元价值（DefiLlama）</label></span>
+          <button class="primary" id="runLp">查询 LP</button>
+          <span class="stats" id="lpStats"></span>
+        </div>
+        <div class="result" id="lpResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>NFT <small class="muted">getNfts：地址持有的 NFT（含正在出售的），名称和图片取自索引器的元数据</small></h2>
+        <div class="row">
+          <label for="nftCollection">集合</label>
+          <input id="nftCollection" placeholder="只看这个集合（可选）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNft">查询 NFT</button>
+          <span class="stats" id="nftStats"></span>
+        </div>
+        <div class="result" id="nftResult"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/web3-lib/libs/tree/main/packages/ton-batch-call">源码和文档</a> ·
+      <a href="../">全部 demo</a>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
