@@ -144,6 +144,22 @@ importers:
         specifier: ^8.3.4
         version: 8.3.4(esbuild@0.28.2)
 
+  packages/sui-batch-call:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^1.8.0 || ^2.0.0
+        version: 2.4.0
+      '@scure/base':
+        specifier: ^2.4.0
+        version: 2.4.0
+    devDependencies:
+      '@noble/curves':
+        specifier: ^2.4.0
+        version: 2.4.0
+      vite:
+        specifier: ^8.3.4
+        version: 8.3.4(esbuild@0.28.2)
+
   packages/ton-batch-call:
     dependencies:
       '@noble/hashes':

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/sui-batch-call demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M16 6c4 5 7 8.5 7 12a7 7 0 0 1-14 0c0-3.5 3-7 7-12z' fill='%23fff'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/sui-batch-call <small>demo</small></h1>
+      <p>Sui 批量查询：浏览器里直接用 gRPC-web 访问全节点（Sui 已停用 JSON-RPC），对象按批读取、多个查询并发发出。下面每次查询都会显示实际发出的 gRPC 调用。</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>设置</h2>
+        <div class="row">
+          <label for="node">节点</label>
+          <input id="node" placeholder="gRPC-web URL（可选，不填用 https://fullnode.mainnet.sui.io）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="owner">地址</label>
+          <div class="inline">
+            <input id="owner" placeholder="要查询的地址（0x…）" spellcheck="false" />
+            <button id="sample">示例地址</button>
+          </div>
+        </div>
+        <p class="hint">内置的公共全节点限频严，频繁查询时请填自己的节点或服务商的 gRPC-web 地址。设置保存在本地浏览器。</p>
+      </section>
+
+      <section class="card">
+        <h2>余额 <small class="muted">getBalances：留空时 ListBalances 返回全部代币；指定代币时每个一次 GetBalance，并发发出</small></h2>
+        <div class="row">
+          <label for="balanceCoins">代币</label>
+          <textarea id="balanceCoins" placeholder="代币类型，每行一个（如 0x2::sui::SUI；留空：返回持有的全部代币）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runBalances">查询余额</button>
+          <span class="stats" id="balancesStats"></span>
+        </div>
+        <div class="result" id="balancesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币信息 <small class="muted">getCoins：名称 / symbol / 精度 / 总供应量（GetCoinInfo）</small></h2>
+        <div class="row">
+          <label for="coinTypes">代币</label>
+          <textarea id="coinTypes" placeholder="代币类型，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runCoins">查询代币</button>
+          <span class="stats" id="coinsStats"></span>
+        </div>
+        <div class="result" id="coinsResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：Cetus、Bluefin、Momentum、Turbos、Magma、FlowX 的 CLMM 仓位，数量、手续费、奖励由合约在只读调用里算出</small></h2>
+        <div class="row">
+          <label for="lpPositions">仓位</label>
+          <textarea id="lpPositions" placeholder="仓位对象 ID，每行一个（可选；留空时扫描地址拥有的仓位对象）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <select id="lpSample" aria-label="示例仓位">
+            <option value="">示例仓位…</option>
+          </select>
+          <span class="checks"><label><input type="checkbox" id="lpPrices" checked /> 美元价值（DefiLlama）</label></span>
+          <button class="primary" id="runLp">查询 LP</button>
+          <span class="stats" id="lpStats"></span>
+        </div>
+        <div class="result" id="lpResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>NFT <small class="muted">getNfts：地址拥有的 NFT，名称、图片取自节点渲染的 Display</small></h2>
+        <div class="row">
+          <label for="nftType">类型</label>
+          <input id="nftType" placeholder="只看这个类型或前缀（可选，如 0x…::suins_registration::SuinsRegistration）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNft">查询 NFT</button>
+          <span class="stats" id="nftStats"></span>
+        </div>
+        <div class="result" id="nftResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>对象 <small class="muted">getObjects：按 ID 读对象（BatchGetObjects，每次 50 个），不存在的为 null</small></h2>
+        <div class="row">
+          <label for="objectIds">对象</label>
+          <textarea id="objectIds" placeholder="对象 ID，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runObjects">查询对象</button>
+          <span class="stats" id="objectsStats"></span>
+        </div>
+        <div class="result" id="objectsResult"></div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <a href="https://github.com/web3-lib/libs/tree/main/packages/sui-batch-call">源码和文档</a> ·
+      <a href="../">全部 demo</a>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
