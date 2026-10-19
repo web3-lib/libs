@@ -88,6 +88,90 @@
       </section>
 
       <section class="card">
+        <h2>添加 / 移除流动性 <small class="muted">子路径 /liquidity：build* 只构建（报价 + 要发送的交易），连接钱包后可以直接发送</small></h2>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（只构建时用上面“地址”栏的地址）</span>
+            <button id="connectWallet">连接钱包</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="liqAction">操作</label>
+          <select id="liqAction">
+            <option value="new">新建仓位（V3 / V4）/ 加入池子（V2）</option>
+            <option value="add">往已有仓位追加</option>
+            <option value="remove">移除</option>
+            <option value="collect">领取手续费（V3 / V4）</option>
+          </select>
+        </div>
+        <div id="liqNew">
+          <div class="row">
+            <label for="liqProtocol">协议</label>
+            <select id="liqProtocol"></select>
+          </div>
+          <div class="row">
+            <label for="liqTokenA">tokenA</label>
+            <input id="liqTokenA" placeholder="代币地址；主币填 native" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label for="liqTokenB">tokenB</label>
+            <input id="liqTokenB" placeholder="代币地址；主币填 native" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label for="liqFee">手续费档位</label>
+            <input id="liqFee" placeholder="V3 / V4：百万分之一，如 500 = 0.05%、3000 = 0.3%（V2 不用填）" spellcheck="false" />
+          </div>
+          <div class="row">
+            <label>价格区间</label>
+            <div class="inline">
+              <input id="liqPriceLower" placeholder="下限（1 个 tokenA 值多少 tokenB）" spellcheck="false" />
+              <input id="liqPriceUpper" placeholder="上限" spellcheck="false" />
+            </div>
+          </div>
+          <div class="row">
+            <label>数量</label>
+            <div class="inline">
+              <input id="liqAmountA" placeholder="tokenA 的数量（如 0.01）" spellcheck="false" />
+              <input id="liqAmountB" placeholder="或 tokenB 的数量" spellcheck="false" />
+            </div>
+          </div>
+        </div>
+        <div id="liqExisting" hidden>
+          <div class="row">
+            <label for="liqPosition">仓位</label>
+            <select id="liqPosition"><option value="">先在上面“LP 仓位”里查询</option></select>
+          </div>
+          <div class="row" id="liqAddAmounts">
+            <label>数量</label>
+            <div class="inline">
+              <input id="liqAmount0" placeholder="token0 的数量" spellcheck="false" />
+              <input id="liqAmount1" placeholder="或 token1 的数量" spellcheck="false" />
+            </div>
+          </div>
+          <div class="row" id="liqRemoveOptions">
+            <label for="liqPercent">比例</label>
+            <div class="inline">
+              <input id="liqPercent" value="100" placeholder="移除的百分比（0~100）" spellcheck="false" />
+              <span class="checks"><label><input type="checkbox" id="liqBurn" /> 全部移除并销毁仓位 NFT（V3 / V4）</label></span>
+            </div>
+          </div>
+        </div>
+        <div class="actions">
+          <span class="checks"><label>滑点 <input id="liqSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
+          <span class="checks"><label><input type="checkbox" id="liqNative" /> 包装币那一边用主币（V2 / V3）</label></span>
+          <button class="primary" id="runLiqBuild">报价（只构建）</button>
+          <button class="primary" id="runLiqSend">发送（钱包确认）</button>
+          <span class="stats" id="liqStats"></span>
+        </div>
+        <p class="hint">
+          新建仓位不填价格区间时是全区间；报价结果里有池子当前的价格，可以据此再填区间。发送会在钱包里逐笔确认（授权在前），交易真实上链，请先用小额试。
+          已有仓位的追加 / 移除要由仓位的所有者发送。
+        </p>
+        <div class="result" id="liqResult"></div>
+      </section>
+
+      <section class="card">
         <h2>NFT <small class="muted">子路径 /nft：集合信息、持有人、元数据地址</small></h2>
         <div class="row">
           <label for="nftContract">合约</label>

@@ -260,3 +260,14 @@ summary {
 .foot a {
   color: var(--accent);
 }
+
+/* 添加 / 移除流动性 */
+input.small {
+  width: 4.5em;
+  margin: 0 4px;
+}
+.wallet-info {
+  align-self: center;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
