@@ -8,7 +8,7 @@ pnpm add @w3lib/sui-batch-call
 
 只做查询时打包后约 17KB（minify，gzip 约 7KB），不带任何依赖；写操作在子路径 `/write`（见[批量写操作](#批量写操作)）。
 
-**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（集中流动性、DLMM、传统 AMM、多币池，12 个协议）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
+**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（集中流动性、DLMM、传统 AMM、多币池，12 个协议）、添加 / 移除流动性（报价，连接浏览器钱包后可以发送）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
 
 ## 快速上手
 
