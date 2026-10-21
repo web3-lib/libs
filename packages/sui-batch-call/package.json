@@ -1,6 +1,6 @@
 {
   "name": "@w3lib/sui-batch-call",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Batched Sui reads and writes over gRPC-web: balances, coin metadata, objects, NFTs (Display); batch transfers, sponsored collection, batch transactions; LP positions and add / remove liquidity on Sui CLMM, DLMM, AMM and multi-coin (Aftermath) DEXes; swaps routed across them (quoted by simulation); coin risk checks. No Sui SDK dependency.",
   "keywords": [
     "sui",
