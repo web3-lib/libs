@@ -1,4 +1,5 @@
 import { createWallet, type Connector, type Namespace, type WalletEvent, type WalletGroup, type WalletManager, type WalletOption } from '@w3lib/wallet'
+import { createNonce, parseSignInMessage, signIn, type SignInProof } from '@w3lib/wallet/auth'
 import { arbitrum, base, bsc, ethereum, polygon } from '@w3lib/wallet/chains'
 import { evm } from '@w3lib/wallet/evm'
 import { solana } from '@w3lib/wallet/solana'
@@ -193,6 +194,97 @@ function renderState() {
   const connected = wallet.connected
   for (const id of ['sign', 'disconnect', 'disconnectAll']) $<HTMLButtonElement>(id).disabled = !connected
   $<HTMLButtonElement>('switch').disabled = !wallet.getConnection('evm')
+  renderAuth()
+}
+
+// ---- 登录签名（/auth 签名，/verify 验证） ----
+
+// 模拟后端：发出去、还没用过的 nonce（真实后端存在数据库 / redis，验证通过后删除）
+const issuedNonces = new Set<string>()
+let lastProof: SignInProof | null = null
+
+function authOutput(text: string, error = false) {
+  const el = $('authOutput')
+  el.hidden = false
+  el.textContent = text
+  el.classList.toggle('error', error)
+}
+
+/** 选链的下拉：只列启用的链，默认选当前的链；没连接的链能选，点按钮时会提示 */
+function renderAuth() {
+  const select = $<HTMLSelectElement>('authChain')
+  const previous = select.value
+  select.replaceChildren(
+    ...wallet.namespaces.map((n) => h('option', { value: n }, `${LABELS[n]}${wallet.getConnection(n) ? '' : '（未连接）'}`)),
+  )
+  const active = wallet.getState().active
+  select.value = wallet.namespaces.includes(previous as Namespace) ? previous : active && wallet.namespaces.includes(active) ? active : (wallet.namespaces[0] ?? '')
+  const namespace = select.value as Namespace
+  const connection = namespace ? wallet.getConnection(namespace) : null
+  $('authHint').textContent = !namespace ? '没有启用任何链：先在设置里勾选链。' : connection ? '' : `${LABELS[namespace]} 还没连接钱包：先连接，再签名。`
+  $<HTMLButtonElement>('authSign').disabled = !connection
+  $<HTMLButtonElement>('authVerify').disabled = !lastProof
+  $<HTMLButtonElement>('authTamper').disabled = !lastProof
+}
+
+/** 后端的验证：动态加载 /verify（它带密码学库，真实项目只在后端用） */
+async function verifyProof(proof: SignInProof, label: string) {
+  try {
+    const { verifySignIn } = await import('@w3lib/wallet/verify')
+    const connection = wallet.getConnection(proof.namespace)
+    const result = await verifySignIn(proof, {
+      domain: location.host,
+      // 真实后端传自己要求的链；demo 取签名消息里写的链（不跟当前连接走：签名后切链、断开都不影响验证）
+      chainId: proof.namespace === 'evm' ? Number(parseSignInMessage(proof.message).chainId) : parseSignInMessage(proof.message).chainId,
+      // 传函数：签名验证通过后才调用，查到就删除，只能用一次
+      nonce: (n) => issuedNonces.delete(n),
+      // TON 的签名只能用公钥验证：真实后端读链上钱包合约的 get_public_key，demo 直接用 TON Connect 连接信息里的
+      tonPublicKey: async () => {
+        const key = (connection?.provider as { wallet?: { account?: { publicKey?: string } } } | undefined)?.wallet?.account?.publicKey
+        if (!key) throw new Error('This TON wallet did not provide a public key')
+        return key
+      },
+    })
+    log(`${label}  ${proof.namespace}  ${result.ok ? 'ok' : result.error}`)
+    authOutput(
+      result.ok ? `${label}：验证通过\n账户（规范化地址）：${result.address}\nnonce 已作废，同一份签名再验一次会失败` : `${label}：验证失败\n${result.error}`,
+      !result.ok,
+    )
+  } catch (err) {
+    const e = err as { message?: string }
+    authOutput(`${label}：${e.message ?? String(err)}`, true)
+  }
+}
+
+$('authSign').addEventListener('click', async () => {
+  const namespace = $<HTMLSelectElement>('authChain').value as Namespace
+  const nonce = createNonce() // 真实场景由后端生成并记住
+  issuedNonces.add(nonce)
+  authOutput('请在钱包中确认登录签名…')
+  try {
+    const proof = await signIn(wallet, namespace, { domain: location.host, uri: location.origin, nonce, statement: $<HTMLInputElement>('authStatement').value.trim() || undefined })
+    lastProof = proof
+    renderAuth()
+    authOutput(`登录消息：\n${proof.message}\n\n签名：\n${proof.signature}${proof.ton ? `\n\nTON signData：${JSON.stringify(proof.ton)}` : ''}\n\n（proof 原样发给后端，点“验证”看后端侧的结果）`)
+  } catch (err) {
+    issuedNonces.delete(nonce)
+    showAuthError(err)
+  }
+})
+
+$('authVerify').addEventListener('click', () => lastProof && void verifyProof(lastProof, '验证'))
+$('authTamper').addEventListener('click', () => {
+  if (!lastProof) return
+  // 改动签名过的消息里 statement 的一个字：后端必须拒绝
+  let message = lastProof.message.replace(/\n\n(.)/, (_, c: string) => `\n\n${c === 'X' ? 'Y' : 'X'}`)
+  // 没有 statement 时正则不匹配、消息没变：在末尾加一个空格，保证确实被改动
+  if (message === lastProof.message) message += ' '
+  void verifyProof({ ...lastProof, message }, '篡改后验证')
+})
+
+function showAuthError(err: unknown) {
+  const e = err as { code?: string; message?: string }
+  authOutput(`${e.code ?? 'error'}: ${e.message ?? String(err)}`, true)
 }
 
 // ---- 自己画的钱包列表 ----

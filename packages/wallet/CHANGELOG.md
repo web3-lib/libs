@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 钱包登录：`@w3lib/wallet/auth`（前端：`signIn`、`createSignInMessage` / `parseSignInMessage` / `createNonce`，EIP-4361 格式，其他链按 CAIP-122）和 `@w3lib/wallet/verify`（后端：`verifySignIn`，要求规范格式的消息，核对域名 / chainId / 时间 / 一次性 nonce 并验签，返回规范化的地址）。验签支持 EVM（含 EIP-1271 回调）、Solana、Sui（ed25519 / secp256k1 / secp256r1）、Tron、TON（TON Connect signData）
+- 新增依赖 `@noble/curves`、`@noble/hashes`（只在 `/verify` 里用到）
+
 ## 0.1.0
 
 ### 新功能

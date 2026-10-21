@@ -70,7 +70,30 @@
       </section>
 
       <section class="card">
-        <h2>自己画钱包列表 <small class="muted">不用自带弹窗：watchWallets / watchWalletGroups</small></h2>
+        <h2>登录签名 <small class="muted">SIWE / SIWS…：@w3lib/wallet/auth 签名，@w3lib/wallet/verify 验证</small></h2>
+        <div class="row">
+          <label for="authChain">用哪条链</label>
+          <select id="authChain" aria-label="用哪条链登录"></select>
+        </div>
+        <div class="row">
+          <label for="authStatement">statement</label>
+          <input id="authStatement" value="Sign in to @w3lib/wallet demo" />
+        </div>
+        <div class="actions">
+          <button id="authSign">构建消息并签名</button>
+          <button id="authVerify">验证（模拟后端）</button>
+          <button id="authTamper">改一个字再验证</button>
+        </div>
+        <p class="hint" id="authHint"></p>
+        <pre class="output" id="authOutput" hidden></pre>
+        <p class="hint">
+          五条链都支持。后端的 nonce 由 demo 内存里的集合代替：验证通过后作废，所以同一份签名验第二次会失败（防重放）。<br />
+          EVM 的 statement 只能用 ASCII 字符（EIP-4361）；TON 要钱包支持 signData，验证用的公钥取自 TON Connect 连接信息（真实后端要读链上钱包合约）。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>自己画钱包列表<small class="muted">不用自带弹窗：watchWallets / watchWalletGroups</small></h2>
         <div class="segmented" id="listKind">
           <button data-value="chain-first">按链</button>
           <button data-value="wallet-first">按钱包</button>

@@ -13,7 +13,7 @@
 - **错误统一**：用户拒绝、请求已挂起、没安装、链不支持… 都是带 `code` 的 `WalletError`
 - **按需打包、体积小**：每条链一个子路径，只用到的才打包
 
-**在线 demo**：<https://web3-lib.github.io/libs/wallet/>（自带弹窗的两种选择方式、浅色 / 深色主题、single / multi 模式、签名、切链、自己画钱包列表、事件日志）。本地运行：
+**在线 demo**：<https://web3-lib.github.io/libs/wallet/>（自带弹窗的两种选择方式、浅色 / 深色主题、single / multi 模式、签名、登录签名（SIWE / SIWS 等，签名后在浏览器里模拟后端验证）、切链、自己画钱包列表、事件日志）。本地运行：
 
 ```bash
 pnpm --filter @w3lib/wallet demo        # http://localhost:5173
@@ -30,6 +30,7 @@ pnpm --filter @w3lib/wallet demo        # http://localhost:5173
 - [事件](#事件)
 - [自己画连接弹窗](#自己画连接弹窗)
 - [签名、切链、断开](#签名切链断开)
+- [钱包登录](#钱包登录sign-in-with-ethereum--solana--)
 - [各条链的配置](#各条链的配置)
 - [连接模式、恢复和持久化](#连接模式恢复和持久化)
 - [错误处理](#错误处理)
@@ -444,6 +445,46 @@ wallet.setActive('solana')
 | TON | base64 | TON Connect 的 `signData`（text） |
 
 钱包不支持签名消息时抛 `unsupported`。
+
+## 钱包登录（Sign-In with Ethereum / Solana / …）
+
+前端用 `@w3lib/wallet/auth` 生成登录消息并让钱包签名，后端用 `@w3lib/wallet/verify` 验证。消息是 EIP-4361（SIWE）的格式，其他链按 CAIP-122 把链名换成 Solana / Sui / Tron / TON。
+
+```ts
+// 前端
+import { signIn } from '@w3lib/wallet/auth'
+
+const { nonce } = await fetch('/api/nonce').then((r) => r.json())     // 后端生成、记住的一次性随机串
+const proof = await signIn(wallet, 'evm', { domain: location.host, uri: location.origin, nonce, statement: 'Sign in to Example' })
+await fetch('/api/login', { method: 'POST', body: JSON.stringify(proof) })
+```
+
+```ts
+// 后端（Node / 边缘函数）
+import { verifySignIn } from '@w3lib/wallet/verify'
+
+const r = await verifySignIn(proof, { domain: 'example.com', chainId: 1, nonce: (n) => consumeNonce(n) })   // consumeNonce：查到就删除，只能用一次
+if (!r.ok) throw new Error(r.error)
+const user = r.address        // 规范化的地址（EVM 是 EIP-55 格式），用它作为账户的键
+```
+
+- `signIn` 用连接的地址和链拼消息（EVM 的 Chain ID 是当前链，其他链默认 `'mainnet'`），返回 `{ namespace, message, signature, address }`，原样发给后端
+- `verifySignIn` 先解析消息（必须是规范格式：用解析出的字段重新拼出的消息要和签名的原文逐字节相同，夹带字段、多余空白都不行），核对 `domain`、`chainId`（传了时）、时间（`Issued At` 最多 10 分钟前，`maxAge` 可改；有 `Expiration Time` / `Not Before` 时也要满足），再按链验签，最后检查 `nonce`。不会抛错，失败时返回 `{ ok: false, error }`
+- **nonce 必填，而且只能用一次**：传字符串时验证通过后要自己作废；推荐传函数，在函数里查数据库并删除（签名验证通过后才会调用，伪造的签名不会消耗掉别人的 nonce）
+- EVM 的 statement 只能用 ASCII 字母、数字、空格和 URI 标点（EIP-4361 的语法）：中文等字符会让钱包识别不出这是登录请求，也就不会提示“域名不符”的钓鱼警告。其他链没有这个限制；所有字段都不能含换行和控制字符
+- 也可以只用 `createSignInMessage` / `parseSignInMessage` / `createNonce` 自己拼、自己签
+
+各链的验签：
+
+| 链 | 方式 | 说明 |
+| --- | --- | --- |
+| EVM | `personal_sign`，secp256k1 恢复地址（拒绝 high-S） | 合约钱包（Safe、智能账户，EIP-1271）恢复不出地址，传 `verifyContract` 自己调用合约的 `isValidSignature`，同时要传 `chainId`；实现时要确认地址上有合约，并且返回值正好是 `0x1626ba7e`（对普通账户的 `eth_call` 也会“成功”） |
+| Solana | ed25519（严格模式，拒绝小阶公钥的伪造签名） | 地址就是公钥 |
+| Sui | `signPersonalMessage`：blake2b(intent ‖ BCS 消息) | 支持 ed25519 / secp256k1 / secp256r1，地址由公钥算出并核对；zkLogin、多签不支持 |
+| Tron | `signMessageV2`（`\x19TRON Signed Message:\n` 前缀 + keccak） | 恢复出 T 地址 |
+| TON | TON Connect `signData`（text） | 钱包会在签名里加上时间戳和域名（`proof.ton`），也会核对；地址校验 CRC 和测试网标记，返回原始格式 `0:…`。签名只能用公钥验证，传 `tonPublicKey(address)`，从链上读钱包合约的 `get_public_key` |
+
+`@w3lib/wallet/auth` 很小（约 2KB），不含密码学代码，放在前端；`@w3lib/wallet/verify` 依赖 `@noble/curves`、`@noble/hashes`（约 73KB，gzip 约 28KB），只在后端用。
 
 ## 各条链的配置
 
