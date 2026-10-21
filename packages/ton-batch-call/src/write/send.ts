@@ -273,13 +273,13 @@ export async function sendJobs(client: TonClient, jobs: readonly TxJob[], option
   return outcomes
 }
 
-interface GroupState {
+export interface GroupState {
   seqno: number
   deployed: boolean
 }
 
-/** 按版本签好的外部消息 */
-async function buildExternal(wallet: WalletContext, state: GroupState, messages: readonly SendMessage[], validUntil: number, fakeSignature: boolean): Promise<Cell> {
+/** 按版本签好的外部消息（fakeSignature：空签名，只用于模拟） */
+export async function buildExternal(wallet: WalletContext, state: GroupState, messages: readonly SendMessage[], validUntil: number, fakeSignature: boolean): Promise<Cell> {
   const version = wallet.version as WalletVersion
   const publicKey = wallet.publicKey
   let init: StateInit | null = null
@@ -492,23 +492,31 @@ async function nodeSeqno(client: TonClient, address: string, signal?: AbortSigna
 
 export interface TraceMessage {
   hash: string
+  source?: string | null
   destination?: string | null
   value?: string | null
+  /** 转发费里到目标时才收的部分（发出时已经从发送者扣了） */
+  fwd_fee?: string | null
   bounce?: boolean | null
   bounced?: boolean | null
   opcode?: string | null
-  message_content?: { hash?: string } | null
+  /** body：消息体的 BOC（base64） */
+  message_content?: { hash?: string; body?: string | null } | null
 }
 
 export interface TraceTx {
   hash: string
   account: string
+  lt?: string
   total_fees?: string
   description?: {
     aborted?: boolean
-    compute_ph?: { skipped?: boolean; success?: boolean; exit_code?: number; reason?: string }
-    action?: { success?: boolean; result_code?: number; skipped_actions?: number; no_funds?: boolean }
+    storage_ph?: { storage_fees_collected?: string }
+    compute_ph?: { skipped?: boolean; success?: boolean; exit_code?: number; reason?: string; gas_fees?: string }
+    action?: { success?: boolean; result_code?: number; skipped_actions?: number; no_funds?: boolean; total_fwd_fees?: string | null; total_action_fees?: string | null }
   }
+  account_state_before?: { balance?: string | null } | null
+  account_state_after?: { balance?: string | null } | null
   in_msg?: TraceMessage | null
   out_msgs?: TraceMessage[]
 }
@@ -597,7 +605,7 @@ export function evaluateTrace(
  * toncenter 的 emulateTrace：模拟外部消息引起的整条交易链（与 v3 接口同一个服务，路径 /api/emulate/v1）。
  * rejected：钱包不接受这条外部消息（签名、seqno、过期、余额不够付手续费等）；unavailable：模拟服务不可用
  */
-async function emulate(client: TonClient, ext: Cell, ignoreSignature: boolean, signal?: AbortSignal): Promise<{ trace: Trace | null; rejected: string | null; unavailable: string | null }> {
+export async function emulate(client: TonClient, ext: Cell, ignoreSignature: boolean, signal?: AbortSignal): Promise<{ trace: Trace | null; rejected: string | null; unavailable: string | null }> {
   try {
     const trace = await client.transport.post<Trace>('../emulate/v1/emulateTrace', { boc: ext.toBase64(), ignore_chksig: ignoreSignature }, { signal })
     if (!trace?.trace || !trace.transactions) return { trace: null, rejected: null, unavailable: 'unexpected response' }

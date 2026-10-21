@@ -10,6 +10,7 @@ import { formatUnits } from './format.js'
 import { runGetMethod, type Stack } from './getters.js'
 import { isNodeFault } from './http.js'
 import type { RequestOptions } from './http.js'
+import { defillamaPrices, type TonPriceSource } from './price.js'
 import { beginCell, type Cell } from './write/cell.js'
 
 export type TonLpProtocol = 'stonfi-v1' | 'stonfi-v2' | 'dedust'
@@ -22,10 +23,12 @@ export const TON_LP_PROTOCOLS: Readonly<Record<TonLpProtocol, { name: string }>>
 
 export const STONFI_V1_ROUTER = '0:779dcc815138d9500e449c5291e7f12738c23d575b5310000f6a253bd607384e'
 export const DEDUST_FACTORY = '0:5f0564fb5f604783db57031ce1cf668a88d4d4d6da6de4db222b4b920d6fd800'
+/** STON.fi v1 用的 pTON v1 */
+export const PTON_V1_MASTER = '0:8cdc1d7640ad5ee326527fc1ad0514f468b30dc84b0173f0e155f451b4e11f7c'
 /** STON.fi v2 用的 pTON v2.1 */
 export const PTON_V2_MASTER = '0:671963027f7f85659ab55b821671688601cdcf1ee674fc7fbbb1a776a18d34a3'
 /** STON.fi 的 pTON（代表 TON 的 Jetton）：v1、v2.1 */
-export const PTON_MASTERS = new Set(['0:8cdc1d7640ad5ee326527fc1ad0514f468b30dc84b0173f0e155f451b4e11f7c', '0:671963027f7f85659ab55b821671688601cdcf1ee674fc7fbbb1a776a18d34a3'])
+export const PTON_MASTERS = new Set([PTON_V1_MASTER, PTON_V2_MASTER])
 
 /** STON.fi v2 的 router（地址哈希，base64url），2026-10 时的全部；新的 router 用 options.stonfiRouters 加上 */
 export const STONFI_V2_ROUTERS: ReadonlySet<string> = new Set([
@@ -90,40 +93,6 @@ export const hashKey = (raw: string) => {
 }
 
 // ---------------------------------------------------------------------------
-// 价格源
-// ---------------------------------------------------------------------------
-
-export interface TonPriceSource {
-  readonly name: string
-  /** 返回代币（NATIVE_TON 或 Jetton 主合约的原始地址） → 美元价格 */
-  prices(ctx: { tokens: readonly string[]; fetch: typeof fetch; signal?: AbortSignal }): Promise<Map<string, number>>
-}
-
-/** DefiLlama 价格（免费免 Key）；confidence 低于 minConfidence（默认 0.9）的价格不用 */
-export function defillamaPrices(options: { minConfidence?: number } = {}): TonPriceSource {
-  const minConfidence = options.minConfidence ?? 0.9
-  return {
-    name: 'defillama',
-    async prices({ tokens, fetch: fetchFn, signal }) {
-      const result = new Map<string, number>()
-      const keyOf = (t: string) => (t === NATIVE_TON ? 'coingecko:the-open-network' : `ton:${toFriendlyAddress(t)}`)
-      const back = new Map(tokens.map((t) => [keyOf(t), t]))
-      const keys = [...back.keys()]
-      for (let i = 0; i < keys.length; i += 50) {
-        const res = await fetchFn(`https://coins.llama.fi/prices/current/${keys.slice(i, i + 50).map(encodeURIComponent).join(',')}`, { signal })
-        if (!res.ok) throw new Error(`DefiLlama prices: HTTP ${res.status}`)
-        const body = (await res.json()) as { coins?: Record<string, { price?: number; confidence?: number }> }
-        for (const [key, coin] of Object.entries(body.coins ?? {})) {
-          const token = back.get(key)
-          if (token && typeof coin.price === 'number' && Number.isFinite(coin.price) && (coin.confidence === undefined || coin.confidence >= minConfidence)) result.set(token, coin.price)
-        }
-      }
-      return result
-    },
-  }
-}
-
-// ---------------------------------------------------------------------------
 // 结果
 // ---------------------------------------------------------------------------
 
@@ -173,6 +142,7 @@ export interface LpPositionsOptions extends RequestOptions {
   includeClosed?: boolean
   /** 额外认可的 STON.fi v2 router（新部署的 router 还不在内置列表里时） */
   stonfiRouters?: readonly string[]
+  /** 美元价值：true 用 DefiLlama，也可以传价格源（如 `/price` 的 combinePrices([defillamaPrices(), onchainPrices()])）；默认不查 */
   prices?: boolean | TonPriceSource
   onPriceError?: (err: unknown) => void
   fetch?: typeof fetch
@@ -202,13 +172,21 @@ interface RawPool {
 const sliceOf = (address: string) => beginCell().storeAddress(address).endCell()
 
 /** DeDust 的资产：native$0000 / jetton$0001 workchain:int8 address:uint256 */
-function dedustAsset(cell: Cell): string {
+export function dedustAsset(cell: Cell): string {
   const s = cell.beginParse()
   const type = s.loadUintNumber(4)
   if (type === 0) return NATIVE_TON
   if (type !== 1) throw new Error(`Unsupported DeDust asset type ${type}`)
   const wc = Number(s.loadInt(8))
   return `${wc}:${[...s.loadBytes(32)].map((b) => b.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** DeDust 的资产编码（dedustAsset 的反向）：NATIVE_TON 或 Jetton 主合约 */
+export function dedustAssetCell(token: string): Cell {
+  if (token === NATIVE_TON) return beginCell().storeUint(0, 4).endCell()
+  const a = parseTonAddress(token)
+  if (!a) throw new Error(`Invalid TON address: ${token}`)
+  return beginCell().storeUint(1, 4).storeInt(a.workchain, 8).storeBytes(a.hash).endCell()
 }
 
 async function readPool(client: TonClient, protocol: TonLpProtocol, pool: string, routers: Set<string>, signal?: AbortSignal): Promise<RawPool | null> {
@@ -335,7 +313,7 @@ export async function lpPositions(client: TonClient, owner: string, options: LpP
   const loadPrices = async () => {
     if (!priceSource) return new Map<string, number>()
     try {
-      return await priceSource.prices({ tokens: [NATIVE_TON, ...jettonTokens], fetch: fetchFn, signal })
+      return await priceSource.prices({ tokens: [NATIVE_TON, ...jettonTokens], fetch: fetchFn, signal, client })
     } catch (err) {
       if (signal?.aborted) throw err
       try {

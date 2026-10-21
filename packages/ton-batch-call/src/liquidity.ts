@@ -2,6 +2,7 @@
  * 添加 / 移除流动性（子路径 `@w3lib/ton-batch-call/liquidity`）：STON.fi v2（添加、移除）、STON.fi v1（移除）、DeDust（添加、移除）。
  * 消息格式与 @ston-fi/sdk 2.7 / @dedust/sdk 0.8 相同；发送走 `/write` 的流程（先模拟整条交易链，再发送、等结果）
  */
+import { slippagePpm, withSlippageDown } from './slippage.js'
 import { isValidTonAddress, toFriendlyAddress, toRawAddress } from './address.js'
 import type { TonClient } from './client.js'
 import { NATIVE_TON, TON_DECIMALS } from './constants.js'
@@ -193,12 +194,6 @@ async function tokensOf(client: TonClient, info: PoolInfo, signal?: AbortSignal)
   return [token(info.t0), token(info.t1)]
 }
 
-const slippageBps = (s: number | undefined) => {
-  const v = s ?? 0.005
-  if (!(v >= 0 && v < 1)) throw new Error(`Invalid slippage: ${v}`)
-  return BigInt(Math.round(v * 1_000_000))
-}
-
 interface Built {
   plan: LiquidityPlan
   messages: SendMessage[]
@@ -248,7 +243,7 @@ async function buildAdd(client: TonClient, wallet: WalletContext, params: AddLiq
   const expectedLp = lp0 < lp1 ? lp0 : lp1
   // 按恒定乘积估算；stableswap 等池子不准，计划里不给预计值
   const estimated = info.poolType === 'constant_product' || info.poolType === 'volatile'
-  const minLpOut = params.minLpOut ?? (expectedLp * (1_000_000n - slippageBps(params.slippage))) / 1_000_000n
+  const minLpOut = params.minLpOut ?? withSlippageDown(expectedLp, slippagePpm(params.slippage))
 
   // 用户的 Jetton 钱包和余额
   const jettons = [info.t0, info.t1].filter((t) => t !== NATIVE_TON)

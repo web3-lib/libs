@@ -30,6 +30,14 @@ const cellOf = (v: Cell | string) => (typeof v === 'string' ? Cell.fromBase64(v)
 /** 编码好的 StateInit 原样使用（带 split_depth / library 等字段时重新编码会改变哈希） */
 const stateInitOf = (v: StateInit | Cell | string): StateInit | Cell => (typeof v === 'string' ? Cell.fromBase64(v) : v)
 
+/** CallMessage → 发送用的消息 */
+export function toSendMessage(m: CallMessage): SendMessage {
+  return {
+    message: { to: m.to, value: BigInt(m.value), bounce: m.bounce ?? true, body: m.body ? cellOf(m.body) : null, init: m.init ? stateInitOf(m.init) : null },
+    mode: m.mode,
+  }
+}
+
 /**
  * 批量执行交易：每个调用是一个钱包的一笔交易（最多 255 / 4 条消息，看钱包版本）。同一钱包的调用依次执行，不同钱包并发。
  *
@@ -45,12 +53,7 @@ export async function batchCall(client: TonClient, calls: readonly WriteCall[], 
   const results = calls.map((_, i) => toWriteResult(i, (wallets[i] as WalletContext).friendly, emptyOutcome('skipped')))
   const jobs: TxJob[] = calls.map((call, i) => {
     const wallet = wallets[i] as WalletContext
-    const messages = call.messages.map(
-      (m): SendMessage => ({
-        message: { to: m.to, value: BigInt(m.value), bounce: m.bounce ?? true, body: m.body ? cellOf(m.body) : null, init: m.init ? stateInitOf(m.init) : null },
-        mode: m.mode,
-      }),
-    )
+    const messages = call.messages.map(toSendMessage)
     return {
       wallet,
       messages,

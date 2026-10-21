@@ -30,6 +30,26 @@
     "./liquidity": {
       "types": "./dist/subpaths/liquidity.d.ts",
       "import": "./dist/subpaths/liquidity.js"
+    },
+    "./price": {
+      "types": "./dist/subpaths/price.d.ts",
+      "import": "./dist/subpaths/price.js"
+    },
+    "./names": {
+      "types": "./dist/subpaths/names.d.ts",
+      "import": "./dist/subpaths/names.js"
+    },
+    "./fees": {
+      "types": "./dist/subpaths/fees.d.ts",
+      "import": "./dist/subpaths/fees.js"
+    },
+    "./swap": {
+      "types": "./dist/subpaths/swap.d.ts",
+      "import": "./dist/subpaths/swap.js"
+    },
+    "./risk": {
+      "types": "./dist/subpaths/risk.d.ts",
+      "import": "./dist/subpaths/risk.js"
     }
   },
   "files": [
@@ -50,6 +70,11 @@
     "test:live": "LIVE=1 vitest run test/live.test.ts",
     "test:live:write": "LIVE=1 vitest run test/write-live.test.ts",
     "test:live:liquidity": "LIVE=1 vitest run test/liquidity-live.test.ts",
+    "test:live:price": "LIVE=1 vitest run test/price-live.test.ts",
+    "test:live:names": "LIVE=1 vitest run test/names-live.test.ts",
+    "test:live:fees": "LIVE=1 vitest run test/fees-live.test.ts",
+    "test:live:swap": "LIVE=1 vitest run test/swap-live.test.ts",
+    "test:live:risk": "LIVE=1 vitest run test/risk-live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "demo": "vite demo",
     "demo:build": "vite build demo"

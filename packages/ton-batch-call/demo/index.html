@@ -155,6 +155,140 @@
         </div>
         <div class="result" id="nftResult"></div>
       </section>
+
+      <section class="card">
+        <h2>价格 <small class="muted">子路径 /price：getTokenPrices 代币的美元价格、getPortfolio 地址的资产总值</small></h2>
+        <div class="row">
+          <label for="priceTokens">代币</label>
+          <textarea id="priceTokens" placeholder="Jetton 主合约地址，每行一个（TON 自动加上）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks">
+            <label><input type="checkbox" id="priceFast" checked /> 只用 DefiLlama（快）</label>
+            <label><input type="checkbox" id="priceLp" /> 资产总值含 LP 仓位</label>
+          </span>
+          <button class="primary" id="runPrices">查询价格</button>
+          <button class="primary" id="runPortfolio">资产总值（上面“地址”）</button>
+          <span class="stats" id="priceStats"></span>
+        </div>
+        <p class="hint">
+          默认先查 DefiLlama，没有收录的代币再从链上 STON.fi / DeDust 的池子算（取消“只用 DefiLlama”）；链上价格每个代币约 3~6 次请求，没有 API Key 时每秒 1 次，会慢很多。价格只用于展示，不要用来算交易的最小数量。
+        </p>
+        <div class="result" id="priceResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>域名解析 <small class="muted">子路径 /names：TON DNS（.ton）和 Telegram 用户名（.t.me），名字 → 地址（链上 dnsresolve）、地址 → 名字（索引器 + 正查核对）</small></h2>
+        <div class="row">
+          <label for="nameList">名字</label>
+          <textarea id="nameList" placeholder="foundation.ton、xxx.t.me，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNames">名字 → 地址</button>
+          <span class="stats" id="namesStats"></span>
+        </div>
+        <div class="row">
+          <label for="nameAddrs">地址</label>
+          <textarea id="nameAddrs" placeholder="钱包地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="nameVerify" checked /> 正查核对</label></span>
+          <button class="primary" id="runAddrNames">地址 → 名字</button>
+        </div>
+        <p class="hint">名字 → 地址每个名字 2 次 get 方法调用；地址 → 名字每 100 个地址 1 次索引器请求，核对再解析一遍名字。只有地址自己持有、并且指向自己的名字才算它的名字。</p>
+        <div class="result" id="namesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>手续费估算 <small class="muted">子路径 /fees：toncenter emulateTrace 模拟整条交易链，不签名、不发送</small></h2>
+        <div class="row">
+          <label for="feeKind">交易</label>
+          <select id="feeKind">
+            <option value="transfer">TON 转账</option>
+            <option value="swap">上次兑换报价的消息</option>
+          </select>
+        </div>
+        <div class="row" id="feeTransfer">
+          <label>转账</label>
+          <div class="inline">
+            <input id="feeTo" placeholder="收款地址" spellcheck="false" />
+            <input id="feeAmount" class="small" value="0.01" placeholder="TON" spellcheck="false" />
+          </div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runFees">估算手续费</button>
+          <span class="stats" id="feesStats"></span>
+        </div>
+        <p class="hint">
+          转账用连接的钱包地址，没连接用上面“地址”栏的（要已部署的 v4r2 / v5r1 钱包，余额不够付手续费时模拟不出来）。“上次兑换报价的消息”要先在下面的“兑换”里报价，按报价时的账户估算。
+        </p>
+        <div class="result" id="feesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>兑换 <small class="muted">子路径 /swap：STON.fi v2 / v1、DeDust 里找最好的路线（直接或经过 TON / USD₮ 两跳），报价；连接钱包后可以发送</small></h2>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="swapWalletInfo">未连接（报价时用上面“地址”栏的地址）</span>
+            <button id="swapConnect">连接钱包</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="swapIn">卖出</label>
+          <div class="inline">
+            <input id="swapIn" value="TON" placeholder="TON 或 Jetton 主合约地址" spellcheck="false" />
+            <input id="swapAmount" class="small" value="1" placeholder="数量" spellcheck="false" />
+          </div>
+        </div>
+        <div class="row">
+          <label for="swapOut">买入</label>
+          <input id="swapOut" placeholder="TON 或 Jetton 主合约地址" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="swapProtocol">协议</label>
+          <select id="swapProtocol">
+            <option value="">全部（选输出最多的）</option>
+            <option value="stonfi-v2">STON.fi v2</option>
+            <option value="stonfi-v1">STON.fi v1</option>
+            <option value="dedust">DeDust</option>
+          </select>
+        </div>
+        <div class="actions">
+          <span class="checks">
+            <label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label>
+            <label><input type="checkbox" id="swapDry" checked /> 发送时只模拟（dryRun）</label>
+          </span>
+          <button class="primary" id="runSwapQuote">报价（只构建）</button>
+          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <span class="stats" id="swapStats"></span>
+        </div>
+        <p class="hint">
+          报价读多个池子，没有 API Key 时每秒 1 次请求，要二三十秒。最少收到 = 报价 × (1 − 滑点)，由 DEX 合约检查，不够时退款；附带的 TON 多余的退回。
+          发送默认只模拟整条交易链（不上链），取消勾选才会在钱包里确认并真实兑换，请先用小额试。只支持主网。
+        </p>
+        <div class="result" id="swapResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>Jetton 风险检查 <small class="muted">子路径 /risk：admin / 能否增发 / 诈骗标记 / 钱包代码，可选模拟买入卖出（貔貅盘、转账税）</small></h2>
+        <div class="row">
+          <label for="riskTokens">Jetton</label>
+          <textarea id="riskTokens" placeholder="Jetton 主合约地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks">
+            <label><input type="checkbox" id="riskSim" /> 模拟买入 / 卖出</label>
+            <label>买入 <input id="riskBuy" class="small" value="1" spellcheck="false" /> TON</label>
+          </span>
+          <button class="primary" id="runRisk">检查风险</button>
+          <span class="stats" id="riskStats"></span>
+        </div>
+        <p class="hint">
+          模拟用 /swap 的路线、找一个持有人的钱包模拟两笔（不发送、不签名），每个代币多约 30 次请求。只能发现模拟时的行为，针对特定地址、时间、数量的限制不一定能发现。索引器的诈骗标记很少，标记为空不等于安全。
+        </p>
+        <div class="result" id="riskResult"></div>
+      </section>
     </main>
 
     <footer class="foot">

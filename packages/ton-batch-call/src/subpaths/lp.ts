@@ -14,14 +14,13 @@ export {
   PTON_MASTERS,
   STONFI_V1_ROUTER,
   TON_LP_PROTOCOLS,
-  defillamaPrices,
   lpPositions,
   type LpPositionsOptions,
   type TonLpPosition,
   type TonLpProtocol,
   type TonLpToken,
-  type TonPriceSource,
 } from '../lp.js'
+export { defillamaPrices, type TonPriceSource } from '../price.js'
 export { GetMethodError, Stack, runGetMethod, type StackArg } from '../getters.js'
 
 export interface GetLpPositionsOptions extends LpPositionsOptions, ShortcutOptions {}

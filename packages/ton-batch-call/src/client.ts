@@ -169,6 +169,21 @@ function chunks<T>(list: readonly T[], size = CHUNK): T[][] {
 }
 
 /**
+ * jetton/wallets 的请求怎么拆：toncenter 不接受多个 owner 同时带多个 jetton_address
+ * （HTTP 422 “exact one owner_address required for multiple jetton_address”），这时按 Jetton 拆（每个 Jetton、每 100 个 owner 一次）
+ * 或按 owner 拆（每个 owner、每 100 个 Jetton 一次），取请求少的。每个 (owner, Jetton) 只在一个请求里，结果与不拆相同
+ */
+function walletQueries(owners: readonly string[], masters: readonly string[] | null): Array<{ owners: string[]; masters?: string[] }> {
+  if (!masters) return chunks(owners).map((o) => ({ owners: o }))
+  if (owners.length <= 1 || masters.length <= 1) return chunks(owners).flatMap((o) => chunks(masters).map((m) => ({ owners: o, masters: m })))
+  const byJetton = masters.length * Math.ceil(owners.length / CHUNK)
+  const byOwner = owners.length * Math.ceil(masters.length / CHUNK)
+  return byJetton <= byOwner
+    ? masters.flatMap((m) => chunks(owners).map((o) => ({ owners: o, masters: [m] })))
+    : owners.flatMap((o) => chunks(masters).map((m) => ({ owners: [o], masters: m })))
+}
+
+/**
  * info 是索引器读到的元数据；没有时用主合约的链上内容（content）。
  * 链上内容只有链下地址（uri）、索引器又还没读到时不知道精度：暂按 9，标记 decimalsUnknown（不缓存）
  */
@@ -270,6 +285,7 @@ export class TonClient {
 
   /**
    * 多个地址的余额：所有地址的 Jetton 合成每 100 个地址一次 jetton/wallets 请求，TON 余额合成 accountStates 请求。
+   * 多个地址都指定了多个 Jetton 时（toncenter 不接受一次查多个 owner 的多个 Jetton），按 Jetton 或按地址拆开，取请求少的。
    * 结果与 queries 一一对应
    */
   async multiBalances(queries: ReadonlyArray<{ owner: string; tokens?: readonly string[] }>, options: BalancesOptions = {}): Promise<TokenBalance[][]> {
@@ -342,16 +358,16 @@ export class TonClient {
     })
   }
 
-  /** jetton/wallets：每 100 个 owner 一个请求，按 offset 翻页 */
+  /** jetton/wallets：每 100 个 owner 一个请求（指定了 Jetton 时见 walletQueries），按 offset 翻页 */
   async #jettonWallets(owners: readonly string[], masters: readonly string[] | null, options: RequestOptions) {
     const rows: JettonWalletRow[] = []
     const book: AddressBook = {}
     const metadata: MetadataMap = {}
-    for (const chunk of chunks(owners)) {
+    for (const q of walletQueries(owners, masters)) {
       for (let offset = 0; ; offset += 1000) {
         const res = await this.#get<{ jetton_wallets?: JettonWalletRow[]; address_book?: AddressBook; metadata?: MetadataMap }>(
           'jetton/wallets',
-          { owner_address: chunk, jetton_address: masters ?? undefined, exclude_zero_balance: masters ? undefined : true, limit: 1000, offset },
+          { owner_address: q.owners, jetton_address: q.masters, exclude_zero_balance: masters ? undefined : true, limit: 1000, offset },
           options,
         )
         const page = res.jetton_wallets ?? []

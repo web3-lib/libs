@@ -1,4 +1,5 @@
-import { NATIVE_TON, TonClient, formatUnits, sameTonAddress, type NftDetails } from '@w3lib/ton-batch-call'
+import { NATIVE_TON, TonClient, formatUnits, isValidTonAddress, parseUnits, sameTonAddress, type NftDetails } from '@w3lib/ton-batch-call'
+import { estimateCost, type FeeCall, type TonCostEstimate } from '@w3lib/ton-batch-call/fees'
 import {
   addLiquidity,
   buildAddLiquidity,
@@ -10,6 +11,10 @@ import {
   type RemoveLiquidityParams,
 } from '@w3lib/ton-batch-call/liquidity'
 import { TON_LP_PROTOCOLS, lpPositions, type TonLpPosition, type TonLpProtocol } from '@w3lib/ton-batch-call/lp'
+import { lookupAddresses, resolveNames } from '@w3lib/ton-batch-call/names'
+import { defillamaPrices, portfolio, tokenPrices, type TonPriceSource } from '@w3lib/ton-batch-call/price'
+import { tokenRisks, type TonTokenRisk } from '@w3lib/ton-batch-call/risk'
+import { buildSwap, swap, type SwapParams, type SwapResult, type TonSwapPlan, type TonSwapRoute } from '@w3lib/ton-batch-call/swap'
 import { createWallet } from '@w3lib/wallet'
 import { ton } from '@w3lib/wallet/ton'
 import { createWalletModal } from '@w3lib/wallet/ui'
@@ -28,6 +33,13 @@ const SAMPLE_JETTONS = [
 
 /** 多个地址示例：USDT 主合约（也是有 TON 余额的合约）和示例钱包 */
 const SAMPLE_OWNERS = [SAMPLE_OWNER, 'EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs']
+
+/** 域名示例：foundation.ton、Fragment 上的 stud.t.me，和一个没注册的名字（2026-10 主网） */
+const SAMPLE_NAMES = ['foundation.ton', 'stud.t.me', 'nobody-here-12345.ton']
+/** 反查示例：持有 tolya.ton 的地址 */
+const SAMPLE_NAME_OWNERS = ['UQCdqXGvONLwOr3zCNX5FjapflorB6ZsOdcdfLrjsDLt3AF4']
+/** 兑换示例的买入代币：USD₮ */
+const SAMPLE_USDT = SAMPLE_JETTONS[0] as string
 
 /** LP 示例：持有 DeDust TON/USD₮ 和 STON.fi v2 USD₮/TON LP 的地址（2026-10 时的真实仓位，之后可能撤出） */
 const SAMPLE_LP_OWNER = '0:489595F65115A45C24A0DD0176309654FB00B95E40682F0C3E85D5A4D86DFB25'
@@ -592,4 +604,339 @@ bind('runLiqSend', 'liq', async () => {
   note.textContent = `结果：${result.status}（可以在“LP 仓位”里重新查询）`
   view.append(note, planView(result.plan, result))
   return { data: result, view }
+})
+
+// ---- 价格（子路径 /price） ----
+
+$<HTMLTextAreaElement>('priceTokens').value = SAMPLE_JETTONS.join('\n')
+
+/** 价格源：默认 DefiLlama + 链上池子；勾选“只用 DefiLlama”时只用前者（链上价格每个代币要几次请求） */
+function priceSources(): { sources?: readonly TonPriceSource[] } {
+  return $<HTMLInputElement>('priceFast').checked ? { sources: [defillamaPrices()] } : {}
+}
+
+bind('runPrices', 'price', async () => {
+  const tokens = lines($<HTMLTextAreaElement>('priceTokens').value)
+  let priceError: unknown = null
+  const list = await tokenPrices(client(), [NATIVE_TON, ...tokens], {
+    ...priceSources(),
+    fetch: countingFetch,
+    onError: (_source, err) => {
+      priceError = err
+    },
+  })
+  return {
+    data: list,
+    view: withPriceWarning(
+      table(
+        ['代币', '美元价格', '来源'],
+        list.map((p) => [p.native ? 'TON' : addr(p.token), p.price === null ? null : `$${p.price.toLocaleString('en-US', { maximumSignificantDigits: 6 })}`, p.source ?? tag('没有价格', 'bad')]),
+        [1],
+      ),
+      priceError,
+    ),
+  }
+})
+
+bind('runPortfolio', 'price', async () => {
+  let priceError: unknown = null
+  const p = await portfolio(client(), owner(), {
+    ...priceSources(),
+    lp: $<HTMLInputElement>('priceLp').checked,
+    fetch: countingFetch,
+    onPriceError: (err) => {
+      priceError = err
+    },
+  })
+  const wrap = document.createElement('div')
+  wrap.append(
+    table(
+      ['项目', '值'],
+      [
+        ['合计', usd(p.totalUsd)],
+        ['代币', usd(p.tokensUsd)],
+        ['LP 仓位', usd(p.lpUsd)],
+        ['有余额但没有价值的代币', p.unpriced],
+      ],
+    ),
+    table(
+      ['代币', '余额', '价格', '价值', '来源'],
+      p.tokens.map((t) => [
+        t.symbol ?? (t.native ? 'TON' : addr(t.token)),
+        amount(t.formatted),
+        t.price === null ? null : `$${t.price.toLocaleString('en-US', { maximumSignificantDigits: 6 })}`,
+        t.decimalsUnknown ? tag('精度未知', 'bad') : usd(t.value),
+        t.priceSource,
+      ]),
+      [1, 2, 3],
+    ),
+  )
+  if (p.lp.length) {
+    wrap.append(
+      table(
+        ['协议', 'LP 交易对', '份额', '价值'],
+        p.lp.map((l) => [l.protocolName, pairOf(l), `${(l.share * 100).toLocaleString('en-US', { maximumSignificantDigits: 3 })}%`, usd(l.valueUsd)]),
+        [3],
+      ),
+    )
+  }
+  return { data: p, view: withPriceWarning(wrap, priceError) }
+})
+
+// ---- 域名解析（子路径 /names） ----
+
+$<HTMLTextAreaElement>('nameList').value = SAMPLE_NAMES.join('\n')
+$<HTMLTextAreaElement>('nameAddrs').value = SAMPLE_NAME_OWNERS.join('\n')
+
+bind('runNames', 'names', async () => {
+  const names = lines($<HTMLTextAreaElement>('nameList').value)
+  if (!names.length) throw new Error('请填写名字，每行一个')
+  const list = await resolveNames(client(), names)
+  return {
+    data: list,
+    view: table(
+      ['名字', '规范化', '地址', '服务'],
+      list.map((r) => [r.name, r.normalized ?? tag('名字不合法', 'bad'), r.address ? addr(r.address) : r.normalized ? tag('没有钱包记录', '') : null, r.service ?? (r.normalized ? tag('没有服务认这个后缀', '') : null)]),
+    ),
+  }
+})
+
+bind('runAddrNames', 'names', async () => {
+  const addresses = lines($<HTMLTextAreaElement>('nameAddrs').value)
+  if (!addresses.length) throw new Error('请填写地址，每行一个')
+  const list = await lookupAddresses(client(), addresses, { verify: $<HTMLInputElement>('nameVerify').checked })
+  return {
+    data: list,
+    view: table(
+      ['地址', '名字', '服务'],
+      list.map((r) => [addr(r.address), r.name ?? tag('没有名字', ''), r.service]),
+    ),
+  }
+})
+
+// ---- 兑换（子路径 /swap；写在手续费估算之前：后者可以估算兑换的消息） ----
+
+const sw = {
+  tokenIn: $<HTMLInputElement>('swapIn'),
+  tokenOut: $<HTMLInputElement>('swapOut'),
+  amount: $<HTMLInputElement>('swapAmount'),
+  protocol: $<HTMLSelectElement>('swapProtocol'),
+  slippage: $<HTMLInputElement>('swapSlippage'),
+  dry: $<HTMLInputElement>('swapDry'),
+}
+sw.tokenOut.value = SAMPLE_USDT
+
+/** 上一次兑换报价：手续费估算可以估算它的消息（from 是报价的账户） */
+let lastSwap: { plan: TonSwapPlan; from: string } | null = null
+
+function renderSwapWallet() {
+  const c = connection()
+  if (!c) {
+    $('swapWalletInfo').textContent = '未连接（报价时用上面“地址”栏的地址）'
+    $('swapConnect').textContent = '连接钱包'
+    return
+  }
+  $('swapWalletInfo').textContent = `${c.walletName} · ${c.address}`
+  $('swapConnect').textContent = '切换 / 断开'
+}
+wallet.subscribe(() => renderSwapWallet())
+void wallet.ready.then(renderSwapWallet)
+$('swapConnect').addEventListener('click', () => void modal.open('ton'))
+
+/** TON 或 Jetton 主合约地址 */
+function swapToken(input: HTMLInputElement, label: string): string {
+  const value = input.value.trim()
+  if (!value) throw new Error(`请填写${label}的代币（TON 或 Jetton 主合约地址）`)
+  if (value.toUpperCase() === NATIVE_TON) return NATIVE_TON
+  if (!isValidTonAddress(value)) throw new Error(`${label}的代币地址不合法：${value}`)
+  return value
+}
+
+function swapRequest() {
+  const tokenIn = swapToken(sw.tokenIn, '卖出')
+  const tokenOut = swapToken(sw.tokenOut, '买入')
+  if (tokenIn === tokenOut) throw new Error('卖出和买入是同一个代币')
+  const amountInFormatted = text(sw.amount)
+  if (!amountInFormatted || !/^\d*\.?\d+$/.test(amountInFormatted) || !(Number(amountInFormatted) > 0)) throw new Error(`卖出的数量要是大于 0 的数字：${amountInFormatted ?? '（空）'}`)
+  const percent = numberOf(sw.slippage, '滑点')
+  if (percent !== undefined && !(percent >= 0 && percent < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
+  const protocol = sw.protocol.value as TonLpProtocol | ''
+  const params: SwapParams = { tokenIn, tokenOut, amountInFormatted }
+  const options = { ...(percent === undefined ? {} : { slippage: percent / 100 }), ...(protocol ? { protocols: [protocol] } : {}) }
+  return { params, options }
+}
+
+const shortAddr = (a: string) => (a === NATIVE_TON || a.length <= 14 ? a : `${a.slice(0, 4)}…${a.slice(-4)}`)
+function swapView(plan: TonSwapPlan, result?: SwapResult): Node {
+  const sIn = plan.tokenIn.symbol ?? 'token'
+  const sOut = plan.tokenOut.symbol ?? 'token'
+  const rows: Array<[string, Cell]> = [
+    ['协议', plan.route.protocolName],
+    ['路线', plan.route.path.map(shortAddr).join(' → ')],
+    ['卖出', `${amount(plan.amountInFormatted)} ${sIn}`],
+    ['报价', `${amount(plan.amountOutFormatted)} ${sOut}`],
+    ['最少收到（滑点保护）', `${amount(plan.amountOutMinFormatted)} ${sOut}`],
+    ['价格', plan.price === null ? null : `1 ${sIn} = ${plan.price.toLocaleString('en-US', { maximumSignificantDigits: 6 })} ${sOut}`],
+    ['价格影响', plan.priceImpact === null ? null : `${(plan.priceImpact * 100).toFixed(3)}%`],
+    ['收款地址', addr(plan.recipient)],
+    ['附带 TON（含 gas，多余的退回）', tonAmount(plan.tonAttached)],
+  ]
+  if (result) {
+    const hash = result.txHash ?? result.hash
+    rows.push(
+      ['状态', tag(result.status + (result.error ? `：${result.error}` : ''), result.status === 'confirmed' || result.status === 'simulated' ? 'ok' : result.status === 'failed' || result.status === 'reverted' ? 'bad' : '')],
+      [result.status === 'simulated' ? '模拟里收到' : '实际收到', result.amountReceived === null ? null : `${amount(formatUnits(BigInt(result.amountReceived), plan.tokenOut.decimals))} ${sOut}`],
+      ['交易', hash && result.status !== 'simulated' ? link(hash) : null],
+      ['手续费', result.fee === null ? null : tonAmount(result.fee)],
+    )
+  }
+  const wrap = document.createElement('div')
+  wrap.append(
+    table(
+      ['项目', '值'],
+      rows.filter(([, v]) => v !== null),
+    ),
+    table(
+      ['路线（从高到低）', '报价'],
+      plan.routes.map((r) => [`${r.protocolName} · ${r.path.map(shortAddr).join(' → ')}（${r.pools.length} 跳）`, `${amount(formatUnits(BigInt(r.amountOut), plan.tokenOut.decimals))} ${sOut}`]),
+      [1],
+    ),
+    table(
+      ['#', '发给', '附带 TON', 'bounce'],
+      plan.messages.map((m, i) => [i + 1, addr(m.to), tonAmount(m.value), m.bounce ? '是' : '否']),
+    ),
+  )
+  return wrap
+}
+
+bind('runSwapQuote', 'swap', async () => {
+  const { params, options } = swapRequest()
+  const from = connection()?.address ?? owner()
+  const plan = await buildSwap(client(), from, params, options)
+  lastSwap = { plan, from }
+  return { data: plan, view: swapView(plan) }
+})
+
+bind('runSwapSend', 'swap', async () => {
+  const { params, options } = swapRequest()
+  if (testnet()) throw new Error('兑换只支持主网：请改“节点”')
+  const c = connection() ?? (await modal.open('ton'))
+  if (!c) throw new Error('没有连接钱包')
+  if (c.chainId !== '-239') throw new Error(`钱包在${networkName(c.chainId)}，兑换要在主网：请在钱包里切换网络`)
+  const dryRun = sw.dry.checked
+  const progress = $('swapStats')
+  // TON Connect 实例直接当签名器（钱包里确认）；dryRun 只模拟整条交易链，不发送
+  const result = await swap(client(), c.provider as never, params, { ...options, dryRun, onUpdate: (r) => (progress.textContent = `交易：${r.status}`) })
+  lastSwap = { plan: result.plan, from: c.address }
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = dryRun ? `只模拟了整条交易链（没有发送）：${result.status}` : `结果：${result.status}`
+  view.append(note, swapView(result.plan, result))
+  return { data: result, view }
+})
+
+// ---- 手续费估算（子路径 /fees） ----
+
+const fee = { kind: $<HTMLSelectElement>('feeKind'), to: $<HTMLInputElement>('feeTo'), amount: $<HTMLInputElement>('feeAmount') }
+fee.kind.addEventListener('change', () => {
+  $('feeTransfer').hidden = fee.kind.value !== 'transfer'
+})
+
+function feeCall(): FeeCall {
+  if (fee.kind.value === 'swap') {
+    if (!lastSwap) throw new Error('请先在“兑换”里报价')
+    // 兑换的消息按报价时的账户估算（消息里的收款地址、数量都是为它构建的）
+    return { from: lastSwap.from, messages: lastSwap.plan.messages }
+  }
+  const to = text(fee.to)
+  if (!to) throw new Error('请填写收款地址')
+  if (!isValidTonAddress(to)) throw new Error(`收款地址不合法：${to}`)
+  const value = parseUnits(text(fee.amount) ?? '', 9)
+  if (value <= 0n) throw new Error('转账的数量要大于 0')
+  return { from: connection()?.address ?? owner(), messages: [{ to, value, bounce: false }] }
+}
+
+function feeView(e: TonCostEstimate): Node {
+  const ton = (nano: string | null, formatted: string | null) => (nano === null ? null : `${amount(formatted)} TON`)
+  const rows: Array<[string, Cell]> = [
+    ['发送的钱包', addr(e.from)],
+    ['模拟', e.simulated ? (e.error ? tag(`失败：${e.error}`, 'bad') : tag('通过', 'ok')) : tag(`没有模拟结果${e.error ? `：${e.error}` : ''}`, 'bad')],
+    ['钱包付的手续费', ton(e.fee, e.feeFormatted)],
+    ['附带的 TON', ton(e.attached, e.attachedFormatted)],
+    ['退回钱包的 TON', ton(e.returned, e.returnedFormatted)],
+    ['钱包余额净变化', ton(e.balanceChange, e.balanceChangeFormatted)],
+    ['整条链的手续费', ton(e.chainFee, e.chainFeeFormatted)],
+    ['交易链被截断', e.incomplete ? tag('是：退回和整条链的数值只算了已有的部分', 'bad') : null],
+  ]
+  if (e.walletFees) {
+    for (const [label, key] of [['导入外部消息', 'import'], ['存储费', 'storage'], ['计算（gas）', 'gas'], ['动作', 'action'], ['转发费其余部分', 'forward']] as const) {
+      rows.push([`钱包交易：${label}`, `${amount(formatUnits(BigInt(e.walletFees[key]), 9))} TON`])
+    }
+  }
+  return table(
+    ['项目', '值'],
+    rows.filter(([, v]) => v !== null),
+  )
+}
+
+bind('runFees', 'fees', async () => {
+  const estimate = await estimateCost(client(), feeCall())
+  return { data: estimate, view: feeView(estimate) }
+})
+
+// ---- Jetton 风险检查（子路径 /risk） ----
+
+$<HTMLTextAreaElement>('riskTokens').value = SAMPLE_JETTONS.join('\n')
+
+const BAD_FLAGS = new Set(['scam', 'not-found', 'honeypot', 'cannot-buy', 'high-buy-tax', 'high-sell-tax', 'unknown-wallet-code'])
+
+function riskFlags(r: TonTokenRisk): Node {
+  const wrap = document.createElement('span')
+  if (!r.flags.length) {
+    wrap.append(tag('没有标记', 'ok'))
+    return wrap
+  }
+  r.flags.forEach((f, i) => {
+    if (i) wrap.append(' ')
+    wrap.append(tag(f, BAD_FLAGS.has(f) ? 'bad' : ''))
+  })
+  return wrap
+}
+
+const percentOf = (v: number | null) => (v === null ? '—' : `${(v * 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`)
+
+function tradeCell(r: TonTokenRisk): Cell {
+  const t = r.trade
+  if (!t) return null
+  const wrap = document.createElement('span')
+  wrap.append(tag(t.stage, t.stage === 'ok' ? 'ok' : 'bad'))
+  if (t.stage === 'ok' || t.buyTax !== null || t.sellTax !== null) wrap.append(` 买入税 ${percentOf(t.buyTax)} / 卖出税 ${percentOf(t.sellTax)}`)
+  if (t.error) wrap.append(` ${t.error}`)
+  return wrap
+}
+
+bind('runRisk', 'risk', async () => {
+  const tokens = lines($<HTMLTextAreaElement>('riskTokens').value)
+  if (!tokens.length) throw new Error('请填写 Jetton 主合约地址，每行一个')
+  const simulate = $<HTMLInputElement>('riskSim').checked
+  const buyAmount = parseUnits($<HTMLInputElement>('riskBuy').value.trim(), 9)
+  if (buyAmount <= 0n) throw new Error('模拟买入的 TON 要大于 0')
+  const list = await tokenRisks(client(), tokens, simulate ? { simulate, buyAmount } : {})
+  return {
+    data: list,
+    view: table(
+      ['symbol', '名称', 'admin', '可增发', '钱包代码', '风险标记', ...(simulate ? ['模拟买卖'] : []), '主合约'],
+      list.map((r) => [
+        r.symbol,
+        r.name,
+        r.error ? null : r.admin ? addr(r.admin) : tag('已放弃', 'ok'),
+        r.mintable === null ? null : r.mintable ? '是' : '否',
+        r.walletCode ?? (r.error ? null : tag('不认识', 'bad')),
+        r.error ? tag(r.error, 'bad') : riskFlags(r),
+        ...(simulate ? [tradeCell(r)] : []),
+        addr(r.address ?? r.token),
+      ]),
+    ),
+  }
 })

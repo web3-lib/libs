@@ -84,6 +84,8 @@ function fakeToncenter(api: FakeApi) {
     } else if (path === 'jetton/wallets') {
       const owners = q.getAll('owner_address')
       const filter = q.getAll('jetton_address')
+      // 与真实的 toncenter 相同：多个 owner 不能同时带多个 jetton_address
+      if (owners.length > 1 && filter.length > 1) return new Response(JSON.stringify({ error: 'exact one owner_address required for multiple jetton_address' }), { status: 422 })
       const rows = owners.flatMap((o) =>
         Object.entries(api.jettonWallets[o] ?? {})
           .filter(([m, [, bal]]) => (!filter.length || filter.includes(m)) && (q.get('exclude_zero_balance') !== 'true' || bal !== '0'))
@@ -177,6 +179,38 @@ describe('TonClient', () => {
     const { ton } = client()
     const [, b] = await ton.multiBalances([{ owner: WALLET }, { owner: OWNER_B, tokens: [USDT] }])
     expect(b).toMatchObject([{ token: USDT, balance: '0', decimals: 6, success: true }])
+  })
+
+  it('多个地址 × 多个指定的 Jetton：按请求少的一边拆开（toncenter 不接受多个 owner 带多个 jetton_address），结果不变', async () => {
+    const OWNER_C = `0:${'a'.repeat(64)}`
+    const { ton, node } = client()
+    const owners = [WALLET, OWNER_B, OWNER_C]
+    const results = await ton.multiBalances(owners.map((owner) => ({ owner, tokens: [NATIVE_TON, USDT, JUNK] })))
+    expect(results.map((r) => r.map((b) => b.balance))).toEqual([
+      ['1500000000', '2500000', '0'],
+      ['7', '0', '42'],
+      ['0', '0', '0'],
+    ])
+    expect(results[1]?.[2]).toMatchObject({ token: toFriendlyAddress(JUNK), wallet: toFriendlyAddress(`0:${'3'.repeat(64)}`), success: true })
+    // 3 个 owner、2 个 Jetton：按 Jetton 拆，2 次请求，每次 1 个 jetton_address、3 个 owner
+    const wallets = node.calls.filter((c) => c.path === 'jetton/wallets')
+    expect(wallets.map((c) => [c.query.getAll('jetton_address'), c.query.getAll('owner_address').length])).toEqual([
+      [[USDT_RAW], 3],
+      [[JUNK], 3],
+    ])
+    // 2 个 owner、3 个 Jetton：按 owner 拆
+    const before = node.calls.length
+    const NOT_JETTON2 = `0:${'f'.repeat(64)}`
+    const [a] = await ton.multiBalances([WALLET, OWNER_B].map((owner) => ({ owner, tokens: [USDT, JUNK, NOT_JETTON2] })))
+    expect(a?.map((b) => [b.balance, b.error])).toEqual([
+      ['2500000', undefined],
+      ['0', undefined],
+      ['0', 'not-found'],
+    ])
+    expect(node.calls.slice(before).filter((c) => c.path === 'jetton/wallets').map((c) => [c.query.getAll('owner_address'), c.query.getAll('jetton_address').length])).toEqual([
+      [[WALLET_RAW], 3],
+      [[OWNER_B], 3],
+    ])
   })
 
   it('TON 余额：没用过的地址余额 0；Jetton 信息', async () => {
