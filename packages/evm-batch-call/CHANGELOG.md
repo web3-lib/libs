@@ -1,11 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 ### 新功能
-
-- 批量查询的链：Multicall3 地址表和内置节点补充 Conflux eSpace（1030）、Injective EVM（1776）、Pharos（1672，主币 PROS），星空链（202308）只有节点（没有 Multicall3，走 deployless）；FSC（201022）补主币 FON
-- deployless 不可用（合约创建式 `eth_call` 返回空数据 / 无法解码）时，自动改成逐条 `eth_call`（主币余额用 `eth_getBalance`，区块号用 `getBlockNumber`）；确认不支持后记住 10 分钟，不再先试一次注定失败的 deployless
 
 - 价格，子路径 `@w3lib/evm-batch-call/price`：
   - `getTokenPrices` / `tokenPrices`：代币（含主币）的美元价格，依次使用多个价格源，结果带给出价格的源
@@ -24,6 +21,8 @@
   - `buildRevokes` / `revokeApprovals`：批量撤销（approve 0、Permit2 lockdown、setApprovalForAll false），发送同 `batchCall`，支持 7702 合成一笔
   - Tron 支持查询和撤销（没有 Permit2，不支持扫描）
 - 价格源的 `PriceSourceContext` 新增 `provider`（链上价格源用）；`defillamaPrices`、`PriceSource` 仍可以从 `/owner`、`/lp` 导入
+- 批量查询的链：Multicall3 地址表和内置节点补充 Conflux eSpace（1030）、Injective EVM（1776）、Pharos（1672，主币 PROS），星空链（202308）只有节点（没有 Multicall3，走 deployless）；FSC（201022）补主币 FON
+- deployless 不可用（合约创建式 `eth_call` 返回空数据 / 无法解码）时，自动改成逐条 `eth_call`（主币余额用 `eth_getBalance`，区块号用 `getBlockNumber`）；确认不支持后记住 10 分钟，不再先试一次注定失败的 deployless
 
 ## 0.6.0
 
