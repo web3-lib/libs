@@ -187,6 +187,141 @@
         </div>
         <div class="result" id="nftResult"></div>
       </section>
+
+      <section class="card">
+        <h2>价格 / 资产总值 <small class="muted">子路径 /price：getTokenPrices（DefiLlama，没收录的从链上池子算）、getPortfolio（余额 × 价格）</small></h2>
+        <div class="row">
+          <label for="priceTokens">代币</label>
+          <textarea id="priceTokens" placeholder="代币地址，每行一个；主币填 native" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="priceLp" /> 资产总值计入 LP 仓位</label></span>
+          <span class="checks"><label>隐藏价值低于 <input id="priceMinUsd" class="small" value="0" spellcheck="false" /> 美元的代币</label></span>
+          <button class="primary" id="runPrices">查询价格</button>
+          <button class="primary" id="runPortfolio">资产总值（上面“地址”）</button>
+          <span class="stats" id="priceStats"></span>
+        </div>
+        <p class="hint">EVM 不能只靠节点列出持仓，资产总值只计入上面列出的代币（想自动发现用“资产列表”）。</p>
+        <div class="result" id="priceResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>授权 <small class="muted">子路径 /approvals：批量读 ERC20 / Permit2 / NFT 授权，批量撤销</small></h2>
+        <div class="row">
+          <label for="apprTokens">代币</label>
+          <textarea id="apprTokens" placeholder="要检查的 ERC20 代币，每行一个（对内置的已知 Router / 聚合器检查）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="apprNfts">NFT 合约</label>
+          <textarea id="apprNfts" placeholder="可选：要检查 setApprovalForAll 的 NFT 合约，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="apprPermit2" checked /> 含 Permit2（Tron 没有）</label></span>
+          <span class="checks"><label><input type="checkbox" id="apprZero" /> 含额度为 0 / 已过期的项</label></span>
+          <button class="primary" id="runApprovals">查询授权（上面“地址”）</button>
+          <span class="stats" id="apprStats"></span>
+        </div>
+        <div class="actions">
+          <span class="wallet-info">先查询，勾选要撤销的授权（默认勾选无限授权的）</span>
+          <button class="primary" id="runRevokeBuild">构建撤销交易（不发送）</button>
+          <button class="primary" id="runRevokeSend">撤销选中的（钱包确认）</button>
+          <span class="stats" id="revokeStats"></span>
+        </div>
+        <p class="hint">撤销要由授权的所有者发送：钱包地址要和查询时的地址一致；每笔撤销在钱包里单独确认，交易真实上链。钱包用上面“添加 / 移除流动性”的“连接钱包”。</p>
+        <div class="result" id="apprResult"></div>
+        <div class="result" id="revokeResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>域名 <small class="muted">子路径 /names：ENS（Ethereum）、SPACE ID（BNB Chain）、Basenames（Base）正向 + 反向解析</small></h2>
+        <div class="row">
+          <label for="nameList">名字</label>
+          <textarea id="nameList" placeholder="域名，每行一个（用这条链的域名服务）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="nameAddresses">地址</label>
+          <textarea id="nameAddresses" placeholder="反向解析的地址，每行一个（不填用上面“地址”）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNames">名字 → 地址</button>
+          <button class="primary" id="runAddressNames">地址 → 名字</button>
+          <span class="stats" id="namesStats"></span>
+        </div>
+        <p class="hint">反向解析只返回正查也回到同一个地址的名字。只有 Ethereum、BNB Chain、Base 有内置的域名服务。</p>
+        <div class="result" id="namesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>手续费 <small class="muted">子路径 /fees：EIP-1559 三档建议；一笔交易的手续费（含 L1 数据费；Tron 算要烧的 TRX）</small></h2>
+        <div class="row">
+          <label for="feeTo">to</label>
+          <input id="feeTo" placeholder="接收地址 / 合约（不填就是发给 from 自己）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="feeData">data</label>
+          <input id="feeData" placeholder="可选：调用数据（0x…）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="feeValue">value</label>
+          <input id="feeValue" placeholder="可选：附带的主币数量（如 0.01）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <label for="feeLevel">档位</label>
+          <select id="feeLevel">
+            <option value="slow">slow</option>
+            <option value="normal" selected>normal</option>
+            <option value="fast">fast</option>
+          </select>
+          <button class="primary" id="runFees">费用建议</button>
+          <button class="primary" id="runCost">估算这笔交易（from 用上面“地址”）</button>
+          <span class="stats" id="feesStats"></span>
+        </div>
+        <p class="hint">估算会在节点上执行一遍交易，会 revert 的交易（余额不够等）估算不出来；只估算，不发送。</p>
+        <div class="result" id="feesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>兑换 <small class="muted">子路径 /swap：在内置 V2 / V3 池子里找最好的路线（直接或两跳），报价后可以用钱包发送</small></h2>
+        <div class="row">
+          <label for="swapTokenIn">卖出</label>
+          <input id="swapTokenIn" placeholder="代币地址；主币填 native" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="swapTokenOut">买入</label>
+          <input id="swapTokenOut" placeholder="代币地址；主币填 native" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="swapAmount">数量</label>
+          <input id="swapAmount" placeholder="卖出的数量（如 0.01）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
+          <span class="checks"><label>转账税 <input id="swapTax" class="small" value="" placeholder="0" spellcheck="false" /> %</label></span>
+          <span class="checks"><label><input type="checkbox" id="swapApproveMax" /> 授权无限额度</label></span>
+          <button class="primary" id="runSwapQuote">报价（只构建）</button>
+          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <span class="stats" id="swapStats"></span>
+        </div>
+        <p class="hint">
+          带转账税的代币要填税率（V2 报价不含税，不填会因 INSUFFICIENT_OUTPUT_AMOUNT 回滚；V3 不支持带税的代币），税率可以用下面“代币风险”查。
+          报价和“最少收到”按不含税算。发送用“添加 / 移除流动性”里连接的钱包（授权在前，逐笔确认），交易真实上链，请先用小额试。
+        </p>
+        <div class="result" id="swapResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币风险 <small class="muted">子路径 /risk：模拟买入 / 转账 / 卖出，算买卖税、判断貔貅盘，看是否可升级代理、owner 是否放弃</small></h2>
+        <div class="row">
+          <label for="riskTokens">代币</label>
+          <textarea id="riskTokens" placeholder="代币地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runRisk">检查风险</button>
+          <span class="stats" id="riskStats"></span>
+        </div>
+        <p class="hint">只在这条链内置的 V2 协议的“代币 / 包装主币”池子里用 eth_call 模拟，不发交易；没有这样的池子（或只在 V3 有流动性）时测不出税。结果是模拟，不能保证以后不变。</p>
+        <div class="result" id="riskResult"></div>
+      </section>
     </main>
 
     <footer class="foot">

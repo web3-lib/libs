@@ -36,9 +36,33 @@
       "types": "./dist/subpaths/liquidity.d.ts",
       "import": "./dist/subpaths/liquidity.js"
     },
+    "./approvals": {
+      "types": "./dist/subpaths/approvals.d.ts",
+      "import": "./dist/subpaths/approvals.js"
+    },
+    "./fees": {
+      "types": "./dist/subpaths/fees.d.ts",
+      "import": "./dist/subpaths/fees.js"
+    },
+    "./names": {
+      "types": "./dist/subpaths/names.d.ts",
+      "import": "./dist/subpaths/names.js"
+    },
+    "./price": {
+      "types": "./dist/subpaths/price.d.ts",
+      "import": "./dist/subpaths/price.js"
+    },
     "./owner": {
       "types": "./dist/subpaths/owner.d.ts",
       "import": "./dist/subpaths/owner.js"
+    },
+    "./risk": {
+      "types": "./dist/subpaths/risk.d.ts",
+      "import": "./dist/subpaths/risk.js"
+    },
+    "./swap": {
+      "types": "./dist/subpaths/swap.d.ts",
+      "import": "./dist/subpaths/swap.js"
     },
     "./write": {
       "types": "./dist/subpaths/write.d.ts",

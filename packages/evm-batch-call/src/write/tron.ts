@@ -744,6 +744,49 @@ function canonical(address: string): string {
   return toTronAddress(toEvmAddress(address))
 }
 
+/** 一笔交易的手续费估算（子路径 /fees 的 estimateCost 在 Tron 上用） */
+export interface TronCostEstimate {
+  /** 合约调用消耗的能量（模拟得到）；转 TRX 为 0 */
+  energy: number
+  /** 交易的字节数（带宽） */
+  bandwidth: number
+  /** 账户剩余的能量 / 带宽不够时要烧的 TRX（sun） */
+  energyBurn: bigint
+  bandwidthBurn: bigint
+  /** 转 TRX 给没激活的地址：激活费（含创建账户的带宽），算在 bandwidthBurn 里 */
+  activates: boolean
+  /** 每单位能量、每字节带宽的价格（sun） */
+  energyPrice: bigint
+  bandwidthPrice: bigint
+}
+
+/**
+ * 估算一笔交易要烧多少 TRX：合约调用模拟出能量，按发送者剩余的质押能量 / 免费和质押带宽抵扣，不够的部分按链参数的价格烧 TRX。
+ * 能量按模拟值（不加余量），实际执行可能略有出入
+ */
+export async function tronEstimateCost(provider: Provider, call: { from: string; to: string; data?: string; value?: bigint }): Promise<TronCostEstimate> {
+  const rpc = await tronRpc(provider, {})
+  const from = canonical(call.from)
+  const to = canonical(call.to)
+  const value = call.value ?? 0n
+  const data = call.data && call.data !== '0x' ? call.data : null
+  const [params, resources, isContract] = await Promise.all([rpc.params(), rpc.resources(from), data ? Promise.resolve(true) : rpc.isContract(to)])
+  const contract: TronContract = isContract ? { type: 'trigger', owner: from, contract: to, data: data ?? '0x', callValue: value } : { type: 'transfer', owner: from, to, amount: value }
+  const energy = contract.type === 'trigger' ? await rpc.simulate(contract) : 0
+  const feeLimit = contract.type === 'trigger' ? BigInt(Math.ceil(energy * 1.5)) * params.energyFee || 1_000_000n : 0n
+  const bytes = transactionBytes(contract, feeLimit)
+  const activates = contract.type === 'transfer' && !(await rpc.accountExists(to))
+  return {
+    energy,
+    bandwidth: bytes,
+    energyBurn: BigInt(Math.max(0, energy - resources.energy)) * params.energyFee,
+    bandwidthBurn: contract.type === 'transfer' ? transferBurn(resources, bytes, params, activates) : bandwidthBurn(resources, bytes, params.bandwidthFee),
+    activates,
+    energyPrice: params.energyFee,
+    bandwidthPrice: params.bandwidthFee,
+  }
+}
+
 /** 转 TRX：普通地址用 TransferContract；合约地址用合约调用（空 calldata 带 call_value，主网禁止 TransferContract 转给合约） */
 async function trxContract(rpc: TronRpc, owner: string, to: string, amount: bigint): Promise<TronContract> {
   return (await rpc.isContract(to)) ? { type: 'trigger', owner, contract: to, data: '0x', callValue: amount } : { type: 'transfer', owner, to, amount }

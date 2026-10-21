@@ -24,7 +24,10 @@ export const NATIVE_CURRENCIES: Readonly<Record<number, NativeCurrency>> = {
   324: { name: 'Ether', symbol: 'ETH', decimals: 18 }, // zkSync Mainnet
   988: { name: 'USDT0', symbol: 'USDT0', decimals: 18 }, // Stable Mainnet
   999: { name: 'HYPE', symbol: 'HYPE', decimals: 18 }, // HyperEVM
+  1030: { name: 'CFX', symbol: 'CFX', decimals: 18 }, // Conflux eSpace
   1116: { name: 'Core Blockchain Native Token', symbol: 'CORE', decimals: 18 }, // Core Blockchain Mainnet
+  1672: { name: 'PharosCoin', symbol: 'PROS', decimals: 18 }, // Pharos Mainnet
+  1776: { name: 'Injective', symbol: 'INJ', decimals: 18 }, // Injective
   2818: { name: 'Ether', symbol: 'ETH', decimals: 18 }, // Morph
   4663: { name: 'Ether', symbol: 'ETH', decimals: 18 }, // Robinhood Chain
   5000: { name: 'Mantle', symbol: 'MNT', decimals: 18 }, // Mantle
@@ -38,6 +41,7 @@ export const NATIVE_CURRENCIES: Readonly<Record<number, NativeCurrency>> = {
   80094: { name: 'BERA Token', symbol: 'BERA', decimals: 18 }, // Berachain
   81457: { name: 'Ether', symbol: 'ETH', decimals: 18 }, // Blast
   534352: { name: 'Ether', symbol: 'ETH', decimals: 18 }, // Scroll
+  201022: { name: 'FON', symbol: 'FON', decimals: 18 }, // FSC（ave_web 链配置的主币）
   6666665: { name: 'SAFE(AnWang)', symbol: 'SAFE', decimals: 18 }, // Safe(AnWang) Mainnet
   20260131: { name: 'MetaAssets', symbol: 'MA', decimals: 18 }, // Meta Assets Chain
   728126428: { name: 'TRON', symbol: 'TRX', decimals: 6 }, // Tron

@@ -1,8 +1,10 @@
 import type { CallOverrides } from './aggregate.js'
 import { NATIVE_TOKEN, formatUnits, type BalanceToken } from './erc20.js'
 import type { Provider } from './provider.js'
+import { HttpStatusError, fetchJson } from './http.js'
+import { defillamaPrices, type PriceSource } from './price.js'
 import { transferScan, type TransferScanOptions } from './scan.js'
-import { TRON_CHAIN_ID, isTronAddress, isTronChain, toTronAddress } from './tron.js'
+import { isTronAddress, isTronChain, toTronAddress } from './tron.js'
 
 // ---------------------------------------------------------------------------
 // 代币来源：负责“这个地址可能持有哪些代币”。余额和精度一律由本库用 multicall 在链上核对。
@@ -31,40 +33,9 @@ export interface TokenSource {
   discover(ctx: TokenSourceContext): Promise<DiscoveredToken[] | null>
 }
 
-const REQUEST_TIMEOUT = 20_000
 const LIST_TTL = 60 * 60 * 1000
 const MAX_CACHED_LISTS = 16
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
-
-export class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    target: string,
-  ) {
-    super(`HTTP ${status} from ${target}`)
-    this.name = 'HttpStatusError'
-  }
-}
-
-/**
- * @param secret 请求里带的 Key：出错时错误信息只写域名，不写完整地址，避免 Key 出现在日志里
- */
-function fetchJson<T>(fetchFn: typeof fetch, url: string, init?: RequestInit, secret?: string): Promise<T> {
-  return fetchFn(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT) }).then(async (res) => {
-    if (!res.ok) {
-      throw new HttpStatusError(res.status, secret ? safeHost(url) : url)
-    }
-    return (await res.json()) as T
-  })
-}
-
-function safeHost(url: string): string {
-  try {
-    return new URL(url).host
-  } catch {
-    return 'request'
-  }
-}
 
 // 公开代币列表：缓存“按链过滤、转换后”的结果（不缓存原始 JSON），1 小时；缓存 Promise，同时发起的请求共用，失败不缓存。
 // 公开列表与使用哪个 fetch 无关，所以缓存键只看列表和链
@@ -410,111 +381,9 @@ function dedupe<T extends DiscoveredToken>(tokens: T[]): T[] {
   return [...seen.values()]
 }
 
-// ---------------------------------------------------------------------------
-// 价格来源
-// ---------------------------------------------------------------------------
-
-export interface PriceSourceContext {
-  chainId: number
-  /** 代币地址（不含主币） */
-  tokens: readonly string[]
-  /** 主币 symbol（需要主币价格时）；不需要时为 null */
-  nativeSymbol: string | null
-  fetch: typeof fetch
-}
-
-export interface PriceSource {
-  readonly name: string
-  /** 返回 去重键 → 美元价格：EVM 是小写 0x 地址；Tron 是 T 开头的 base58 地址（区分大小写）；主币用键 'native'。没有价格的不返回 */
-  prices(ctx: PriceSourceContext): Promise<Map<string, number>>
-}
-
-/** DefiLlama 的链标识：chainId → slug（2026-10 实测可用） */
-export const DEFILLAMA_CHAINS: Readonly<Record<number, string>> = {
-  1: 'ethereum',
-  10: 'optimism',
-  56: 'bsc',
-  130: 'unichain',
-  137: 'polygon',
-  143: 'monad',
-  196: 'xlayer',
-  204: 'op_bnb',
-  324: 'era',
-  999: 'hyperliquid',
-  1116: 'core',
-  2818: 'morph',
-  5000: 'mantle',
-  8453: 'base',
-  9745: 'plasma',
-  34443: 'mode',
-  42161: 'arbitrum',
-  43114: 'avax',
-  57073: 'ink',
-  59144: 'linea',
-  80094: 'berachain',
-  81457: 'blast',
-  534352: 'scroll',
-  [TRON_CHAIN_ID.mainnet]: 'tron',
-}
-
-/** 主币价格：按主币 symbol 对应 CoinGecko 的币种 id（DefiLlama 用 coingecko:<id> 查） */
-const NATIVE_PRICE_IDS: Readonly<Record<string, string>> = {
-  ETH: 'ethereum',
-  BNB: 'binancecoin',
-  POL: 'polygon-ecosystem-token',
-  AVAX: 'avalanche-2',
-  MNT: 'mantle',
-  OKB: 'okb',
-  HYPE: 'hyperliquid',
-  BERA: 'berachain-bera',
-  CORE: 'coredaoorg',
-  MON: 'monad',
-  XPL: 'plasma',
-  TRX: 'tron',
-}
-
-/**
- * DefiLlama 价格（免费、不需要 Key）。minConfidence：DefiLlama 给出的置信度下限（0~1），低于它视为没有价格，默认 0.9。
- * 注意：流动性很差的代币价格可能虚高，展示总资产时建议配合 minUsd 或自己的价格源。
- */
-export function defillamaPrices(options: { minConfidence?: number } = {}): PriceSource {
-  const minConfidence = options.minConfidence ?? 0.9
-  return {
-    name: 'defillama',
-    async prices({ chainId, tokens, nativeSymbol, fetch: fetchFn }) {
-      const result = new Map<string, number>()
-      const slug = DEFILLAMA_CHAINS[chainId]
-      const nativeId = nativeSymbol ? NATIVE_PRICE_IDS[nativeSymbol.toUpperCase()] : undefined
-      // 查询键 → 结果里用的去重键：EVM 地址小写；Tron 地址区分大小写，DefiLlama 要用原样的 base58（T…）地址
-      const resultKey = new Map<string, string>()
-      const tokenKeys = slug
-        ? tokens.map((t) => {
-            const tron = slug === 'tron'
-            const query = `${slug}:${tron ? toTronAddress(t) : t.toLowerCase()}`
-            resultKey.set(query.toLowerCase(), tron ? toTronAddress(t) : t.toLowerCase())
-            return query
-          })
-        : []
-      const keys = [...(nativeId ? [`coingecko:${nativeId}`] : []), ...tokenKeys]
-      const batches: string[][] = []
-      for (let i = 0; i < keys.length; i += 100) {
-        batches.push(keys.slice(i, i + 100))
-      }
-      const responses = await Promise.all(
-        batches.map((batch) => fetchJson<{ coins?: Record<string, { price?: number; confidence?: number }> }>(fetchFn, `https://coins.llama.fi/prices/current/${batch.join(',')}`)),
-      )
-      for (const res of responses) {
-        for (const [key, coin] of Object.entries(res.coins ?? {})) {
-          if (typeof coin.price !== 'number' || !Number.isFinite(coin.price) || (coin.confidence !== undefined && coin.confidence < minConfidence)) {
-            continue
-          }
-          result.set(key.startsWith('coingecko:') ? 'native' : (resultKey.get(key.toLowerCase()) ?? key.slice(key.indexOf(':') + 1).toLowerCase()), coin.price)
-        }
-      }
-      return result
-    },
-  }
-}
+// 价格来源在 price.ts（子路径 /price）；这里继续导出，旧的 import 不受影响
+export { DEFILLAMA_CHAINS, defillamaPrices, type PriceSource, type PriceSourceContext } from './price.js'
+export { HttpStatusError }
 
 // ---------------------------------------------------------------------------
 // ownerTokens
@@ -617,7 +486,7 @@ export async function ownerTokens(provider: Provider, owner: string, options: Ow
   // 价格源的键：Tron 上统一用 T 地址（代币来源给的可能是 0x 格式）
   const priceKey = (address: string) => (isTronChain(chainId) ? toTronAddress(address) : addressKey(address))
   const priceMap = priceSource
-    ? await priceSource.prices({ chainId, tokens: held.map((x) => (isTronChain(chainId) ? toTronAddress(x.meta.address) : x.meta.address)), nativeSymbol: nativeAddress ? (nativeInfo?.symbol ?? null) : null, fetch: fetchFn })
+    ? await priceSource.prices({ chainId, tokens: held.map((x) => (isTronChain(chainId) ? toTronAddress(x.meta.address) : x.meta.address)), nativeSymbol: nativeAddress ? (nativeInfo?.symbol ?? null) : null, fetch: fetchFn, provider })
     : new Map<string, number>()
   const valueOf = (formatted: string, price: number | undefined) => (price === undefined ? null : Number(formatted) * price)
 

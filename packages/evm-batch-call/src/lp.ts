@@ -3,7 +3,8 @@ import type { Call } from './call.js'
 import { formatUnits } from './erc20.js'
 import { getAmountsForLiquidity, getFeeGrowthInside, getFeesEarned, getSqrtRatioAtTick, sqrtPriceToPrice, tickToPrice } from './lpMath.js'
 import { v4Positions, type LpV4Options } from './lpV4.js'
-import { defillamaPrices, type PriceSource, type TokenSource } from './owner.js'
+import type { TokenSource } from './owner.js'
+import { defillamaPrices, type PriceSource } from './price.js'
 import type { Provider } from './provider.js'
 import { TRON_CHAIN_ID, isTronAddress, isTronChain, toEvmAddress, toTronAddress } from './tron.js'
 import { withSignal } from './util.js'
@@ -629,6 +630,7 @@ async function finalize(provider: Provider, chainId: number, raw: RawPosition[],
         tokens: addresses.filter((a) => !info.get(a)?.native).map((a) => (tron ? toTronAddress(a) : a)),
         nativeSymbol: nativeToken ? nativeToken.symbol : null,
         fetch: fetchFn,
+        provider,
       })
     } catch (err) {
       // 同步抛错和 reject 都在这里接住

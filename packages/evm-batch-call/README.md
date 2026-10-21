@@ -6,7 +6,7 @@
 pnpm add @w3lib/evm-batch-call ethers
 ```
 
-**在线 demo**：<https://web3-lib.github.io/libs/evm/>（余额、代币信息、资产列表、LP 仓位、添加 / 移除流动性（报价，连接浏览器钱包后可以发送）、NFT，8 条链含 Tron，显示每次查询实际发出的节点请求数）。本地运行：`pnpm --filter @w3lib/evm-batch-call demo`（http://localhost:5174）
+**在线 demo**：<https://web3-lib.github.io/libs/evm/>（余额、代币信息、资产列表、LP 仓位、添加 / 移除流动性（报价，连接浏览器钱包后可以发送）、NFT、价格 / 资产总值、授权（批量查询 + 撤销）、域名（ENS / SPACE ID / Basenames 正反向解析）、手续费估算、兑换（报价，连接浏览器钱包后可以发送，可填转账税）、代币风险（买卖税 / 貔貅检查），8 条链含 Tron，显示每次查询实际发出的节点请求数）。本地运行：`pnpm --filter @w3lib/evm-batch-call demo`（http://localhost:5174）
 
 ## 快速上手
 
@@ -371,15 +371,174 @@ await collectFees(multi, privateKey, { position })                              
 打包：在已经用到 `Provider` 的基础上，只用 `build*` 约增加 40KB（minify，gzip 约 13KB），加上发送约 77KB（gzip 约 26KB，其中大部分是 `/write` 的发送代码），均不含 ethers。
 
 
+## 兑换
+
+子路径 `@w3lib/evm-batch-call/swap`：在内置协议表的 V2 / V3 池子里找最好的路线，报价并构建 / 发送兑换交易（Tron 上是 SunSwap V2）。
+
+```ts
+import { NATIVE_TOKEN } from '@w3lib/evm-batch-call'
+import { getSwapQuote, swap } from '@w3lib/evm-batch-call/swap'
+
+const plan = await getSwapQuote(user, { tokenIn: NATIVE_TOKEN, tokenOut: USDT, amountInFormatted: '0.1' }, { chainId: 56 })
+plan.amountOutFormatted   // '72.6'
+plan.route                // { protocol: 'pancakeswap-v3', version: 'v3', path: [WBNB, USDT], fees: [100], … }
+plan.transactions         // 授权（卖出代币且额度不够时）+ 兑换
+
+await swap(provider, key, { tokenIn: USDT, tokenOut: NATIVE_TOKEN, amountInFormatted: '100' }, { slippage: 0.01 })
+```
+
+- **路线**：直接兑换，加上经过包装主币 / 稳定币（`LP_QUOTE_TOKENS`，可用 `intermediates` 改）的两跳；V2 的每个协议、V3 的每个手续费档位都算一条候选。V3 先查哪些池子存在、当前流动性（没有流动性的不算，两跳时每一跳只用流动性最大的 2 个档位），然后批量报价（V2 用 Router 的 `getAmountsOut`，一次报完；QuoterV2 很费 gas，每 3 个一组并发，避免超过节点的 gas 上限），选输出最多的。`routes` 里是全部候选的报价
+- **最少收到**：`amountOutMin = 报价 × (1 − slippage)`（默认 0.5%），交易里由 Router 检查；`priceImpact` 是这笔的价格比极小数量的价格差多少
+- **带转账税的代币**：V2 的报价（`getAmountsOut`）不含转账税，实际收到的更少，默认滑点下会 `INSUFFICIENT_OUTPUT_AMOUNT` 回滚。用 `tax`（如 `0.05`）把最少收到再乘 (1 − tax)，税率可用 `/risk` 查；`plan.amountOut` 仍是不含税的报价
+- **授权后重新报价**：`swap` 在有授权时先发授权，确认后重新报价再发兑换，deadline 和最少收到从发兑换那一刻算
+- **交易**：V2 走 Router 的 `swapExact…SupportingFeeOnTransferTokens`（主币进出用 ETH 版本）；V3 走 SwapRouter02 / PancakeSwap SmartRouter 的 `multicall(deadline, …)`，卖出主币时附带 value，买入主币时先收到 Router 再 `unwrapWETH9`。卖出代币时额度不够先授权给 Router（`approve: 'max'` 可设无限额度）
+- **协议**：`swapProtocols(chainId)`——V2 是协议表里有 Router 的，V3 是 `V3_SWAP_CONTRACTS` 里有报价和兑换合约的（Uniswap V3：7 条链；PancakeSwap V3：Ethereum、BSC、Base）。V4 和聚合器暂不支持
+- 报价是池子当前的状态，交易上链前价格可能变化；有转账税的代币报价会偏高（实际收到的少），可以先用 [代币风险检查](#代币风险检查) 看税率
+
+主网核对：8 条链（含 Tron）报价正常。在 Base、BSC 上固定一个区块报价（`blockTag`），在同一个区块上用 `eth_call` 执行构建出的兑换交易（卖出代币时用 state override 设置额度）：最少收到 = 报价时成功、= 报价 + 1 时失败，说明收到的正好等于报价——覆盖主币 → 稳定币、稳定币 → 主币（授权 + 解包）、V3 两跳、V2 的三种函数；Tron 的 SunSwap V2 两个方向同样核对过。
+
+其他选项：`route` 指定走 `routes` 里的某一条（如让用户选另一条路线）；`blockTag` 按某个区块的状态报价。
+
+打包：在已经用到 `Provider` 的基础上，`buildSwap` 约增加 16KB（minify，gzip 约 7KB，含 `/liquidity` 的授权代码和协议表），`swap` 另外按需加载 `/write` 的发送代码。
+
+## 代币风险检查
+
+子路径 `@w3lib/evm-batch-call/risk`：在 `eth_call` 里模拟“买入 → 转账 → 卖出”（deployless 的探测合约，不部署、不发交易），算出税率、判断能不能卖。
+
+```ts
+import { getTokenRisks } from '@w3lib/evm-batch-call/risk'
+
+const [risk] = await getTokenRisks([token], { chainId: 56 })
+// { stage: 'ok', honeypot: false, buyTax: 0.05, sellTax: 0.08, transferTax: 0.02, owner: '0x…', implementation: null,
+//   flags: ['has-tax', 'owned'], protocol: 'pancakeswap-v2', pool: '0x…', buyGas: 125000, sellGas: 98000 }
+```
+
+- 用代币 / 包装主币里包装主币一侧最深的 V2 池子，从包装主币合约发起 `eth_call`（它持有大量主币，`eth_call` 不需要签名），默认用储备的 1 / 1000（最多 1 个主币）买入
+- **税率**：买入税 = 1 − 实际收到 / Router 报价；转账税：转一成给新地址，看对方收到多少；卖出税取两种算法中较大的：池子实际收到的代币（转账时扣的税，精确），以及换回的主币比报价少多少（有的代币卖出时顺便把收来的税也卖进同一个池子）
+- 节点、网络、限频的错误会抛出，不当成代币的风险；只有执行失败才标为买不进
+- **判断**：`stage` 是模拟到哪一步（`buy-failed` 买不进：可能还没开放交易或限制了合约；`sell-failed` 卖不出）。`honeypot`：卖不出、转不了，或卖出税 ≥ 90%。`flags` 汇总：`honeypot`、`cannot-buy`、`high-buy-tax` / `high-sell-tax` / `high-transfer-tax`（> 10%）、`has-tax`（> 0.5%）、`proxy`（EIP-1967 可升级代理，规则以后可以改）、`owned`（`owner()` 不是零地址）、`no-pool`
+- 只能发现模拟时的行为：针对特定地址、时间、数量才生效的限制（黑名单、交易冷却、单笔上限）不一定能发现；Tron 不支持
+
+核对：在 BSC 主网分叉上部署测试代币（买 5% / 卖 8% / 转账 2% 税、卖出时把攒下的税也卖进池子、禁止卖出、卖出税 95%）和 PancakeSwap V2 池子，税率一致、貔貅盘都能识别；主网上 CAKE、USDT、PEPE 等没有税。
+
+打包：探测合约约 3KB 字节码；在已经用到 `Provider` 的基础上 `getTokenRisks` 约增加 19KB（minify，gzip 约 8KB）。
+
+## 手续费估算
+
+子路径 `@w3lib/evm-batch-call/fees`：当前的手续费建议，和一笔交易大概要付多少手续费。
+
+```ts
+import { getCostEstimate, getFeeEstimate } from '@w3lib/evm-batch-call/fees'
+
+await getFeeEstimate({ chainId: 1 })
+// { type: 'eip1559', baseFee: '1200000000', slow: { maxFeePerGas, maxPriorityFeePerGas }, normal: {…}, fast: {…} }
+
+await getCostEstimate({ from: user, to: USDT, data }, { chainId: 8453 })
+// { type: 'evm', gasLimit: '45000', gasPrice, fee, maxFee, l1Fee: '…', total, totalFormatted: '0.0000123', symbol: 'ETH' }
+
+await getCostEstimate({ from, to: USDT, data }, { chainId: 728126428 })
+// { type: 'tron', energy: 64285, bandwidth: 345, energyBurn: '6428500', bandwidthBurn: '345000', activates: false, totalFormatted: '6.7735', symbol: 'TRX' }
+```
+
+- **费用建议**：按最近 20 个区块的 `eth_feeHistory`，baseFee 取下一个区块的，三档优先费是各区块第 10 / 50 / 90 百分位的中位数（空区块不算），`maxFeePerGas = baseFee × 2 + 优先费`（`/write` 默认用节点的 `getFeeData`，优先费取 `eth_maxPriorityFeePerGas`，公式相同但优先费来源不同）。节点不支持 `eth_feeHistory` 或 baseFee 为 0 的链（如 BSC）按 `eth_gasPrice`（快档 1.2 倍）；网络等其他错误照常抛出
+- **一笔交易**：预估 gas（会执行一遍，revert 时抛出）× 这一档的价格；`fee` 按 baseFee + 优先费算（预计实际付的），`maxFee` 是最多付的。OP Stack / Scroll 链加上 L1 数据费（含 25% 余量）。多笔交易可以先查一次 `estimateFees` 再传 `fees` 共用
+- **Tron**：模拟合约调用得到能量，按发送者剩余的质押能量、免费 / 质押带宽抵扣，不够的部分按链参数的价格烧 TRX；转 TRX 给没激活的地址时算上激活费（`activates: true`）。能量按模拟值，不加余量
+
+主网核对：Ethereum、Base（含 L1 数据费）、BSC 上的 ERC20 转账；Tron 上有质押资源和全新地址两种发送者的 USDT 转账，以及给没激活的地址转 TRX。
+
+打包：在已经用到 `Provider` 的基础上，`getFeeEstimate` 约增加 6KB（minify，gzip 约 2KB）；`getCostEstimate` 另外按需加载 `/write` 的节点代码，Tron 的部分只在 Tron 上加载。
+
+## 域名解析
+
+子路径 `@w3lib/evm-batch-call/names`：名字 → 地址、地址 → 名字，用 Provider 这条链的域名服务。
+
+| 链 | 服务 | 名字 |
+| --- | --- | --- |
+| Ethereum | ENS | `.eth` 以及导入的 DNS 域名 |
+| BSC | SPACE ID | `.bnb` |
+| Base | Basenames | `.base.eth` |
+
+```ts
+import { getAddressNames, getNameAddresses } from '@w3lib/evm-batch-call/names'
+
+await getNameAddresses(['vitalik.eth', 'nick.eth'], { chainId: 1 })
+// [{ name: 'vitalik.eth', normalized: 'vitalik.eth', address: '0xd8dA…6045', service: 'ens' }, …]
+await getAddressNames([user], { chainId: 56 })
+// [{ address: user, name: 'alice.bnb', service: 'spaceid' }]
+```
+
+- 名字按 ENSIP-15 规范化（大小写、全角等），结果的 `normalized` 是规范化后的名字；不合法的名字 `normalized` / `address` 为 null
+- 正查读注册表的 resolver、再读 `addr`，两次 multicall；反查读主名字后再正查核对（名字要解析回同一个地址，没核对的反查记录谁都能设置），共四次 multicall
+- 不支持通配解析（ENSIP-10）和链下解析（CCIP-Read），这类名字（如部分子域名）返回 null；Tron 上没有域名服务
+- `services` 可以换成自己的 ENS 式注册表（`{ id, name, chainId, registry, suffixes, reverseSuffix }`）
+
+打包：在已经用到 `Provider` 的基础上约增加 2KB（minify，gzip 不到 1KB；名字规范化用 ethers 自带的 `ensNormalize`）。
+
+## 授权管理
+
+子路径 `@w3lib/evm-batch-call/approvals`：查一个地址给出的授权，批量撤销。
+
+```ts
+import { approvals, getApprovals, revokeApprovals, scanApprovals } from '@w3lib/evm-batch-call/approvals'
+
+// 持有的代币 × 已知的被授权方（内置协议的 Router / 仓位合约、Uniswap / PancakeSwap 的 Router、1inch、0x、ParaSwap、Permit2），一次 multicall
+const list = await getApprovals(user, { chainId: 56, tokens: [USDT, CAKE] })
+// [{ type: 'erc20', token: USDT, symbol: 'USDT', spender: '0x1111…', spenderName: '1inch Router v6', amount: '…', unlimited: true },
+//  { type: 'permit2', token: USDT, spender: '0x66a9…', spenderName: 'Uniswap Universal Router', amount: '…', expiration: 1767225600, expired: false, … }]
+
+await revokeApprovals(provider, key, list.filter((a) => a.type !== 'nft' && a.unlimited))
+```
+
+- **三种授权**：ERC20 的 `allowance`；Permit2 的额度（`amount` / `expiration` / `nonce`，过期的不返回）；NFT 的 `isApprovedForAll`（传 `nfts`，默认检查 OpenSea、Blur 的 operator）。`includeZero: true` 时也返回额度为 0 / 已过期 / 未授权的项
+- **检查范围**：`tokens` × `spenders`（默认 `knownSpenders(chainId)`），加上直接给出的 `pairs` / `nftPairs`。被授权方不在已知列表里时 `spenderName` 为 null
+- **按事件发现**：`scanApprovals` 扫地址发出的 `Approval` / `ApprovalForAll` 事件和 Permit2 的 `Approval` / `Permit` 事件，返回授权过的 `pairs` / `nftPairs`（只发现，当前是否还有效交给 `approvals` 查），可以保存 `progress` 下次接着扫。需要节点支持不带合约地址的 `eth_getLogs`（publicnode 等节点要求带地址，不行；drpc、1rpc、flashbots 可以），公共节点的区块范围限制很严，适合从某个时间点开始增量扫描，不适合扫全部历史。Tron 不支持
+- **撤销**：`buildRevokes` 只构建交易（ERC20 每个一笔 `approve(spender, 0)`，Permit2 的全部合成一笔 `lockdown`，NFT 每个一笔 `setApprovalForAll(false)`）；`revokeApprovals` 构建后发送，钱包和选项同 `batchCall`（`mode: '7702'` 时同一钱包的撤销合成一笔交易），默认一笔失败不影响后面的
+- **Tron**：SunSwap 的 Router / 仓位合约的额度和撤销（T 地址），没有 Permit2
+
+主网核对：Ethereum 上从最近区块的真实 `Approval` / `Permit` / `ApprovalForAll` 事件取授权，额度和合约一致，`scanApprovals` 能发现，撤销的三种交易都能预估通过；Tron 上读到 SunSwap 的真实授权，撤销能模拟。
+
+打包：在已经用到 `Provider` 的基础上，`getApprovals` 约增加 11KB（minify，gzip 约 5KB），`scanApprovals` 很小（约 4KB gzip，不含 Provider）；发送的代码按需加载，只查授权时不会打包。
+
+## 价格
+
+子路径 `@w3lib/evm-batch-call/price`：代币的美元价格和地址的资产总值。
+
+```ts
+import { NATIVE_TOKEN } from '@w3lib/evm-batch-call'
+import { getPortfolio, getTokenPrices } from '@w3lib/evm-batch-call/price'
+
+await getTokenPrices([NATIVE_TOKEN, USDT, newToken], { chainId: 56 })
+// [{ token: '0xEeee…', native: true, price: 612.3, source: 'defillama' }, …, { token: newToken, price: 0.0012, source: 'onchain' }]
+
+const p = await getPortfolio(user, { chainId: 56, tokens: [NATIVE_TOKEN, USDT, CAKE], lp: true })
+p.totalUsd // 代币 + LP 仓位的合计；p.tokens 按价值排序，p.lp 是 LP 仓位
+```
+
+- 价格源依次使用，前面没有价格的代币交给后面的（`sources`，默认 `[defillamaPrices(), onchainPrices()]`），结果的 `source` 是给出价格的源
+- `defillamaPrices({ at })`：历史价格（unix 秒或 `Date`）；`minConfidence` 过滤置信度低的价格（默认 0.9）
+- `onchainPrices()`：在内置协议表的 V2 / V3 池子里找代币对包装主币、稳定币的池子，用计价币一侧最深的池子的价格；稳定币按 1 美元。V3 池子的深度取计价币余额和当前价格附近的流动性折算值中较小的（只看余额会被“远处放一笔、再推价格”的方式骗过），`minLiquidityUsd`（默认 10000）以下的池子不用。这只能挡住很小的池子：有人愿意自己出资建一个够深的池子时，价格仍然可以是他定的，所以新币的链上价格只适合展示。主网实测和 DefiLlama 相差在 0.5% 以内（Ethereum、BSC、Base、Tron）
+- `combinePrices([…])` 把多个源组合成一个，可以传给 `getLpPositions` / `getOwnerTokens` 的 `prices`
+- 资产总值只计入传入的代币（EVM 不能只靠节点列出地址持有的全部代币），`lp: true` 时加上 LP 仓位（参数同 `getLpPositions`）
+
+价格只用于展示和估值：链上价格是池子当前的价格，可能被单个区块内的交易影响，不要用它算交易的最小数量。
+
+打包：在已经用到 `Provider` 的基础上，`getTokenPrices` 约增加 12KB（minify，gzip 约 5KB），`getPortfolio`（含 LP 仓位）约 31KB（gzip 约 12KB），均不含 ethers。
+
 ## 功能
 
 - **常用查询**：余额、代币详情、授权额度、NFT（集合 / 持有 / 元数据地址 / ERC1155 余额，子路径 `/nft`），一个函数一次请求
+- **兑换**（子路径 `/swap`）：V2 / V3 池子的最佳路线（直接或两跳）、报价、构建和发送，主币自动包装 / 解包
+- **代币风险检查**（子路径 `/risk`）：模拟买入 / 转账 / 卖出，算出买卖税、识别貔貅盘，代理合约、owner
+- **手续费估算**（子路径 `/fees`）：EIP-1559 三档费用建议，一笔交易的手续费（含 L1 数据费），Tron 按能量 / 带宽算要烧的 TRX
+- **域名解析**（子路径 `/names`）：ENS、SPACE ID（.bnb）、Basenames（.base.eth），批量正查、反查（正查核对）
+- **授权管理**（子路径 `/approvals`）：ERC20 / Permit2 / NFT 授权的批量查询（默认检查常见 Router、聚合器、NFT 市场），按事件发现，批量撤销
+- **价格**（子路径 `/price`）：DefiLlama 当前 / 历史价格、链上 V2 / V3 池子价格，组合价格源，地址的资产总值（代币 + LP 仓位）
 - **资产列表**（不推荐使用，尽力而为，子路径 `/owner`）：`getOwnerTokens`，免费公开代币列表或带 Key 的索引服务发现代币，multicall 核对余额，可选 DefiLlama 价格
 - **批量读取**：`all` / `tryAll` / `tryEach`，N 条读调用合成一次 `eth_call`；支持数组或对象输入
 - **自动合并**：绑定合约直接 `await`、`provider.call(x)`，以及 `balances` / `tokens` / `allowances`，同一收集窗口内的调用合并成一次请求并去重
 - **预执行**：`staticCall` / `staticCallAll` / `method.staticCall`，带 `from` / `value` 模拟交易，返回解析好的 revert 原因
 - **主币余额合并**：`getEthBalance` 与合约调用在同一次 `eth_call` 里——无论链上有没有 Multicall3
-- **任意链可用**：内置 Multicall3 地址表；表里没有、地址无效、或查询早于部署区块时，自动改用 deployless（链上无需部署任何合约）。少数链不支持 deployless（合约创建式 `eth_call`，如 Oasis Emerald、Aurora），这些链已在地址表里，只能查合约部署之后的状态；`pnpm check:rpc` 会检查内置节点表里每条链至少有一种批量方式可用
+- **任意链可用**：内置 Multicall3 地址表；表里没有、地址无效、或查询早于部署区块时，自动改用 deployless（链上无需部署任何合约）。少数链不支持 deployless（合约创建式 `eth_call` 返回空数据，如 Oasis Emerald、Aurora）：表里有 Multicall3 的链只能查合约部署之后的状态；deployless 失败时（空数据 / 无法解码）自动改成逐条 `eth_call`（主币余额用 `eth_getBalance`，合并在一个 HTTP batch 里，慢一些但任何链都能用），确认不支持后记住 10 分钟、不再先试一次 deployless；`pnpm check:rpc` 会检查内置节点表里每条链至少有一种批量方式可用
 - **备用节点**：传多个节点自动故障切换；不传节点使用内置公共节点表（34 条 EVM 链 + Tron）
 - **chainId 可选**：传了节点就能自动识别 chainId，结果缓存，钱包切链自动失效
 - **Tron**：走 Tron HTTP API，T 开头地址可以直接用

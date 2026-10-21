@@ -13,13 +13,19 @@ import {
   type LiquidityTxResult,
   type RemoveLiquidityParams,
 } from '@w3lib/evm-batch-call/liquidity'
+import { buildRevokes, getApprovals, revokeApprovals, type Approval, type RevokeResult } from '@w3lib/evm-batch-call/approvals'
+import { getCostEstimate, getFeeEstimate, type CostEstimate, type FeeLevel, type FeeLevelEstimate } from '@w3lib/evm-batch-call/fees'
 import { LP_PROTOCOLS, LP_QUOTE_TOKENS, getLpPositions, type LpPosition } from '@w3lib/evm-batch-call/lp'
+import { NAME_SERVICES, getAddressNames, getNameAddresses } from '@w3lib/evm-batch-call/names'
+import { getPortfolio, getTokenPrices, type Portfolio } from '@w3lib/evm-batch-call/price'
+import { getTokenRisks, type TokenRisk } from '@w3lib/evm-batch-call/risk'
+import { getSwapQuote, swap, type SwapPlan, type SwapResult, type SwapTxResult } from '@w3lib/evm-batch-call/swap'
 import { createWallet } from '@w3lib/wallet'
 import { arbitrum, avalanche, base, bsc, ethereum, optimism, polygon } from '@w3lib/wallet/chains'
 import { evm } from '@w3lib/wallet/evm'
 import { tron } from '@w3lib/wallet/tron'
 import { createWalletModal } from '@w3lib/wallet/ui'
-import { BrowserProvider, formatUnits, type Eip1193Provider } from 'ethers'
+import { BrowserProvider, formatUnits, parseUnits, type Eip1193Provider } from 'ethers'
 import { getNftCollections, getNftOwners, getNftTokenUris } from '@w3lib/evm-batch-call/nft'
 import { getOwnerTokens } from '@w3lib/evm-batch-call/owner'
 
@@ -128,9 +134,10 @@ function applyChain() {
   nftContract.value = sampleNft(chainId)
   // Tron 单次合约调用有 CPU 上限：SunSwap V3 的 tokenURI 在链上生成 SVG，几个放进同一次 multicall 就会超时
   nftTokenIds.value = chainId === TRON ? '1' : '1, 2, 3'
-  for (const id of ['balancesResult', 'tokensResult', 'ownerResult', 'lpResult', 'nftResult', 'liqResult']) $(id).replaceChildren()
-  for (const id of ['balancesStats', 'tokensStats', 'ownerStats', 'lpStats', 'nftStats', 'liqStats']) $(id).textContent = ''
+  for (const id of ['balancesResult', 'tokensResult', 'ownerResult', 'lpResult', 'nftResult', 'liqResult', 'priceResult', 'apprResult', 'revokeResult', 'namesResult', 'feesResult', 'swapResult', 'riskResult']) $(id).replaceChildren()
+  for (const id of ['balancesStats', 'tokensStats', 'ownerStats', 'lpStats', 'nftStats', 'liqStats', 'priceStats', 'apprStats', 'revokeStats', 'namesStats', 'feesStats', 'swapStats', 'riskStats']) $(id).textContent = ''
   applyLiquidityChain()
+  applyExtraChain()
 }
 
 rpcInput.value = settings.rpc
@@ -543,9 +550,6 @@ function setPositions(list: LpPosition[], of: string) {
 
 liq.protocol.addEventListener('change', applyProtocol)
 liq.action.addEventListener('change', applyAction)
-// 初始化放在最后：applyChain 会用到上面定义的钱包和表单
-applyChain()
-applyAction()
 
 const text = (input: HTMLInputElement) => input.value.trim() || undefined
 const tokenOf = (input: HTMLInputElement) => (/^(native|主币)?$/i.test(input.value.trim()) ? NATIVE_TOKEN : input.value.trim())
@@ -739,3 +743,519 @@ bind('runLiqSend', 'liq', async () => {
     chainSelect.disabled = false
   }
 })
+
+// ---- 价格、授权、域名、手续费、兑换、风险（子路径 /price /approvals /names /fees /swap /risk） ----
+
+const ex = {
+  priceTokens: $<HTMLTextAreaElement>('priceTokens'),
+  priceLp: $<HTMLInputElement>('priceLp'),
+  priceMinUsd: $<HTMLInputElement>('priceMinUsd'),
+  apprTokens: $<HTMLTextAreaElement>('apprTokens'),
+  apprNfts: $<HTMLTextAreaElement>('apprNfts'),
+  apprPermit2: $<HTMLInputElement>('apprPermit2'),
+  apprZero: $<HTMLInputElement>('apprZero'),
+  nameList: $<HTMLTextAreaElement>('nameList'),
+  nameAddresses: $<HTMLTextAreaElement>('nameAddresses'),
+  feeTo: $<HTMLInputElement>('feeTo'),
+  feeData: $<HTMLInputElement>('feeData'),
+  feeValue: $<HTMLInputElement>('feeValue'),
+  feeLevel: $<HTMLSelectElement>('feeLevel'),
+  swapTokenIn: $<HTMLInputElement>('swapTokenIn'),
+  swapTokenOut: $<HTMLInputElement>('swapTokenOut'),
+  swapAmount: $<HTMLInputElement>('swapAmount'),
+  swapSlippage: $<HTMLInputElement>('swapSlippage'),
+  swapTax: $<HTMLInputElement>('swapTax'),
+  swapApproveMax: $<HTMLInputElement>('swapApproveMax'),
+  riskTokens: $<HTMLTextAreaElement>('riskTokens'),
+}
+
+/** 域名示例（别的链没有内置的域名服务） */
+const NAME_SAMPLES: Record<number, string> = { 1: 'vitalik.eth', 56: 'binance.bnb', 8453: 'jesse.base.eth' }
+
+/** 上一次“查询授权”的结果和勾选框（和 lastApprovals 一一对应）、查询用的地址 */
+let lastApprovals: Approval[] = []
+let approvalChecks: HTMLInputElement[] = []
+let approvalsOwner = ''
+
+/** 切链时：各区块填这条链的默认值，Tron 没有 Permit2 */
+function applyExtraChain() {
+  const chainId = settings.chain
+  const quote = LP_QUOTE_TOKENS[chainId] ?? []
+  ex.priceTokens.value = ['native', ...quote].join('\n')
+  ex.apprTokens.value = quote.join('\n')
+  ex.apprNfts.value = ''
+  ex.apprPermit2.checked = !isTron(chainId)
+  ex.apprPermit2.disabled = isTron(chainId)
+  lastApprovals = []
+  approvalChecks = []
+  approvalsOwner = ''
+  ex.nameList.value = NAME_SAMPLES[chainId] ?? ''
+  ex.nameAddresses.value = ''
+  ex.feeTo.value = ex.feeData.value = ex.feeValue.value = ''
+  ex.swapTokenIn.value = 'native'
+  ex.swapTokenOut.value = quote[1] ?? ''
+  ex.swapAmount.value = isTron(chainId) ? '10' : '0.001'
+  ex.swapTax.value = ''
+  // 第一个是包装主币：风险检查的是别的代币
+  ex.riskTokens.value = quote.slice(1).join('\n')
+}
+
+/** 代币列表：native / 主币 换成 NATIVE_TOKEN */
+const tokenLines = (value: string) => lines(value).map((t) => (/^(native|主币)$/i.test(t) ? NATIVE_TOKEN : t))
+
+const percentText = (v: number | null) => (v === null ? null : `${(v * 100).toFixed(2)}%`)
+
+/** 连接钱包（没连时弹出连接窗口）、切到这条链，返回签名者：EVM 是 ethers Signer，Tron 直接用钱包注入的 tronWeb */
+async function walletSigner(chainId: number) {
+  let c = connection()
+  if (!c) c = await modal.open(walletNamespace())
+  if (!c) throw new Error('没有连接钱包')
+  if (isTron(chainId)) {
+    if (c.chainId !== 'mainnet') throw new Error(`钱包在 ${c.chainId ?? '未知网络'}，请在钱包里切到 Tron 主网`)
+  } else if (Number(c.chainId) !== chainId) {
+    await wallet.switchChain(chainId, 'evm')
+    c = connection()
+    if (!c) throw new Error('钱包已断开')
+    // 用户拒绝或钱包忽略切换时，连接还在原来的链上：不能把按 chainId 构建的交易发过去
+    if (Number(c.chainId) !== chainId) throw new Error(`钱包还在链 ${c.chainId ?? '未知'}，请在钱包里切到链 ${chainId} 后重试`)
+  }
+  const signer = isTron(chainId) ? (c.provider as never) : await new BrowserProvider(c.provider as Eip1193Provider).getSigner()
+  return { signer, address: c.address }
+}
+
+/** 交易状态的标签（等待、成功、失败） */
+function statusTag(status: string, error: string | null | undefined): Node {
+  return tag(status + (error ? `：${error}` : ''), status === 'confirmed' ? 'ok' : status === 'failed' || status === 'reverted' ? 'bad' : '')
+}
+
+/** 项目 / 值 两列的表（值为 null 的行不显示） */
+const keyValues = (rows: Array<[string, Cell]>) =>
+  table(
+    ['项目', '值'],
+    rows.filter(([, v]) => v !== null),
+  )
+
+// ---- 价格 / 资产总值 ----
+
+function priceTokensInput(): string[] {
+  const tokens = tokenLines(ex.priceTokens.value)
+  if (!tokens.length) throw new Error('请填写至少一个代币')
+  return tokens
+}
+
+bind('runPrices', 'price', async () => {
+  const tokens = priceTokensInput()
+  let priceError: unknown = null
+  const list = await getTokenPrices(tokens, {
+    ...nodeOptions(),
+    onError: (_source, err) => {
+      priceError = err
+    },
+  })
+  return {
+    data: list,
+    view: withPriceWarning(
+      table(
+        ['代币', '价格', '来源', '地址'],
+        list.map((p) => [p.native ? '主币' : null, usd(p.price), p.source, p.native ? '主币' : addr(p.token)]),
+        [1],
+      ),
+      priceError,
+    ),
+  }
+})
+
+function portfolioView(p: Portfolio): Node {
+  const wrap = document.createElement('div')
+  const summary = document.createElement('p')
+  summary.textContent = `合计 ${usd(p.totalUsd)}（代币 ${usd(p.tokensUsd)}${p.lp.length || p.lpUsd ? ` + LP ${usd(p.lpUsd)}` : ''}）${p.unpriced ? ` · ${p.unpriced} 项没有价格，不计入合计` : ''}`
+  wrap.append(
+    summary,
+    table(
+      ['代币', '余额', '单价', '价值', '来源', '地址'],
+      p.tokens.map((t) => [t.symbol, amount(t.formatted), usd(t.price), usd(t.value), t.priceSource, t.native ? '主币' : addr(t.token)]),
+      [1, 2, 3],
+    ),
+  )
+  if (p.lp.length) {
+    wrap.append(
+      table(
+        ['LP 协议', '交易对', '价值', '仓位'],
+        p.lp.map((l) => [l.protocolName, pair(l), usd(l.valueUsd), l.version === 'v2' ? `份额 ${(l.share * 100).toPrecision(3)}%` : `#${l.tokenId}`]),
+        [2],
+      ),
+    )
+  }
+  return wrap
+}
+
+bind('runPortfolio', 'price', async () => {
+  const tokens = priceTokensInput()
+  const minUsd = numberOf(ex.priceMinUsd, '最小价值')
+  if (minUsd !== undefined && minUsd < 0) throw new Error('最小价值不能小于 0')
+  const from = owner()
+  let priceError: unknown = null
+  const p = await getPortfolio(from, {
+    ...nodeOptions(),
+    tokens,
+    lp: ex.priceLp.checked,
+    ...(minUsd === undefined ? {} : { minUsd }),
+    onPriceError: (err) => {
+      priceError = err
+    },
+  })
+  return { data: p, view: withPriceWarning(portfolioView(p), priceError) }
+})
+
+// ---- 授权 ----
+
+/** 这一项现在还有效、撤销有意义 */
+function revocable(a: Approval): boolean {
+  if (a.type === 'nft') return a.approved
+  return BigInt(a.amount) > 0n && !(a.type === 'permit2' && a.expired)
+}
+
+function approvalsView(list: Approval[]): Node {
+  approvalChecks = list.map((a) => {
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.disabled = !revocable(a)
+    // 默认只勾无限授权和 NFT 的全部授权
+    box.checked = revocable(a) && (a.type === 'nft' || a.unlimited)
+    return box
+  })
+  return table(
+    ['撤销', '类型', '代币 / 合约', '被授权方', '额度', '备注'],
+    list.map((a, i) => {
+      const spender = document.createElement('span')
+      spender.append(a.spenderName ? `${a.spenderName} ` : '', addr(a.spender))
+      if (a.type === 'nft') return [approvalChecks[i], 'NFT 全部', addr(a.collection), spender, a.approved ? tag('已授权', 'bad') : '未授权', null]
+      const limit = a.unlimited ? tag('无限', 'bad') : a.formatted !== null ? amount(a.formatted) : a.amount
+      const note = a.type === 'permit2' ? (a.expired ? '已过期' : a.expiration === 0 ? null : `到 ${new Date(a.expiration * 1000).toLocaleString()}`) : null
+      const token = document.createElement('span')
+      token.append(a.symbol ? `${a.symbol} ` : '', addr(a.token))
+      return [approvalChecks[i], a.type === 'permit2' ? 'Permit2' : 'ERC20', token, spender, limit, note]
+    }),
+  )
+}
+
+bind('runApprovals', 'appr', async () => {
+  const from = owner()
+  const tokens = lines(ex.apprTokens.value)
+  const nfts = lines(ex.apprNfts.value)
+  if (!tokens.length && !nfts.length) throw new Error('请填写要检查的代币或 NFT 合约')
+  lastApprovals = []
+  approvalChecks = []
+  $('revokeResult').replaceChildren()
+  $('revokeStats').textContent = ''
+  const list = await getApprovals(from, {
+    ...nodeOptions(),
+    ...(tokens.length ? { tokens } : {}),
+    ...(nfts.length ? { nfts } : {}),
+    permit2: ex.apprPermit2.checked && !isTron(),
+    includeZero: ex.apprZero.checked,
+  })
+  lastApprovals = list
+  approvalsOwner = from
+  return { data: list, view: approvalsView(list) }
+})
+
+/** 勾选的授权（没有查询过或一个都没勾时报错） */
+function selectedApprovals(): Approval[] {
+  if (!lastApprovals.length) throw new Error('请先查询授权（并且有可撤销的项）')
+  const list = lastApprovals.filter((_, i) => approvalChecks[i]?.checked)
+  if (!list.length) throw new Error('请勾选要撤销的授权')
+  return list
+}
+
+const revokeLabel = (list: Approval[]) => list.map((a) => (a.type === 'nft' ? `NFT ${addr(a.collection).textContent}` : `${a.symbol ?? addr(a.token).textContent} → ${a.spenderName ?? addr(a.spender).textContent}`)).join('；')
+
+bind('runRevokeBuild', 'revoke', async () => {
+  const txs = buildRevokes(selectedApprovals(), settings.chain)
+  return {
+    data: txs,
+    view: table(
+      ['#', '交易', '发给', '撤销的授权'],
+      txs.map((tx, i) => [i + 1, tx.kind, addr(tx.to), revokeLabel(tx.approvals)]),
+    ),
+  }
+})
+
+bind('runRevokeSend', 'revoke', async () => {
+  // 发送中不能切链（钱包网络按发送时的链）
+  const chainId = settings.chain
+  chainSelect.disabled = true
+  try {
+    const list = selectedApprovals()
+    const { signer, address } = await walletSigner(chainId)
+    if (approvalsOwner && !sameAddress(address, approvalsOwner)) {
+      throw new Error(`授权是 ${approvalsOwner} 给出的，钱包是 ${address}：换成这个账户，或用钱包地址重新查询授权`)
+    }
+    const progress = $('revokeStats')
+    const results: RevokeResult[] = await revokeApprovals(liquidityProvider(), signer, list, {
+      onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 笔：${r.status}`),
+    })
+    const meta = chainMeta(chainId)
+    const view = document.createElement('div')
+    const note = document.createElement('p')
+    note.className = 'hint'
+    note.textContent = '撤销已发送，可以重新查询授权确认。'
+    view.append(
+      note,
+      table(
+        ['#', '交易', '撤销的授权', '状态', '交易哈希'],
+        results.map((r, i) => [i + 1, r.kind, revokeLabel(r.approvals), statusTag(r.status, r.error), r.hash ? link(r.hash, meta.explorer) : null]),
+      ),
+    )
+    return { data: results, view }
+  } finally {
+    chainSelect.disabled = false
+  }
+})
+
+// ---- 域名 ----
+
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/
+
+function nameService() {
+  const service = NAME_SERVICES.find((s) => s.chainId === settings.chain)
+  if (!service) throw new Error(`这条链没有内置的域名服务（支持：${NAME_SERVICES.map((s) => `${s.name}（链 ${s.chainId}）`).join('、')}）`)
+  return service
+}
+
+const serviceName = (id: string | null) => (id === null ? null : (NAME_SERVICES.find((s) => s.id === id)?.name ?? id))
+
+bind('runNames', 'names', async () => {
+  nameService()
+  const names = lines(ex.nameList.value)
+  if (!names.length) throw new Error('请填写要解析的域名')
+  const list = await getNameAddresses(names, nodeOptions())
+  return {
+    data: list,
+    view: table(
+      ['名字', '规范化', '地址', '服务'],
+      list.map((r) => [r.name, r.normalized ?? tag('名字不合法', 'bad'), r.address ? addr(r.address) : tag('未解析', 'bad'), serviceName(r.service) ?? tag('没有服务认这个后缀', 'bad')]),
+    ),
+  }
+})
+
+bind('runAddressNames', 'names', async () => {
+  nameService()
+  const input = lines(ex.nameAddresses.value)
+  const addresses = input.length ? input : [owner()]
+  const bad = addresses.find((a) => !ADDRESS.test(a))
+  if (bad) throw new Error(`地址格式不对：${bad}`)
+  const list = await getAddressNames(addresses, nodeOptions())
+  return {
+    data: list,
+    view: table(
+      ['地址', '名字', '服务'],
+      list.map((r) => [addr(r.address), r.name ?? tag('没有主名字', 'bad'), serviceName(r.service)]),
+    ),
+  }
+})
+
+// ---- 手续费 ----
+
+const gwei = (wei: string) => `${amount(formatUnits(wei, 'gwei'))} gwei`
+
+function levelRow(level: string, e: FeeLevelEstimate): Cell[] {
+  return 'gasPrice' in e ? [level, null, null, gwei(e.gasPrice)] : [level, gwei(e.maxFeePerGas), gwei(e.maxPriorityFeePerGas), null]
+}
+
+bind('runFees', 'fees', async () => {
+  if (isTron()) throw new Error('Tron 没有 EIP-1559 费用建议：用“估算这笔交易”（按能量 / 带宽算要烧的 TRX）')
+  const fees = await getFeeEstimate(nodeOptions())
+  const wrap = document.createElement('div')
+  const info = document.createElement('p')
+  info.textContent = `${fees.type === 'eip1559' ? 'EIP-1559' : 'legacy（gasPrice）'}${fees.baseFee === null ? '' : ` · 下一个区块的 baseFee ${gwei(fees.baseFee)}`}`
+  wrap.append(
+    info,
+    table(
+      ['档位', 'maxFeePerGas', '优先费', 'gasPrice'],
+      [levelRow('slow', fees.slow), levelRow('normal', fees.normal), levelRow('fast', fees.fast)],
+      [1, 2, 3],
+    ),
+  )
+  return { data: fees, view: wrap }
+})
+
+function costView(cost: CostEstimate): Node {
+  if (cost.type === 'tron') {
+    const trx = (sun: string) => `${amount(formatUnits(sun, 6))} TRX`
+    return keyValues([
+      ['能量', cost.energy],
+      ['带宽', cost.bandwidth],
+      ['要烧的能量', trx(cost.energyBurn)],
+      ['要烧的带宽', trx(cost.bandwidthBurn)],
+      ['激活接收地址', cost.activates ? '是（激活费算在带宽里）' : null],
+      ['合计', `${amount(cost.totalFormatted)} TRX`],
+    ])
+  }
+  const native = (wei: string) => `${amount(formatUnits(wei, 18))} ${cost.symbol ?? ''}`
+  return keyValues([
+    ['gasLimit', cost.gasLimit],
+    ['每 gas 价格', gwei(cost.gasPrice)],
+    ['手续费', native(cost.fee)],
+    ['最多付', native(cost.maxFee)],
+    ['L1 数据费', cost.l1Fee === '0' ? null : native(cost.l1Fee)],
+    ['合计', `${amount(cost.totalFormatted)} ${cost.symbol ?? ''}`],
+  ])
+}
+
+bind('runCost', 'fees', async () => {
+  const from = owner()
+  const to = text(ex.feeTo) ?? from
+  const data = text(ex.feeData)
+  if (data !== undefined && !/^0x([0-9a-fA-F]{2})*$/.test(data)) throw new Error('data 要是 0x 开头的十六进制')
+  const valueText = text(ex.feeValue)
+  let value: bigint | undefined
+  if (valueText !== undefined) {
+    try {
+      value = parseUnits(valueText, chainMeta(settings.chain).decimals)
+    } catch {
+      throw new Error(`value 不是数字：${valueText}`)
+    }
+  }
+  const cost = await getCostEstimate({ from, to, ...(data === undefined ? {} : { data }), ...(value === undefined ? {} : { value }) }, { ...nodeOptions(), level: ex.feeLevel.value as FeeLevel })
+  return { data: cost, view: costView(cost) }
+})
+
+// ---- 兑换 ----
+
+/** 表单 → 兑换参数和选项（连接钱包之前先检查表单） */
+function swapRequest() {
+  if (!ex.swapTokenIn.value.trim()) throw new Error('请填写要卖出的代币（主币填 native）')
+  if (!ex.swapTokenOut.value.trim()) throw new Error('请填写要买入的代币')
+  const tokenIn = tokenOf(ex.swapTokenIn)
+  const tokenOut = tokenOf(ex.swapTokenOut)
+  if (tokenIn.toLowerCase() === tokenOut.toLowerCase()) throw new Error('卖出和买入不能是同一个代币')
+  const amountIn = ex.swapAmount.value.trim()
+  if (!/^\d+(\.\d+)?$/.test(amountIn) || !(Number(amountIn) > 0)) throw new Error('数量要填大于 0 的数字（如 0.01）')
+  const slippage = numberOf(ex.swapSlippage, '滑点')
+  if (slippage !== undefined && !(slippage >= 0 && slippage < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
+  const tax = numberOf(ex.swapTax, '转账税')
+  if (tax !== undefined && !(tax >= 0 && tax < 100)) throw new Error('转账税要在 0 ~ 100% 之间')
+  return {
+    params: { tokenIn, tokenOut, amountInFormatted: amountIn },
+    options: {
+      ...(slippage === undefined ? {} : { slippage: slippage / 100 }),
+      ...(tax === undefined ? {} : { tax: tax / 100 }),
+      ...(ex.swapApproveMax.checked ? { approve: 'max' as const } : {}),
+    },
+  }
+}
+
+function swapView(plan: SwapPlan, chainId: number, taxed: boolean, results?: SwapTxResult[]): Node {
+  const meta = chainMeta(chainId)
+  const nativeAmount = (value: string) => `${amount(formatUnits(value, meta.decimals))} ${meta.symbol}`
+  const sIn = plan.tokenIn.symbol ?? 'tokenIn'
+  const sOut = plan.tokenOut.symbol ?? 'tokenOut'
+  const short = (a: string) => addr(a).textContent ?? a
+  const taxNote = taxed ? '（不含转账税）' : ''
+  const wrap = document.createElement('div')
+  wrap.append(
+    keyValues([
+      ['卖出', `${amount(plan.amountInFormatted)} ${sIn}`],
+      ['预计收到', `${amount(plan.amountOutFormatted)} ${sOut}${taxNote}`],
+      ['最少收到', `${amount(plan.amountOutMinFormatted)} ${sOut}`],
+      ['价格', plan.price === null ? null : `1 ${sIn} = ${price(plan.price)} ${sOut}`],
+      ['价格影响', percentText(plan.priceImpact)],
+      ['路线', `${plan.route.protocolName}（${plan.route.version.toUpperCase()}）· ${plan.route.path.map(short).join(' → ')}${plan.route.fees.length ? ` · 费率 ${plan.route.fees.join(' / ')}` : ''}`],
+    ]),
+    table(
+      ['候选路线', '版本', '路径', '报价'],
+      plan.routes.map((r) => [r.protocolName, r.version.toUpperCase(), r.path.map(short).join(' → '), `${units(r.amountOut, plan.tokenOut.decimals)} ${sOut}`]),
+      [3],
+    ),
+    table(
+      ['#', '交易', '发给', `附带 ${meta.symbol}`, '授权', ...(results ? ['状态', '交易哈希'] : [])],
+      plan.transactions.map((tx, i) => {
+        const r = results?.[i]
+        return [
+          i + 1,
+          tx.kind,
+          addr(tx.to),
+          tx.value === '0' ? null : nativeAmount(tx.value),
+          tx.token ? `${short(tx.token)} → ${short(tx.spender ?? '')}` : null,
+          ...(results ? [r ? statusTag(r.status, r.error) : '等待', r?.hash ? link(r.hash, meta.explorer) : null] : []),
+        ]
+      }),
+    ),
+  )
+  return wrap
+}
+
+bind('runSwapQuote', 'swap', async () => {
+  const chainId = settings.chain
+  const { params, options } = swapRequest()
+  const from = connection()?.address ?? owner()
+  const plan = await getSwapQuote(from, params, { ...nodeOptions(), ...options })
+  return { data: plan, view: swapView(plan, chainId, options.tax !== undefined && options.tax > 0) }
+})
+
+bind('runSwapSend', 'swap', async () => {
+  // 发送中不能切链（结果、钱包网络都按发送时的链）
+  const chainId = settings.chain
+  chainSelect.disabled = true
+  try {
+    const { params, options } = swapRequest()
+    const { signer } = await walletSigner(chainId)
+    const progress = $('swapStats')
+    const result: SwapResult = await swap(liquidityProvider(), signer, params, {
+      ...options,
+      onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 笔（${r.kind}）：${r.status}`),
+    })
+    const view = document.createElement('div')
+    const note = document.createElement('p')
+    note.className = 'hint'
+    note.textContent = `结果：${result.status}`
+    view.append(note, swapView(result.plan, chainId, options.tax !== undefined && options.tax > 0, result.results))
+    return { data: result, view }
+  } finally {
+    chainSelect.disabled = false
+  }
+})
+
+// ---- 代币风险 ----
+
+const ZERO_OWNER = /^0x0+$/
+
+function riskFlags(flags: string[]): Node {
+  const span = document.createElement('span')
+  if (!flags.length) return tag('无', 'ok')
+  for (const f of flags) {
+    span.append(tag(f, /^(honeypot|cannot-buy|high-)/.test(f) ? 'bad' : ''), ' ')
+  }
+  return span
+}
+
+function riskRow(r: TokenRisk): Cell[] {
+  return [
+    addr(r.token),
+    r.stage === null ? tag('没有池子', 'bad') : tag(r.stage, r.stage === 'ok' ? 'ok' : 'bad'),
+    r.honeypot === null ? null : r.honeypot ? tag('是', 'bad') : tag('否', 'ok'),
+    percentText(r.buyTax),
+    percentText(r.sellTax),
+    percentText(r.transferTax),
+    r.buyGas === null && r.sellGas === null ? null : `${r.buyGas ?? '—'} / ${r.sellGas ?? '—'}`,
+    r.implementation ? addr(r.implementation) : '否',
+    r.owner === null ? null : ZERO_OWNER.test(r.owner) ? tag('已放弃', 'ok') : addr(r.owner),
+    riskFlags(r.flags),
+  ]
+}
+
+bind('runRisk', 'risk', async () => {
+  const tokens = tokenLines(ex.riskTokens.value)
+  if (!tokens.length) throw new Error('请填写至少一个代币')
+  if (tokens.includes(NATIVE_TOKEN)) throw new Error('主币不需要检查，请填代币合约地址')
+  const list = await getTokenRisks(tokens, nodeOptions())
+  return {
+    data: list,
+    view: table(['代币', '模拟到', '貔貅', '买入税', '卖出税', '转账税', 'gas 买 / 卖', '可升级代理', 'owner', '标记'], list.map(riskRow), [3, 4, 5]),
+  }
+})
+
+// 初始化放在最后：applyChain 会用到上面定义的钱包和各区块的表单
+applyChain()
+applyAction()

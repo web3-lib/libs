@@ -183,6 +183,24 @@ export const DEFAULT_RPC_URLS: Readonly<Record<number, readonly string[]>> = {
     'https://rpc-qnd.inkonchain.com',
     'https://ink.api.pocket.network',
   ],
+  // 星空链（Starry）
+  202308: [
+    'https://rpc.starryscan.com',
+  ],
+  // conflux
+  1030: [
+    'https://evm.confluxrpc.com',
+  ],
+  // injective
+  1776: [
+    'https://sentry.evm-rpc.injective.network',
+    'https://injectiveevm-rpc.polkachu.com',
+  ],
+  // pharos
+  1672: [
+    'https://rpc.pharos.xyz',
+    'https://infra.originstake.com/pharos/evm',
+  ],
 }
 
 /** Tron 主网全节点 HTTP API（均支持跨域与 deployless） */

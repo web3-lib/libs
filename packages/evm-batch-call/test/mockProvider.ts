@@ -91,6 +91,8 @@ export interface MockOptions {
   zeroNativeInContract?: boolean
   /** 节点当前的区块高度（默认 1 亿）；查询更高的区块时报 header not found */
   blockNumber?: number | (() => number)
+  /** 模拟不支持合约创建式 eth_call 的链（deployless 返回空数据） */
+  noDeployless?: boolean
   /** 模拟查询未来区块时不报错、直接按最新状态返回的节点（如 HyperEVM） */
   ignoreFutureBlock?: boolean
 }
@@ -165,6 +167,9 @@ export function createMockProvider(options: MockOptions = {}) {
       dropRevertData = Boolean(options.dropRevertData)
       const data = String(tx.data)
       if (!tx.to) {
+        if (options.noDeployless) {
+          return '0x'
+        }
         const args = dataSlice(data, (DEPLOYLESS_MULTICALL3_BYTECODE.length - 2) / 2)
         const [call3s] = AbiCoder.defaultAbiCoder().decode(['tuple(address target, bool allowFailure, bytes callData)[]'], args)
         const results = exec(call3s as Call3[], null)

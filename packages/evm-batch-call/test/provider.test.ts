@@ -175,6 +175,62 @@ describe('deployless', () => {
     expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, false, true, false, false])
   })
 
+  it('不支持 deployless 的链：改成逐条 eth_call（主币余额用 eth_getBalance、失败的调用照样返回），确认后记住、不再先试', async () => {
+    const mock = createMockProvider({
+      contracts: { [TOKEN_A]: fakeToken('AAA', 18, { [USER]: 10n ** 18n }) },
+      multicallAddresses: [],
+      balances: { [USER]: 42n },
+      noDeployless: true,
+    })
+    const a = new Contract(TOKEN_A, ERC20ABI)
+    const multi = new Provider(UNKNOWN_CHAIN, mock)
+    const run = () => multi.tryAll([a.symbol(), a.balanceOf(USER), a.boom(), multi.getEthBalance(USER)])
+    expect(await run()).toEqual(['AAA', 10n ** 18n, null, 42n])
+    // 先试一次 deployless（空数据），再逐条调用
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([false, true, true, true])
+    mock.calls.length = 0
+    // 单节点第二次仍然为空：确认不支持
+    await run()
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([false, true, true, true])
+    mock.calls.length = 0
+    // 之后直接逐条调用
+    expect(await run()).toEqual(['AAA', 10n ** 18n, null, 42n])
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([true, true, true])
+  })
+
+  it('不支持 deployless 的判定只看最新状态：历史区块的空数据不记；逐条调用的并发有上限', async () => {
+    const mock = createMockProvider({
+      contracts: { [TOKEN_A]: fakeToken('AAA', 18, { [USER]: 10n ** 18n }) },
+      multicallAddresses: [],
+      noDeployless: true,
+    })
+    const a = new Contract(TOKEN_A, ERC20ABI)
+    const multi = new Provider(UNKNOWN_CHAIN, mock)
+    for (let i = 0; i < 3; i++) {
+      expect(await multi.all([a.symbol()], { blockTag: 5 })).toEqual(['AAA'])
+    }
+    mock.calls.length = 0
+    // 历史查询失败了 3 次也没有记住：最新状态仍先试一次 deployless
+    await multi.all([a.symbol()])
+    expect(mock.calls.map((c) => Boolean(c.to))).toEqual([false, true])
+
+    // 600 条调用：同时在途不超过 50 条
+    let inFlight = 0
+    let peak = 0
+    const call = mock.call.bind(mock)
+    mock.call = async (tx) => {
+      if (tx.to) {
+        peak = Math.max(peak, ++inFlight)
+        await new Promise((r) => setTimeout(r, 1))
+        inFlight--
+      }
+      return call(tx)
+    }
+    await new Provider(UNKNOWN_CHAIN, mock, { chunkSize: 1000 }).all(Array.from({ length: 600 }, () => a.symbol()))
+    expect(peak).toBeLessThanOrEqual(50)
+    expect(peak).toBeGreaterThan(1)
+  })
+
   it('查询早于 multicall 部署区块的数据时走 deployless', async () => {
     const mock = setup()
     await new Provider(BSC, mock).all([new Contract(TOKEN_A, ERC20ABI).symbol()], { blockTag: 1 })

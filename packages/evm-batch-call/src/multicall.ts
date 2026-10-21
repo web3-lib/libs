@@ -81,6 +81,9 @@ const MULTICALL3: Record<number, Multicall> = {
   80094: { address: CANONICAL, block: 0 }, // Berachain，创世预置
   534352: { address: CANONICAL, block: 14 }, // Scroll
   86233268: { address: CANONICAL, block: 10854614 }, // Winchain，部署区块未查到
+  1030: { address: CANONICAL, block: 159584122 }, // Conflux eSpace，部署区块未查到
+  1672: { address: CANONICAL, block: 20812125 }, // Pharos，部署区块未查到
+  1776: { address: CANONICAL, block: 188237272 }, // Injective EVM，部署区块未查到
   // 以下两条链不支持 deployless（合约创建式 eth_call 返回空 / 格式不对），只能用 Multicall3；
   // 早于部署区块的历史查询会失败
   42262: { address: CANONICAL, block: 22380155 }, // Oasis Emerald，部署区块未查到

@@ -78,6 +78,12 @@ const AGGREGATE3_RESULT_SELECTOR = id('Aggregate3Result((bool,bytes)[])').slice(
  */
 const unusableMulticalls = new Map<string, number>()
 
+/**
+ * 不支持 deployless 的链（合约创建式 eth_call 返回空数据 / 无法解码，如 Oasis Emerald、Aurora），记录到什么时候为止
+ * 直接逐条 eth_call，不再先试一次注定失败的 deployless；到期后重新尝试
+ */
+const deploylessUnsupported = new Map<number, number>()
+
 /** 判定不可用后多久重新尝试合约（节点偶发返回空数据时不至于整个会话都不用 Multicall3） */
 const UNUSABLE_TTL = 10 * 60 * 1000
 /** 单节点时连续返回空数据 / 无法解码的次数（多节点时由多个节点一致的结果确认，见 aggregateRawChunk） */
@@ -483,9 +489,109 @@ async function callDeployless(
   overrides: CallOverrides,
   atLeast?: bigint,
 ): Promise<RawResult[]> {
-  const chunks = splitByInitcodeSize(requests)
-  const results = await Promise.all(chunks.map((chunk) => callDeploylessChunk(ctx, chunk, overrides, atLeast)))
-  return results.flat()
+  const until = deploylessUnsupported.get(ctx.chainId)
+  if (until !== undefined) {
+    if (Date.now() < until) {
+      return callPlain(ctx, requests, overrides, atLeast)
+    }
+    deploylessUnsupported.delete(ctx.chainId)
+  }
+  try {
+    const chunks = splitByInitcodeSize(requests)
+    const results = await Promise.all(chunks.map((chunk) => callDeploylessChunk(ctx, chunk, overrides, atLeast)))
+    invalidStrikes.delete(deploylessKey(ctx.chainId))
+    return results.flat()
+  } catch (err) {
+    const verdict = deploylessVerdict(err)
+    if (verdict === null) {
+      throw err
+    }
+    // 空数据 / 无法解码：这条链（或这个节点）不支持合约创建式 eth_call。这一次改成逐条 eth_call；
+    // 多个节点一致、或单节点连续 2 次才记住（节点偶发返回一次空数据不算）
+    // 只看最新状态：历史区块查询返回空数据可能只是节点裁剪了状态，不能据此判定这条链不支持
+    if (isLatest(overrides.blockTag)) {
+      const key = deploylessKey(ctx.chainId)
+      const strikes = (invalidStrikes.get(key) ?? 0) + 1
+      if (verdict === 'confirmed' || strikes >= 2) {
+        deploylessUnsupported.set(ctx.chainId, Date.now() + UNUSABLE_TTL)
+        invalidStrikes.delete(key)
+      } else {
+        invalidStrikes.set(key, strikes)
+      }
+    }
+    return callPlain(ctx, requests, overrides, atLeast)
+  }
+}
+
+const deploylessKey = (chainId: number) => `deployless:${chainId}`
+
+/** deployless 的失败是不是“不支持”：InvalidResultError；经 FallbackRpc 时是所有节点都这样（2 个以上为 'confirmed'） */
+function deploylessVerdict(err: unknown): 'confirmed' | 'maybe' | null {
+  if (err instanceof InvalidResultError) {
+    return 'maybe'
+  }
+  if (err instanceof AllNodesFailedError && err.errors.length > 0 && err.errors.every((e) => e.error instanceof InvalidResultError)) {
+    return err.errors.length >= 2 ? 'confirmed' : 'maybe'
+  }
+  return null
+}
+
+/** 逐条 eth_call 的并发上限（公共节点常对 batch 大小和并发限频） */
+const PLAIN_CONCURRENCY = 50
+
+/**
+ * 最后的兜底：每条请求单独 eth_call（主币余额用 eth_getBalance），不需要链上有合约、也不要求节点支持合约创建。
+ * 同时最多 PLAIN_CONCURRENCY 条在途，JsonRpcProvider / FallbackRpc 会把同一时刻的请求合到 HTTP batch 里。
+ * 区块号查询：blockTag 是数字（或 earliest）时就是它，最新状态时用 getBlockNumber 并把所有读取固定在这个区块上
+ * （minBlock 时先校验再读，保证各条一致）；finalized / safe 这类标签没法换算成区块号，带区块号查询时报错
+ */
+async function callPlain(ctx: AggregateContext, requests: CallRequest[], overrides: CallOverrides, atLeast?: bigint): Promise<RawResult[]> {
+  const { provider } = ctx
+  let blockTag = overrides.blockTag
+  let block: bigint | null = null
+  if (atLeast !== undefined || requests.some((req) => req.blockNumber)) {
+    if (isLatest(blockTag)) {
+      if (!provider.getBlockNumber) {
+        throw new Error('This chain does not support deployless calls and the provider has no getBlockNumber(): block number queries (minBlock / withBlock) are unavailable')
+      }
+      block = BigInt(await provider.getBlockNumber())
+      if (atLeast !== undefined) {
+        assertBlock(block, atLeast)
+      }
+      blockTag = Number(block)
+    } else if (blockTag === 'earliest') {
+      block = 0n
+    } else if (typeof blockTag === 'number' || typeof blockTag === 'bigint' || (typeof blockTag === 'string' && /^0x[0-9a-f]+$/i.test(blockTag))) {
+      block = BigInt(blockTag)
+    } else {
+      throw new Error(`Block number queries are not supported with blockTag '${String(blockTag)}' on a chain without deployless calls; pass a block number`)
+    }
+  }
+  const results: RawResult[] = new Array(requests.length)
+  let next = 0
+  const worker = async () => {
+    for (let i = next++; i < requests.length; i = next++) {
+      const req = requests[i] as CallRequest
+      if (req.blockNumber && block !== null) {
+        results[i] = { success: true, returnData: encodeUint256(block) }
+      } else if (req.ethBalanceOf !== undefined) {
+        results[i] = { success: true, returnData: encodeUint256(await provider.getBalance(req.ethBalanceOf, blockTag)) }
+      } else {
+        try {
+          results[i] = { success: true, returnData: await provider.call({ to: req.target, data: req.callData, blockTag, from: overrides.from }) }
+        } catch (err) {
+          // 合约自己 revert 才算这一条失败（allowFailure 为 false 时和 Multicall3 一样整批失败）；限频、超时等节点错误照常抛出
+          if (req.allowFailure && isExecutionError(err)) {
+            results[i] = { success: false, returnData: (err as { data?: string | null }).data ?? '0x' }
+          } else {
+            throw err
+          }
+        }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PLAIN_CONCURRENCY, requests.length) }, worker))
+  return results
 }
 
 async function callDeploylessChunk(
@@ -605,4 +711,5 @@ function cacheKey(chainId: number, address: string): string {
 export function resetMulticallCache(): void {
   unusableMulticalls.clear()
   invalidStrikes.clear()
+  deploylessUnsupported.clear()
 }

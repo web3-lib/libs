@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 批量查询的链：Multicall3 地址表和内置节点补充 Conflux eSpace（1030）、Injective EVM（1776）、Pharos（1672，主币 PROS），星空链（202308）只有节点（没有 Multicall3，走 deployless）；FSC（201022）补主币 FON
+- deployless 不可用（合约创建式 `eth_call` 返回空数据 / 无法解码）时，自动改成逐条 `eth_call`（主币余额用 `eth_getBalance`，区块号用 `getBlockNumber`）；确认不支持后记住 10 分钟，不再先试一次注定失败的 deployless
+
+- 价格，子路径 `@w3lib/evm-batch-call/price`：
+  - `getTokenPrices` / `tokenPrices`：代币（含主币）的美元价格，依次使用多个价格源，结果带给出价格的源
+  - `onchainPrices()`：从内置协议表的 V2 / V3 池子算价格（对包装主币、稳定币，用最深的池子，流动性下限 `minLiquidityUsd`），也支持 Tron 的 SunSwap
+  - `defillamaPrices({ at })`：历史价格
+  - `combinePrices([...])`：组合多个价格源，可以传给 `getLpPositions` / `getOwnerTokens` 的 `prices`
+  - `getPortfolio` / `portfolio`：地址的资产总值（传入代币的余额 × 价格，可选加上 LP 仓位）
+- 兑换，子路径 `@w3lib/evm-batch-call/swap`：`getSwapQuote` / `buildSwap`（V2 / V3 池子的直接和两跳路线，一次 multicall 报价，选输出最多的，按滑点算最少收到、价格影响）、`swap`（授权 + 兑换，主币自动包装 / 解包），Tron 上是 SunSwap V2
+  - `swap` 有授权时，授权确认后重新报价再发兑换（deadline、最少收到从发兑换那一刻算）；`tax` 选项：V2 报价不含转账税，带税代币的最少收到要再乘 (1 − tax)
+- 代币风险检查，子路径 `@w3lib/evm-batch-call/risk`：`getTokenRisks` / `tokenRisks`，在 `eth_call` 里用 deployless 的探测合约（`contracts/TokenProbe.sol`）模拟买入 / 转账 / 卖出，算出买入税、转账税、卖出税，识别貔貅盘；检查 EIP-1967 代理和 owner
+- 手续费估算，子路径 `@w3lib/evm-batch-call/fees`：`getFeeEstimate` / `estimateFees`（按 `eth_feeHistory` 的三档 EIP-1559 费用，不支持时按 `eth_gasPrice`）、`getCostEstimate` / `estimateCost`（一笔交易的手续费，含 OP Stack / Scroll 的 L1 数据费；Tron 按能量、带宽和账户剩余资源算要烧的 TRX，含激活费）
+- 域名解析，子路径 `@w3lib/evm-batch-call/names`：`getNameAddresses` / `resolveNames`（名字 → 地址）、`getAddressNames` / `lookupAddresses`（地址 → 主名字，正查核对），内置 ENS、SPACE ID（.bnb）、Basenames（.base.eth），名字按 ENSIP-15 规范化
+- 授权管理，子路径 `@w3lib/evm-batch-call/approvals`：
+  - `getApprovals` / `approvals`：批量查 ERC20 额度、Permit2 额度（含过期时间）、NFT 的 setApprovalForAll；默认检查 `knownSpenders(chainId)`（内置协议的 Router / 仓位合约、Uniswap / PancakeSwap Router、1inch、0x、ParaSwap、Permit2、OpenSea / Blur）
+  - `scanApprovals`：按 Approval / ApprovalForAll / Permit2 事件增量发现授权过的代币和 NFT 合约，进度可以保存
+  - `buildRevokes` / `revokeApprovals`：批量撤销（approve 0、Permit2 lockdown、setApprovalForAll false），发送同 `batchCall`，支持 7702 合成一笔
+  - Tron 支持查询和撤销（没有 Permit2，不支持扫描）
+- 价格源的 `PriceSourceContext` 新增 `provider`（链上价格源用）；`defillamaPrices`、`PriceSource` 仍可以从 `/owner`、`/lp` 导入
+
 ## 0.6.0
 
 ### 新功能
