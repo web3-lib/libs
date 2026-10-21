@@ -1,6 +1,6 @@
 {
   "name": "@w3lib/wallet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic browser wallet connection for EVM (EIP-6963, WalletConnect), Solana and Sui (Wallet Standard), Tron and TON. Multi-chain connections, auto-reconnect, events, chain switching, chain presets, Vue/React hooks and an optional built-in connect modal. No bundled SDKs.",
   "keywords": [
     "wallet",
