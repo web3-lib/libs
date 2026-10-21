@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 价格，子路径 `@w3lib/sui-batch-call/price`：
+  - `getTokenPrices` / `tokenPrices`：代币的美元价格，依次使用多个价格源，结果带给出价格的源
+  - `onchainPrices()`：从 Cetus、Turbos、FlowX CLMM 的池子算价格（对 SUI、USDC、USDT，用最深的池子，流动性下限 `minLiquidityUsd`）；池子按两种币在各 DEX 的注册表里找（条目 ID 本地算出，不需要索引服务）
+  - `defillamaPrices({ at })`：历史价格
+  - `combinePrices([...])`：组合多个价格源，可以传给 `getLpPositions` 的 `prices`
+  - `getPortfolio` / `portfolio`：地址的资产总值（持有的全部代币 × 价格，可选加上 LP 仓位）
+- 域名解析，子路径 `@w3lib/sui-batch-call/names`：`getNameAddresses` / `resolveNames`（SuiNS 名字 → 地址，支持 `@name` 格式、子域名，过期的名字为 null）、`getAddressNames` / `lookupAddresses`（地址 → 默认名字，正查核对），`normalizeSuiName` / `formatSuiName`；名字记录的对象 ID 本地算出，一轮 `BatchGetObjects` 读完，内置主网、测试网的部署（`SUINS`）
+- 手续费估算，子路径 `@w3lib/sui-batch-call/fees`：`getFeeEstimate` / `estimateFees`（当前 epoch 的参考 gas 价格；Sui 的 gas 价格每个 epoch 固定，没有三档）、`getCostEstimate` / `estimateCost`（模拟一笔交易：计算费、存储费、存储返还、净花费，和 /write 发送时会用的 gas 上限；支持赞助交易）
+- 兑换，子路径 `@w3lib/sui-batch-call/swap`：
+  - `getSwapQuote` / `buildSwap` 报价并构建交易（不签名），`swap` 构建后签名发送（钱包、赞助交易、`dryRun` 同 `/write`）；卖出固定数量
+  - 路线：直接兑换，或经过 SUI / USDC（`intermediates`）的两跳（可以跨 DEX）；12 个协议都能兑换，Cetus、Magma、Turbos、FlowX CLMM、DipCoin、FlowX V2 按币对自动找池子（注册表条目的 ID 本地算出），其他协议用 `pools` 传池子
+  - 两跳每个中间币保留第一跳输出最多的 2 个池子（不只第一名）；价格影响的参考输出不到 100 个最小单位时返回 null
+  - 报价：每条候选路线在只读调用里执行一遍兑换、读出买到的数量（合约自己算，与实际成交逐位一致），按 `concurrency` 并发；最少收到按滑点，在交易最后检查；价格影响按 1 / 10000 数量的价格
+- 代币风险检查，子路径 `@w3lib/sui-batch-call/risk`：`getCoinRisks` / `coinRisks`：监管币（DenyCapV2 或 v1 的 DenyCap，冻结权限还有没有人能用、全局暂停，当前是否暂停、某地址是否被冻结）、增发权限（TreasuryCap 的持有者，在别的对象里时找到最外层对象；它或最外层对象冻结 / 转给 0x0、固定供应 = 不能增发）、元数据能否修改（Coin Registry 的 MetadataCap 或旧的 CoinMetadata），可选用 `/swap` 模拟买入再卖出（能不能卖、来回损失），汇总为 `flags`
+- `SuiClient.concurrency`：同时发出的请求数上限（只读）
+- 价格源的上下文 `SuiPriceSourceContext` 新增 `client`（链上价格源用，`lpPositions` 会传入）；`defillamaPrices`、`SuiPriceSource` 仍可以从 `/lp` 导入
+
+### 修复
+
+- `/liquidity`：发送者没有 SUI Coin 对象、只有地址余额时，取回 / 找零的 SUI 不再合并进 gas 币（这时 gas 由地址余额付，交易里没有 gas 币），照常转给发送者
+
 ## 0.1.0
 
 ### 新功能

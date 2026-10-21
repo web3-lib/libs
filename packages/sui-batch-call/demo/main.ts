@@ -1,4 +1,5 @@
-import { SUI_COIN_TYPE, SuiClient, formatUnits, normalizeSuiAddress, type NftDetails } from '@w3lib/sui-batch-call'
+import { SUI_COIN_TYPE, SuiClient, formatUnits, normalizeSuiAddress, parseUnits, type NftDetails } from '@w3lib/sui-batch-call'
+import { estimateCost, estimateFees } from '@w3lib/sui-batch-call/fees'
 import {
   addLiquidity,
   buildAddLiquidity,
@@ -13,6 +14,11 @@ import {
   type RemoveLiquidityPlan,
 } from '@w3lib/sui-batch-call/liquidity'
 import { SUI_LP_PROTOCOLS, lpPositions, type SuiLpPosition, type SuiLpProtocol } from '@w3lib/sui-batch-call/lp'
+import { lookupAddresses, resolveNames } from '@w3lib/sui-batch-call/names'
+import { defillamaPrices, portfolio, tokenPrices } from '@w3lib/sui-batch-call/price'
+import { coinRisks, type CapHolder } from '@w3lib/sui-batch-call/risk'
+import { buildSwap, swap, type SwapOptions, type SwapParams, type SwapPlan, type SwapResult } from '@w3lib/sui-batch-call/swap'
+import { PtbBuilder, pure } from '@w3lib/sui-batch-call/write'
 import { createWallet } from '@w3lib/wallet'
 import { sui } from '@w3lib/wallet/sui'
 import { createWalletModal } from '@w3lib/wallet/ui'
@@ -29,6 +35,9 @@ const SAMPLE_COINS = [
   '0xdeeb7a4662eec9f2f3def03fb937a663dddaa2e215b8078a284d026b7946c270::deep::DEEP',
   '0x356a26eb9e012a68958082340d4c4116e7f55615cf27affcff209cf0ae544f59::wal::WAL',
 ]
+
+/** SuiNS 示例名字（README 里的例子；之后可能过期 / 改指向） */
+const SAMPLE_NAMES = ['example.sui', '@adeniyi', 'nobody-here-0000.sui']
 
 const SAMPLE_OBJECTS = ['0x6', '0x5', '0x51e883ba7c0b566a26cbc8a94cd33eb0abd418a77cc1e60ad22fd9b1f29cd2ab']
 
@@ -87,6 +96,11 @@ ownerInput.value = settings.owner
 $<HTMLTextAreaElement>('balanceCoins').value = SAMPLE_COINS.join('\n')
 $<HTMLTextAreaElement>('coinTypes').value = SAMPLE_COINS.join('\n')
 $<HTMLTextAreaElement>('objectIds').value = SAMPLE_OBJECTS.join('\n')
+$<HTMLTextAreaElement>('priceCoins').value = SAMPLE_COINS.join('\n')
+$<HTMLTextAreaElement>('riskCoins').value = SAMPLE_COINS.join('\n')
+$<HTMLTextAreaElement>('nameList').value = SAMPLE_NAMES.join('\n')
+$<HTMLInputElement>('swapIn').value = SUI_COIN_TYPE
+$<HTMLInputElement>('swapOut').value = SAMPLE_COINS[1] ?? ''
 
 nodeInput.addEventListener('change', () => {
   settings.node = nodeInput.value.trim()
@@ -140,6 +154,16 @@ const countingFetch: typeof fetch = async (input, init) => {
 }
 
 /** 节点的网络：按节点地址认出测试网 / 开发网（钱包签名、浏览器链接用） */
+/** 连接钱包（没连接时弹出连接窗口）；钱包的网络要和所选节点的网络一致（链标识如 sui:mainnet）。写操作用 */
+async function walletForSend() {
+  const c = connection() ?? (await modal.open('sui'))
+  if (!c) throw new Error('没有连接钱包')
+  if (typeof c.chainId === 'string' && c.chainId !== `sui:${network()}`) {
+    throw new Error(`钱包在 ${c.chainId}，而所选节点是 ${network()}：请在钱包里切到 ${network()}，或换节点`)
+  }
+  return c
+}
+
 const network = () => (/testnet/i.test(settings.node) ? 'testnet' : /devnet/i.test(settings.node) ? 'devnet' : 'mainnet')
 
 let cached: { node: string; client: SuiClient } | null = null
@@ -469,10 +493,14 @@ function renderWallet() {
   const c = connection()
   $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只构建时用上面“地址”栏的地址）'
   $('connectWallet').textContent = c ? '切换 / 断开' : '连接钱包'
+  // 兑换区块里的钱包行
+  $('swapWalletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只报价时用上面“地址”栏的地址）'
+  $('swapConnect').textContent = c ? '切换 / 断开' : '连接钱包'
 }
 wallet.subscribe(() => renderWallet())
 void wallet.ready.then(renderWallet)
 $('connectWallet').addEventListener('click', () => void modal.open('sui'))
+$('swapConnect').addEventListener('click', () => void modal.open('sui'))
 
 /** 上一次“查询 LP”的结果：追加、移除、领取从里面选仓位 */
 let lastPositions: SuiLpPosition[] = []
@@ -695,8 +723,7 @@ bind('runLiqSend', 'liq', async () => {
   const { action, params } = liquidityRequest()
   // 发送时的客户端（网络）：结果的链接按它，发送中改了节点也不影响
   const sui = client()
-  const c = connection() ?? (await modal.open('sui'))
-  if (!c) throw new Error('没有连接钱包')
+  const c = await walletForSend()
   liquidityFrom(c.address)
   // Wallet Standard 钱包直接当签名器，指定连接的账户
   const signer = { wallet: c.provider, account: c.address } as never
@@ -714,4 +741,283 @@ bind('runLiqSend', 'liq', async () => {
   note.textContent = `结果：${result.status}（可以在“LP 仓位”里重新查询）`
   view.append(note, planView(result.plan, { ...result, network: sui.network }))
   return { data: { ...result, plan: withoutKind(result.plan) }, view }
+})
+
+// ---- 价格 / 资产总值（子路径 /price） ----
+
+/** 填了日期用 DefiLlama 的历史价格（链上价格源只给当前价格）；没填用默认的价格源 */
+function priceSources() {
+  const date = $<HTMLInputElement>('priceAt').value
+  if (!date) return {}
+  const at = new Date(`${date}T00:00:00Z`)
+  if (Number.isNaN(at.getTime())) throw new Error(`历史价格的日期不对：${date}`)
+  if (at.getTime() > Date.now()) throw new Error('历史价格的日期不能是未来')
+  return { sources: [defillamaPrices({ at })] }
+}
+
+bind('runPrices', 'price', async () => {
+  const coinTypes = lines($<HTMLTextAreaElement>('priceCoins').value)
+  if (!coinTypes.length) throw new Error('请填写至少一个代币类型')
+  const errors: string[] = []
+  const list = await tokenPrices(client(), coinTypes, {
+    ...priceSources(),
+    fetch: countingFetch,
+    onError: (source, err) => errors.push(`${source.name}：${errorText(err)}`),
+  })
+  return {
+    data: list,
+    view: withWarnings(
+      table(
+        ['代币', '价格', '来源', '状态'],
+        list.map((p) => [addr(p.token), p.price === null ? null : `$${price(p.price)}`, p.source, p.price === null ? tag('没有价格', 'bad') : tag('ok', 'ok')]),
+        [1],
+      ),
+      errors.map((e) => `价格源出错，继续用下一个源：${e}`),
+    ),
+  }
+})
+
+bind('runPortfolio', 'price', async () => {
+  const from = owner()
+  const coinTypes = lines($<HTMLTextAreaElement>('priceCoins').value)
+  const minUsd = numberOf($<HTMLInputElement>('priceMinUsd'), '最小价值') ?? 0
+  if (minUsd < 0) throw new Error('最小价值不能为负')
+  const errors: string[] = []
+  const p = await portfolio(client(), from, {
+    ...priceSources(),
+    ...(coinTypes.length ? { coinTypes } : {}),
+    lp: $<HTMLInputElement>('priceLp').checked ? { onError: (protocol, err) => errors.push(`读取出错，跳过了 ${SUI_LP_PROTOCOLS[protocol].name} 的仓位：${errorText(err)}`) } : false,
+    minUsd,
+    fetch: countingFetch,
+    onPriceError: (err) => errors.push(`价格服务出错：${errorText(err)}`),
+  })
+  const summary = table(
+    ['合计', '代币', 'LP 仓位', '算不出价值'],
+    [[usd(p.totalUsd), usd(p.tokensUsd), $<HTMLInputElement>('priceLp').checked ? `${usd(p.lpUsd)}（${p.lp.length} 个）` : '未计入', `${p.unpriced} 个`]],
+    [0, 1, 2, 3],
+  )
+  const tokens = table(
+    ['代币', '余额', '价格', '价值', '来源', '类型'],
+    p.tokens.map((t) => [t.symbol, amount(t.formatted), t.price === null ? null : `$${price(t.price)}`, usd(t.value), t.priceSource, addr(t.token)]),
+    [1, 2, 3],
+  )
+  const view = document.createElement('div')
+  view.append(summary, tokens)
+  return { data: p, view: withWarnings(view, errors) }
+})
+
+// ---- 域名（子路径 /names） ----
+
+bind('runNames', 'names', async () => {
+  const names = lines($<HTMLTextAreaElement>('nameList').value)
+  if (!names.length) throw new Error('请填写至少一个名字')
+  const list = await resolveNames(client(), names)
+  return {
+    data: list,
+    view: table(
+      ['名字', '规范化', '地址', '到期时间', '状态'],
+      list.map((r) => [
+        r.name,
+        r.normalized,
+        addr(r.address),
+        r.expiresAt === null ? null : new Date(r.expiresAt).toLocaleString(),
+        r.normalized === null ? tag('名字不合法', 'bad') : r.address !== null ? tag('ok', 'ok') : r.expiresAt !== null && r.expiresAt < Date.now() ? tag('已过期', 'bad') : tag('没有注册或没有设置地址', 'bad'),
+      ]),
+    ),
+  }
+})
+
+bind('runAddressNames', 'addressNames', async () => {
+  const typed = lines($<HTMLTextAreaElement>('nameAddresses').value)
+  // 地址不合法时库返回 null（和没有名字分不开）：先检查
+  const addresses = (typed.length ? typed : [owner()]).map((a) => {
+    try {
+      return normalizeSuiAddress(a)
+    } catch {
+      throw new Error(`地址不合法：${a}`)
+    }
+  })
+  const list = await lookupAddresses(client(), addresses)
+  return { data: list, view: table(['地址', '默认名字'], list.map((r) => [addr(r.address), r.name ?? tag('没有默认名字', '')])) }
+})
+
+// ---- 手续费（子路径 /fees） ----
+
+bind('runGasPrice', 'gasPrice', async () => {
+  const fee = await estimateFees(client())
+  return { data: fee, view: table(['项目', '值'], [['epoch', fee.epoch], ['参考 gas 价格', `${fee.referenceGasPrice} MIST / gas 单位`]]) }
+})
+
+bind('runCost', 'cost', async () => {
+  const from = normalizeSuiAddress(owner())
+  const toText = $<HTMLInputElement>('feeTo').value.trim()
+  const to = toText ? normalizeSuiAddress(toText) : from
+  const value = parseUnits($<HTMLInputElement>('feeAmount').value, 9)
+  if (value <= 0n) throw new Error('转账数量要大于 0')
+  // 从 gas 币拆出 value 再转给 to（同 README 的例子）
+  const ptb = new PtbBuilder()
+  const coin = ptb.command({ kind: 'splitCoins', coin: ptb.gas, amounts: [ptb.pure(pure.u64(value))] })
+  ptb.command({ kind: 'transferObjects', objects: [ptb.nested(coin, 0)], address: ptb.pure(pure.address(to)) })
+  const cost = await estimateCost(client(), { from, kind: ptb.build() })
+  const mist = (v: string) => `${v} MIST`
+  return {
+    data: cost,
+    view: table(
+      ['项目', '值'],
+      [
+        ['gas 价格', mist(cost.gasPrice)],
+        ['计算费', mist(cost.computationCost)],
+        ['存储费', mist(cost.storageCost)],
+        ['存储返还', mist(cost.storageRebate)],
+        ['净花费', `${cost.totalFormatted} ${cost.symbol}（${mist(cost.total)}）`],
+        ['gas 上限（发送时用）', `${cost.gasBudgetFormatted} ${cost.symbol}（${mist(cost.gasBudget)}）`],
+      ],
+    ),
+  }
+})
+
+// ---- 兑换（子路径 /swap） ----
+
+const swapSlippage = $<HTMLInputElement>('swapSlippage')
+
+function swapRequest(): { params: SwapParams; options: SwapOptions } {
+  const tokenIn = text($<HTMLInputElement>('swapIn'))
+  const tokenOut = text($<HTMLInputElement>('swapOut'))
+  if (!tokenIn || !tokenOut) throw new Error('请填写卖出和买入的代币类型')
+  if (tokenIn === tokenOut) throw new Error('卖出和买入不能是同一种代币')
+  const amountInFormatted = text($<HTMLInputElement>('swapAmount'))
+  if (!amountInFormatted || !/^(\d+\.?\d*|\.\d+)$/.test(amountInFormatted) || !(Number(amountInFormatted) > 0)) throw new Error('卖出的数量要是大于 0 的数字')
+  const percent = numberOf(swapSlippage, '滑点')
+  if (percent !== undefined && !(percent >= 0 && percent < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
+  const pools = lines($<HTMLTextAreaElement>('swapPools').value).map((p) => {
+    try {
+      return normalizeSuiAddress(p)
+    } catch {
+      throw new Error(`池子 ID 不合法：${p}`)
+    }
+  })
+  return {
+    params: { tokenIn, tokenOut, amountInFormatted },
+    options: { ...(percent === undefined ? {} : { slippage: percent / 100 }), ...(pools.length ? { pools } : {}) },
+  }
+}
+
+const coinName = (type: string) => type.split('::').pop() ?? type
+
+function swapView(plan: SwapPlan, result?: SwapResult & { network: string }): Node {
+  const inSym = plan.tokenIn.symbol ?? '?'
+  const outSym = plan.tokenOut.symbol ?? '?'
+  const rows: Array<[string, Cell]> = [
+    ['卖出', units(plan.amountIn, plan.tokenIn)],
+    ['报价', units(plan.amountOut, plan.tokenOut)],
+    ['最少收到', units(plan.amountOutMin, plan.tokenOut)],
+    ['价格', plan.price === null ? null : `1 ${inSym} = ${price(plan.price)} ${outSym}`],
+    ['价格影响', plan.priceImpact === null ? null : `${(plan.priceImpact * 100).toFixed(3)}%`],
+    ['从 gas 币拆出的 SUI', plan.gasSpend ? `${amount(formatUnits(plan.gasSpend, 9))} SUI` : null],
+  ]
+  if (result) {
+    rows.push(
+      ['状态', tag(result.status + (result.error ? `：${result.error}` : ''), result.status === 'confirmed' ? 'ok' : result.status === 'failed' || result.status === 'reverted' ? 'bad' : '')],
+      ['交易', result.digest ? link(result.digest, result.network) : null],
+      ['gas', result.fee === null ? null : `${amount(formatUnits(BigInt(result.fee), 9))} SUI`],
+    )
+  }
+  const hops = (r: SwapPlan['route']) => r.hops.map((h) => `${SUI_LP_PROTOCOLS[h.protocol].name}${h.fee === null ? '' : `（${h.fee / 10_000}%）`}`).join(' → ')
+  const view = document.createElement('div')
+  view.append(
+    table(['项目', '值'], rows.filter(([, v]) => v !== null)),
+    table(
+      ['候选路线（从高到低）', '经过', '报价', '选中'],
+      plan.routes.map((r) => [hops(r), r.path.map(coinName).join(' → '), units(r.amountOut, plan.tokenOut), r.amountOut === plan.route.amountOut && hops(r) === hops(plan.route) ? tag('选中', 'ok') : '']),
+      [2],
+    ),
+    // 选中路线每一跳的池子
+    table(
+      ['跳', '协议', '池子', '卖出 → 买入'],
+      plan.route.hops.map((h, i) => [i + 1, SUI_LP_PROTOCOLS[h.protocol].name, addr(h.pool), `${coinName(h.tokenIn)} → ${coinName(h.tokenOut)}`]),
+    ),
+  )
+  return view
+}
+
+bind('runSwapQuote', 'swap', async () => {
+  const { params, options } = swapRequest()
+  const plan = await buildSwap(client(), connection()?.address ?? owner(), params, options)
+  return { data: withoutKind(plan), view: swapView(plan) }
+})
+
+bind('runSwapSend', 'swap', async () => {
+  const { params, options } = swapRequest()
+  // 发送时的客户端（网络）：结果的链接按它，发送中改了节点也不影响
+  const sui = client()
+  const c = await walletForSend()
+  const signer = { wallet: c.provider, account: c.address } as never
+  const progress = $('swapStats')
+  const result = await swap(sui, signer, params, { ...options, onUpdate: (r) => (progress.textContent = `交易：${r.status}`) })
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `结果：${result.status}（余额变化可以在“余额”里重新查询）`
+  view.append(note, swapView(result.plan, { ...result, network: sui.network }))
+  return { data: { ...result, plan: withoutKind(result.plan) }, view }
+})
+
+// ---- 代币风险（子路径 /risk） ----
+
+/** 权限对象（TreasuryCap、DenyCap、MetadataCap）在谁手里 */
+function holder(h: CapHolder | null): Cell {
+  if (!h) return null
+  switch (h.owner) {
+    case 'address':
+      return wrapWith('地址', addr(h.address))
+    case 'object':
+      return h.root ? wrapWith(`在对象里（${h.root.owner}）`, addr(h.root.type ?? h.root.id)) : '在别的对象里'
+    case 'shared':
+      return '共享对象'
+    case 'consensus-address':
+      return '共识地址'
+    case 'immutable':
+      return '已冻结'
+    case 'burned':
+      return '已转给 0x0'
+    case 'not-found':
+      return '节点读不到'
+    default:
+      return '未知'
+  }
+}
+
+bind('runRisk', 'risk', async () => {
+  const coinTypes = lines($<HTMLTextAreaElement>('riskCoins').value)
+  if (!coinTypes.length) throw new Error('请填写至少一个代币类型')
+  const sell = $<HTMLInputElement>('riskSell').checked
+  const buyAmount = parseUnits($<HTMLInputElement>('riskAmount').value, 9)
+  if (sell && buyAmount <= 0n) throw new Error('买入的 SUI 数量要大于 0')
+  const address = $<HTMLInputElement>('riskDenied').checked ? normalizeSuiAddress(owner()) : undefined
+  const list = await coinRisks(client(), coinTypes, { sell, ...(sell ? { amount: buyAmount } : {}), ...(address ? { address } : {}) })
+  return {
+    data: list,
+    view: table(
+      ['代币', '监管币', '增发', 'TreasuryCap', '元数据', '能不能卖', '风险标记'],
+      list.map((r) => {
+        if (!r.exists) return [wrapWith(r.symbol ?? '?', addr(r.token)), null, null, null, null, null, r.flags.join('、')]
+        const regulated = r.flags.includes('regulated')
+          ? tag(`监管币${r.flags.includes('global-pause') ? ' · 可全局暂停' : ''}${r.paused ? ' · 暂停中' : ''}${r.denied ? ' · 该地址被冻结' : ''}`, 'bad')
+          : r.regulated
+            ? tag('监管币，冻结权限已废弃', 'ok')
+            : r.regulated === false
+              ? tag('否', 'ok')
+              : null
+        const supply = r.supply === 'mintable' ? tag('可增发', 'bad') : r.supply === 'unknown' ? tag('不知道', 'bad') : tag(r.supply === 'fixed' ? '固定供应' : '只能销毁', 'ok')
+        const metadata = r.metadataMutable === null ? null : r.metadataMutable ? tag('可修改', 'bad') : tag('不可改', 'ok')
+        const canSell =
+          r.sell === null
+            ? null
+            : r.sell.stage === 'ok'
+              ? tag(`ok · 来回损失 ${r.sell.roundTripLoss === null ? '?' : `${(r.sell.roundTripLoss * 100).toFixed(2)}%`}`, r.honeypot ? 'bad' : 'ok')
+              : tag(`${r.sell.stage}${r.sell.error ? `：${r.sell.error}` : ''}`, 'bad')
+        return [wrapWith(r.symbol ?? '?', addr(r.token)), regulated, supply, holder(r.treasuryCap), metadata, canSell, r.flags.join('、') || '无']
+      }),
+    ),
+  }
 })

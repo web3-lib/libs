@@ -18,11 +18,13 @@ import { formatUnits } from './format.js'
 import { CETUS_DLMM, CETUS_DLMM_POSITION_TYPE, binPrice, parseDlmmPool, parseDlmmPosition, readDlmm, type DlmmPool, type DlmmPosition, type DlmmReadOut, type SuiDlmmProtocol } from './dlmm.js'
 import { AFTERMATH, loadAftermathPools, maybeAftermathLp, parseAftermathFees, withdrawAllAmounts, type AftermathPool, type SuiMultiProtocol } from './aftermath.js'
 import { listBalances, type BalanceEntry, type SuiObject } from './services.js'
+import { defillamaPrices, type SuiPriceSource } from './price.js'
 
 export type { SuiAmmProtocol } from './amm/types.js'
 export type { SuiDlmmProtocol } from './dlmm.js'
 export type { SuiMultiProtocol } from './aftermath.js'
 export type { SuiClmmProtocol, SuiLpProtocol } from './dex/types.js'
+export { defillamaPrices, type SuiPriceSource, type SuiPriceSourceContext } from './price.js'
 
 export interface SuiLpProtocolInfo {
   name: string
@@ -44,42 +46,6 @@ export const SUI_LP_PROTOCOLS = {
   // 每个池子有自己的 LP 代币（如 0x…::af_lp::AF_LP），按 PoolRegistry 的 lp_coin_map 认出来
   aftermath: { name: 'Aftermath', type: 'multi', positionType: null, lpCoinType: null },
 } as Readonly<Record<SuiLpProtocol, SuiLpProtocolInfo>>
-
-// ---------------------------------------------------------------------------
-// 价格源
-// ---------------------------------------------------------------------------
-
-export interface SuiPriceSource {
-  readonly name: string
-  /** 返回代币类型（规范化） → 美元价格；没有价格的不返回 */
-  prices(ctx: { coinTypes: readonly string[]; fetch: typeof fetch; signal?: AbortSignal }): Promise<Map<string, number>>
-}
-
-/** DefiLlama 价格（免费免 Key，按 50 个一批查询）；confidence 低于 minConfidence（默认 0.9）的价格不用 */
-export function defillamaPrices(options: { minConfidence?: number } = {}): SuiPriceSource {
-  const minConfidence = options.minConfidence ?? 0.9
-  return {
-    name: 'defillama',
-    async prices({ coinTypes, fetch: fetchFn, signal }) {
-      const result = new Map<string, number>()
-      const batches: string[][] = []
-      for (let i = 0; i < coinTypes.length; i += 50) batches.push(coinTypes.slice(i, i + 50))
-      await Promise.all(
-        batches.map(async (batch) => {
-          const res = await fetchFn(`https://coins.llama.fi/prices/current/${batch.map((t) => encodeURIComponent(`sui:${t}`)).join(',')}`, { signal })
-          if (!res.ok) throw new Error(`DefiLlama prices: HTTP ${res.status}`)
-          const body = (await res.json()) as { coins?: Record<string, { price?: number; confidence?: number }> }
-          for (const [key, coin] of Object.entries(body.coins ?? {})) {
-            if (typeof coin.price === 'number' && Number.isFinite(coin.price) && (coin.confidence === undefined || coin.confidence >= minConfidence)) {
-              result.set(normalizeStructTag(key.slice(key.indexOf(':') + 1)), coin.price)
-            }
-          }
-        }),
-      )
-      return result
-    },
-  }
-}
 
 // ---------------------------------------------------------------------------
 // 结果类型
@@ -260,7 +226,7 @@ export interface LpPositionsOptions extends RequestOptions {
   positions?: readonly string[]
   /** 返回已清空的仓位（流动性为 0、手续费和奖励也领完，仓位对象还在；Kriya 是 LP 为 0 的 KriyaLPToken）。默认 false */
   includeClosed?: boolean
-  /** 查美元价值：true 用 DefiLlama，也可以传自己的 SuiPriceSource。默认不查 */
+  /** 查美元价值：true 用 DefiLlama，也可以传自己的 SuiPriceSource（如 /price 的 combinePrices([defillamaPrices(), onchainPrices()])）。默认不查 */
   prices?: boolean | SuiPriceSource
   /** 价格源出错时调用：这时照样返回仓位，只是美元价值为 null */
   onPriceError?: (err: unknown) => void
@@ -631,7 +597,7 @@ async function build(
   const loadPrices = async (): Promise<Map<string, number>> => {
     if (!priceSource) return new Map()
     try {
-      return await priceSource.prices({ coinTypes, fetch: fetchFn, signal })
+      return await priceSource.prices({ coinTypes, fetch: fetchFn, signal, client })
     } catch (err) {
       if (signal?.aborted) throw err
       try {

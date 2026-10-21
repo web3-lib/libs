@@ -271,3 +271,13 @@ input.small {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+
+/* 价格 / 兑换 / 手续费 */
+.inline input.small {
+  flex: none;
+  width: 8em;
+}
+input[type='date'] {
+  width: auto;
+  max-width: 12em;
+}

@@ -9,9 +9,9 @@ import { big } from './env.js'
 import type { DexReader, DexWriter, DexEnv, DexPool, SharedRef } from './types.js'
 import { coinTypeOf, i32, json, refOf, sharedOf, typeArgs } from './util.js'
 
-const PKG = '0x91bfbc386a41afcfd9b2533058d7e915a1d3829089cc268ff4333d54d6339ca1'
+export const PKG = '0x91bfbc386a41afcfd9b2533058d7e915a1d3829089cc268ff4333d54d6339ca1'
 const POSITIONS: SharedRef = { objectId: '0xf5762ae5ae19a2016bb233c72d9a4b2cba5a302237a82724af66292ae43ae52d', initialSharedVersion: 1621135n }
-const VERSIONED: SharedRef = { objectId: '0xf1cf0e81048df168ebeb1b8030fad24b3e0b53ae827c25053fff0779c1445b6f', initialSharedVersion: 1621135n }
+export const VERSIONED: SharedRef = { objectId: '0xf1cf0e81048df168ebeb1b8030fad24b3e0b53ae827c25053fff0779c1445b6f', initialSharedVersion: 1621135n }
 /** 已停用的奖励（与官方 SDK 的 deprecatedPools 相同）：领取会失败，跳过 */
 const DEPRECATED_REWARDS: Readonly<Record<string, readonly number[]>> = {
   '0x839595a83dbb6b076a0fddad42dd512b66c065aa7ef3d298daa00a327d53ab31': [0],

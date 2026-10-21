@@ -3,6 +3,7 @@
  * 集中流动性：报价按集中流动性的公式在本地算；交易调用各 DEX 合约的函数，合约检查数量上限 / 下限，超出滑点时整笔失败。
  * 传统 AMM：给一边时另一边按储备比例，LP = min(数量 / 储备 × 总量)；移除按 LP 份额
  */
+import { slippageOf, withSlippageDown, withSlippageUp } from './slippage.js'
 import { SUI_COIN_TYPE, normalizeStructTag, normalizeSuiAddress } from './address.js'
 import { MAX_TICK, MIN_TICK, amountsForLiquidity, liquidityForAmount, sqrtPriceAtTick } from './clmmMath.js'
 import type { SuiClient } from './client.js'
@@ -233,18 +234,6 @@ function tickOf(price: number, t0: SuiLpToken, t1: SuiLpToken, spacing: number, 
   const aligned = round === 'down' ? Math.floor(raw / spacing) * spacing : Math.ceil(raw / spacing) * spacing
   return Math.min(Math.max(aligned, Math.ceil(MIN_TICK / spacing) * spacing), Math.floor(MAX_TICK / spacing) * spacing)
 }
-
-const SLIPPAGE_SCALE = 1_000_000n
-
-/** 滑点（0~1）→ 百万分之一 */
-function slippageOf(slippage: number): bigint {
-  if (!(slippage >= 0 && slippage < 1)) throw new Error(`Invalid slippage: ${slippage}`)
-  return BigInt(Math.round(slippage * 1e6))
-}
-
-/** 上限：向上取整 */
-const withSlippageUp = (v: bigint, s: bigint) => (v * (SLIPPAGE_SCALE + s) + SLIPPAGE_SCALE - 1n) / SLIPPAGE_SCALE
-const withSlippageDown = (v: bigint, s: bigint) => (v * (SLIPPAGE_SCALE - s)) / SLIPPAGE_SCALE
 
 /** total 的 percent%（0~100，默认 100，精确到百万分之一） */
 function portion(total: bigint, percent = 100): bigint {

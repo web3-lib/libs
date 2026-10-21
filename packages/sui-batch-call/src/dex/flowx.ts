@@ -9,10 +9,10 @@ import { big } from './env.js'
 import type { DexReader, DexWriter, DexEnv, DexPool, SharedRef } from './types.js'
 import { coinTypeOf, i32, json, refOf, typeArgs } from './util.js'
 
-const PKG = '0x25929e7f29e0a30eb4e692952ba1b5b65a3a4d65ab5f2a32e1ba3edcb587f26d'
-const POOL_REGISTRY: SharedRef = { objectId: '0x27565d24a4cd51127ac90e4074a841bbe356cca7bf5759ddc14a975be1632abc', initialSharedVersion: 101644053n }
+export const PKG = '0x25929e7f29e0a30eb4e692952ba1b5b65a3a4d65ab5f2a32e1ba3edcb587f26d'
+export const POOL_REGISTRY: SharedRef = { objectId: '0x27565d24a4cd51127ac90e4074a841bbe356cca7bf5759ddc14a975be1632abc', initialSharedVersion: 101644053n }
 const POSITION_REGISTRY: SharedRef = { objectId: '0x7dffe3229d675645564273aa68c67406b6a80aa29e245ac78283acd7ed5e4912', initialSharedVersion: 101644053n }
-const VERSIONED: SharedRef = { objectId: '0x67624a1533b5aff5d0dfcf5e598684350efd38134d2d245f475524c03a64e656', initialSharedVersion: 101644053n }
+export const VERSIONED: SharedRef = { objectId: '0x67624a1533b5aff5d0dfcf5e598684350efd38134d2d245f475524c03a64e656', initialSharedVersion: 101644053n }
 const U64_MAX = 2n ** 64n - 1n
 
 const deadline = (env: DexEnv) => env.ptb.pure(pure.u64(BigInt(env.now + 10 * 60_000)))

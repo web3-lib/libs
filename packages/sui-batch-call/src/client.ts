@@ -164,6 +164,11 @@ export class SuiClient {
     this.#concurrency = Math.max(1, config.concurrency ?? 16)
   }
 
+  /** 同时发出的请求数上限（ClientConfig.concurrency） */
+  get concurrency(): number {
+    return this.#concurrency
+  }
+
   #call(options?: RequestOptions): CallOptions {
     return { signal: options?.signal, minCheckpoint: options?.minCheckpoint }
   }

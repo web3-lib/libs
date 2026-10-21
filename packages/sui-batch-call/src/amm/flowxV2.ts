@@ -11,10 +11,10 @@ import { stringFieldId, typeNameOf } from '../dynamicField.js'
 import { pure } from '../write/bcs.js'
 import type { AmmReader, AmmWriter } from './types.js'
 
-const PKG = '0xba153169476e8c3114962261d1edc70de5ad9781b83cc617ecc8c1923191cae0'
-const CONTAINER: SharedRef = { objectId: '0xb65dcbf63fd3ad5d0ebfbf334780dc9f785eff38a4459e37ab08fa79576ee511', initialSharedVersion: 5665244n }
+export const PKG = '0xba153169476e8c3114962261d1edc70de5ad9781b83cc617ecc8c1923191cae0'
+export const CONTAINER: SharedRef = { objectId: '0xb65dcbf63fd3ad5d0ebfbf334780dc9f785eff38a4459e37ab08fa79576ee511', initialSharedVersion: 5665244n }
 /** Container.pairs（Bag） */
-const PAIRS = '0xd15e209f5a250d6055c264975fee57ec09bf9d6acdda3b5f866f76023d1563e6'
+export const PAIRS = '0xd15e209f5a250d6055c264975fee57ec09bf9d6acdda3b5f866f76023d1563e6'
 const PAIR_PREFIX = `${PKG}::pair::PairMetadata<`
 
 /** 截止时间：构建后 10 分钟 */

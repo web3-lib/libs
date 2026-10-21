@@ -11,7 +11,7 @@ import { guardMin } from '../dex/pay.js'
 import { pure } from '../write/bcs.js'
 import type { AmmReader, AmmWriter } from './types.js'
 
-const PKG = '0xa0eba10b173538c8fecca1dff298e488402cc9ff374f8a12ca7758eebe830b66'
+export const PKG = '0xa0eba10b173538c8fecca1dff298e488402cc9ff374f8a12ca7758eebe830b66'
 
 export const kriyaAmm: AmmReader = {
   protocol: 'kriya-amm',

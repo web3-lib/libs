@@ -221,6 +221,14 @@ export interface ExecutionResult {
   gasUsed: GasUsed | null
   changedObjects: ChangedObjectRef[]
   checkpoint: bigint | null
+  /** 余额变化（地址、代币类型、数量，可能为负）；只在请求了 balanceChanges 时有 */
+  balanceChanges?: BalanceChange[]
+}
+
+export interface BalanceChange {
+  address: string
+  coinType: string
+  amount: bigint
 }
 
 function parseExecuted(m: ProtoMessage | null): ExecutionResult {
@@ -235,18 +243,22 @@ function parseExecuted(m: ProtoMessage | null): ExecutionResult {
     gasUsed: gas ? { computationCost: gas.uint(1) ?? 0n, storageCost: gas.uint(2) ?? 0n, storageRebate: gas.uint(3) ?? 0n, nonRefundableStorageFee: gas.uint(4) ?? 0n } : null,
     changedObjects: (effects?.messages(12) ?? []).map((c) => ({ objectId: c.string(1) ?? '', version: c.uint(7), digest: c.string(8) })),
     checkpoint: m?.uint(6) ?? null,
+    ...(m?.has(8) ? { balanceChanges: m.messages(8).map((b) => ({ address: b.string(1) ?? '', coinType: b.string(2) ?? '', amount: BigInt(b.string(3) ?? '0') })) } : {}),
   }
 }
 
 const EFFECT_PATHS = ['digest', 'effects.status', 'effects.gas_used', 'effects.changed_objects', 'effects.transaction_digest', 'checkpoint']
 
-/** 模拟执行（交易字节已编码好）：返回执行结果，不需要签名 */
-export async function simulateTransaction(t: GrpcTransport, transaction: Uint8Array, options?: CallOptions): Promise<ExecutionResult> {
+/** 模拟执行（交易字节已编码好）：返回执行结果，不需要签名；balanceChanges 为 true 时同时返回余额变化 */
+export async function simulateTransaction(t: GrpcTransport, transaction: Uint8Array, options?: CallOptions, extra?: { balanceChanges?: boolean }): Promise<ExecutionResult> {
+  const paths = extra?.balanceChanges ? [...EFFECT_PATHS, 'balance_changes'] : EFFECT_PATHS
   const req = new ProtoWriter()
     .message(1, new ProtoWriter().message(1, new ProtoWriter().bytes(2, transaction)))
-    .message(2, fieldMask(EFFECT_PATHS.map((p) => `transaction.${p}`)))
+    .message(2, fieldMask(paths.map((p) => `transaction.${p}`)))
   const { message } = await t.unary(`${EXECUTION}/SimulateTransaction`, req.finish(), options)
-  return parseExecuted(message.message(1))
+  const result = parseExecuted(message.message(1))
+  // 请求了余额变化但没有变化时为 []（响应里没有这个字段）
+  return extra?.balanceChanges ? { ...result, balanceChanges: result.balanceChanges ?? [] } : result
 }
 
 /**

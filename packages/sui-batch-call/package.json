@@ -1,14 +1,16 @@
 {
   "name": "@w3lib/sui-batch-call",
   "version": "0.1.0",
-  "description": "Batched Sui reads and writes over gRPC-web: balances, coin metadata, objects, NFTs (Display); batch transfers, sponsored collection, batch transactions; LP positions and add / remove liquidity on Sui CLMM, DLMM, AMM and multi-coin (Aftermath) DEXes. No Sui SDK dependency.",
+  "description": "Batched Sui reads and writes over gRPC-web: balances, coin metadata, objects, NFTs (Display); batch transfers, sponsored collection, batch transactions; LP positions and add / remove liquidity on Sui CLMM, DLMM, AMM and multi-coin (Aftermath) DEXes; swaps routed across them (quoted by simulation); coin risk checks. No Sui SDK dependency.",
   "keywords": [
     "sui",
     "grpc",
     "grpc-web",
     "batch",
     "coin",
-    "nft"
+    "nft",
+    "swap",
+    "dex"
   ],
   "license": "MIT",
   "author": "L",
@@ -31,6 +33,26 @@
     "./liquidity": {
       "types": "./dist/subpaths/liquidity.d.ts",
       "import": "./dist/subpaths/liquidity.js"
+    },
+    "./price": {
+      "types": "./dist/subpaths/price.d.ts",
+      "import": "./dist/subpaths/price.js"
+    },
+    "./names": {
+      "types": "./dist/subpaths/names.d.ts",
+      "import": "./dist/subpaths/names.js"
+    },
+    "./fees": {
+      "types": "./dist/subpaths/fees.d.ts",
+      "import": "./dist/subpaths/fees.js"
+    },
+    "./swap": {
+      "types": "./dist/subpaths/swap.d.ts",
+      "import": "./dist/subpaths/swap.js"
+    },
+    "./risk": {
+      "types": "./dist/subpaths/risk.d.ts",
+      "import": "./dist/subpaths/risk.js"
     }
   },
   "files": [
@@ -53,7 +75,8 @@
     "test:devnet": "vitest run test/write-live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "demo": "vite demo",
-    "demo:build": "vite build demo"
+    "demo:build": "vite build demo",
+    "test:live:swap": "LIVE=1 vitest run test/swap-live.test.ts test/risk-live.test.ts"
   },
   "repository": {
     "type": "git",

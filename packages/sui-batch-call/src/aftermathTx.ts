@@ -8,7 +8,7 @@ import type { DexEnv } from './dex/types.js'
 import { pure, type Argument } from './write/bcs.js'
 
 /** 函数所在的包和前面的固定参数：池子（或 DAO 外壳 + 版本）、注册表、协议手续费金库、国库、保险基金、推荐金库 */
-function call(env: DexEnv, pool: AftermathPool): { pkg: string; head: Argument[] } {
+export function call(env: DexEnv, pool: AftermathPool): { pkg: string; head: Argument[] } {
   const head = pool.dao ? [env.shared(pool.dao.shared, true), env.shared(AFTERMATH.daoVersion, false)] : [env.shared(pool.shared as NonNullable<AftermathPool['shared']>, true)]
   return {
     pkg: env.pkg(pool.dao ? AFTERMATH.dao : AFTERMATH.amm),

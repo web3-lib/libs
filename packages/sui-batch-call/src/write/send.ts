@@ -5,7 +5,7 @@ import { SUI_COIN_TYPE, normalizeSuiAddress } from '../address.js'
 import type { SuiClient } from '../client.js'
 import type { CallOptions } from '../grpc.js'
 import { isNodeFault } from '../grpc.js'
-import { batchGetObjects, executeTransaction, getBalance, getEpoch, getServiceInfo, getTransaction, listOwnedObjects, simulateTransaction, type ExecutionResult } from '../services.js'
+import { batchGetObjects, executeTransaction, getBalance, getEpoch, getServiceInfo, getTransaction, listOwnedObjects, simulateTransaction, type ExecutionResult, type GasUsed } from '../services.js'
 import { decodeKindInputs, encodeTransactionData, kindInputs, type Expiration, type ObjectRef, type ProgrammableTransaction } from './bcs.js'
 import type { ResolvedSigner } from './signer.js'
 
@@ -57,6 +57,8 @@ export interface TxOutcome {
   fee: bigint | null
   checkpoint: number | null
   error: string | null
+  /** dryRun 模拟通过时：gas 明细、gas 价格、发送时会用的 gas 上限 */
+  simulation?: { gasUsed: GasUsed | null; gasPrice: bigint; gasBudget: bigint }
 }
 
 export const emptyOutcome = (status: WriteStatus, error: string | null = null): TxOutcome => ({ status, digest: null, fee: null, checkpoint: null, error })
@@ -352,12 +354,13 @@ async function sendOne(
       simBudget = next
     }
     if (!sim.success) return emptyOutcome('failed', `simulation failed: ${sim.error}`)
-    if (options.dryRun) return { ...emptyOutcome('simulated'), fee: feeOf(sim) }
     const used = (sim.gasUsed?.computationCost ?? 0n) + (sim.gasUsed?.storageCost ?? 0n)
     const multiplier = BigInt(Math.round((options.gasMultiplier ?? 1.2) * 1000))
-    budget = (used * multiplier + 999n) / 1000n
-    if (budget < MIN_BUDGET) budget = MIN_BUDGET
-    budget = cap(budget)
+    let estimated = (used * multiplier + 999n) / 1000n
+    if (estimated < MIN_BUDGET) estimated = MIN_BUDGET
+    estimated = cap(estimated)
+    if (options.dryRun) return { ...emptyOutcome('simulated'), fee: feeOf(sim), simulation: { gasUsed: sim.gasUsed, gasPrice: price, gasBudget: budget ?? estimated } }
+    budget = estimated
   }
   let bytes = encode(budget)
 

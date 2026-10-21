@@ -1,6 +1,6 @@
 # @w3lib/sui-batch-call
 
-Sui 批量读取和批量写操作库：SUI / 代币余额、代币信息、对象、NFT（Display）；一对多转账、多钱包归集、批量执行交易；Cetus、Bluefin、Momentum、Turbos、Magma、FlowX、Kriya（集中流动性），Cetus DLMM，DipCoin、FlowX V2、Kriya（传统 AMM），Aftermath（多币池）的 LP 仓位和加减流动性。通过 **gRPC-web** 直接访问全节点（Sui 已于 2026 年停用 JSON-RPC），多节点故障切换。不依赖 Sui SDK，浏览器和 Node（≥ 20.19）都能用。
+Sui 批量读取和批量写操作库：SUI / 代币余额、代币信息、对象、NFT（Display）；一对多转账、多钱包归集、批量执行交易；Cetus、Bluefin、Momentum、Turbos、Magma、FlowX、Kriya（集中流动性），Cetus DLMM，DipCoin、FlowX V2、Kriya（传统 AMM），Aftermath（多币池）的 LP 仓位和加减流动性；在这些 DEX 之间找路线兑换（按模拟执行报价，与实际成交逐位一致）；代币风险检查（监管币 / 冻结、增发权限、元数据能否修改、能不能卖）；代币的美元价格（DefiLlama 当前 / 历史价格、Cetus / Turbos / FlowX 池子的链上价格）和地址的资产总值；SuiNS 域名解析（名字 ↔ 地址）；参考 gas 价格和交易手续费估算。通过 **gRPC-web** 直接访问全节点（Sui 已于 2026 年停用 JSON-RPC），多节点故障切换。不依赖 Sui SDK，浏览器和 Node（≥ 20.19）都能用。
 
 ```sh
 pnpm add @w3lib/sui-batch-call
@@ -8,7 +8,7 @@ pnpm add @w3lib/sui-batch-call
 
 只做查询时打包后约 17KB（minify，gzip 约 7KB），不带任何依赖；写操作在子路径 `/write`（见[批量写操作](#批量写操作)）。
 
-**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（集中流动性、DLMM、传统 AMM、多币池，12 个协议）、添加 / 移除流动性（报价，连接浏览器钱包后可以发送）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
+**在线 demo**：<https://web3-lib.github.io/libs/sui/>（余额、代币信息、LP 仓位（集中流动性、DLMM、传统 AMM、多币池，12 个协议）、添加 / 移除流动性（报价，连接浏览器钱包后可以发送）、价格和资产总值、SuiNS 域名（正向 + 反向）、手续费估算、兑换（报价，连接浏览器钱包后可以发送）、代币风险（监管币、增发权限、元数据、可选模拟买入再卖出）、NFT、对象，显示每次查询实际发出的 gRPC 调用）。本地运行：`pnpm --filter @w3lib/sui-batch-call demo`（http://localhost:5177）
 
 ## 快速上手
 
@@ -164,7 +164,7 @@ await lpPositions(sui, owner, { positions: [id] })   // 只看指定的仓位对
 | `positions` | 只查这些仓位对象 ID（Turbos 是仓位 NFT 的 ID，Kriya AMM 是 KriyaLPToken 的 ID），不扫描地址拥有的对象；这时 LP 是普通代币的 AMM（DipCoin、FlowX V2）不查 |
 | `protocols` | 只查某些协议：`'cetus'` / `'bluefin'` / `'momentum'` / `'turbos'` / `'magma'` / `'flowx'` / `'kriya-clmm'` / `'cetus-dlmm'` / `'dipcoin'` / `'flowx-v2'` / `'kriya-amm'` / `'aftermath'`，默认全部（仓位对象每个协议扫描一次地址拥有的对象；LP 代币一次 `ListBalances`）。`SUI_LP_PROTOCOLS` 有各协议的名称、类型和对象 / 代币类型 |
 | `includeClosed` | 返回已清空的仓位（流动性为 0、手续费和奖励也领完，仓位对象还在；Kriya AMM 是 LP 为 0 的 KriyaLPToken），默认 false |
-| `prices` | `true` 用 DefiLlama，也可以传自己的 `SuiPriceSource`；默认不查。价格源出错时照样返回仓位，美元价值为 null（`onPriceError` 可以拿到错误） |
+| `prices` | `true` 用 DefiLlama，也可以传自己的 `SuiPriceSource`（如 `/price` 的 `combinePrices([defillamaPrices(), onchainPrices()])`）；默认不查。价格源出错时照样返回仓位，美元价值为 null（`onPriceError` 可以拿到错误） |
 | `onError` | 某个协议读取出错时调用 `(protocol, err)`：扫描、准备工作出错时跳过这个协议（照样返回其他协议的仓位）；只读调用时节点出错，仓位照样返回、手续费和奖励为 null |
 | `fetch` / `signal` | 查价用的 fetch、取消查询 |
 
@@ -288,6 +288,165 @@ await removeLiquidity(sui, key, { pool, protocol: 'aftermath', percent: 100, out
 
 `addLiquidity` 等发送函数结果里的 `plan.kind` 是实际发出的交易。
 
+## 价格
+
+子路径 `@w3lib/sui-batch-call/price`：代币的美元价格和地址的资产总值。
+
+```ts
+import { SUI_COIN_TYPE } from '@w3lib/sui-batch-call'
+import { getPortfolio, getTokenPrices } from '@w3lib/sui-batch-call/price'
+
+await getTokenPrices([SUI_COIN_TYPE, USDC, newCoin])            // 节点参数同其他快捷函数
+// [{ token: '0x000…002::sui::SUI', native: true, price: 3.21, source: 'defillama' }, …, { token: newCoin, price: 0.0012, source: 'onchain' }]
+
+const p = await getPortfolio(owner, { lp: true, minUsd: 1 })
+p.totalUsd // 代币 + LP 仓位的合计；p.tokens 按价值排序，p.lp 是 LP 仓位
+```
+
+- 价格源依次使用，前面没有价格的代币交给后面的（`sources`，默认 `[defillamaPrices(), onchainPrices()]`），结果的 `source` 是给出价格的源；代币类型可以写短格式，结果的键是规范化的完整格式（`priceKeyOf`）
+- `defillamaPrices({ at })`：历史价格（unix 秒或 `Date`）；`minConfidence` 过滤置信度低的价格（默认 0.9）
+- `onchainPrices()`：在 **Cetus**、**Turbos**、**FlowX CLMM** 里找代币对 SUI、USDC、USDT 的池子，用计价币一侧最深的池子的价格；USDC（原生）、USDT（Sui Bridge）按 1 美元（`STABLECOINS`，可以用 `stablecoins` 换），SUI 按它对稳定币最深的池子。`minLiquidityUsd`（默认 10000）以下的池子不用，防止小池子的价格被操纵；暂停的池子不用。主网实测（2026-10）和 DefiLlama 相差在 1% 以内（SUI、CETUS、DEEP、WAL）
+- 找池子不需要索引服务：三个 DEX 的工厂都把池子登记在表里，条目的对象 ID 按两种币（和手续费档位）在本地算出，再用 `BatchGetObjects` 读（主网上逐个核对过）：
+
+| DEX | 注册表 | 条目的键 |
+| --- | --- | --- |
+| `cetus` | `factory::Pools` 的 `LinkedTable<ID, PoolSimpleInfo>` | `blake2b256(类型名 A ‖ 类型名 B ‖ u32 tick spacing)`，A 是字典序较大的币；tick spacing 读 GlobalConfig 的 `fee_tiers` |
+| `turbos` | `pool_factory::PoolConfig` 的 `Table<ID, PoolSimpleInfo>` | `sha256(类型名 lo ‖ 类型名 hi ‖ 手续费类型名)`，手续费类型读 PoolConfig 的 `fee_map` |
+| `flowx` | `PoolRegistry` 的动态对象字段 | `PoolDfKey { coin_type_x: lo, coin_type_y: hi, fee_rate }`，手续费档位固定 8 个 |
+
+- 读取轮数：配置（两个对象，按节点缓存 10 分钟）、条目、池子和代币精度各一轮。每个代币要查约 100 个条目（SUI、两个稳定币 × 各 DEX 的手续费档位），`maxCoins`（默认 50）限制一次给多少个代币找池子，超出的没有价格；`protocols` 只用某些 DEX。Bluefin、Momentum 没有按币对登记池子的表，不用
+- `combinePrices([…])` 把多个源组合成一个，可以传给 `getLpPositions` 的 `prices`；价格源的上下文里有 `client`（链上价格源用它读池子），`lpPositions` 会传入
+- 资产总值：Sui 节点能直接列出地址持有的全部代币（一次 `ListBalances`），也可以用 `coinTypes` 只算某些代币；`lp: true`（或 `getLpPositions` 的参数）时加上 LP 仓位的 `valueUsd`（不含未领取的手续费和奖励），作为仓位计入的 LP 代币（DipCoin、FlowX V2、Aftermath）不再算在代币里。`minUsd` 只影响列出的代币，不影响合计；`unpriced` 是算不出价值的代币和仓位数
+
+价格只用于展示和估值：链上价格是池子当前的价格，可能被单笔交易影响，不要用它算交易的最小数量。持有大量垃圾币的地址，资产总值要读每个代币的信息、给 DefiLlama 没有收录的代币找池子，请求较多（2026-10 主网上一个持有 383 种代币的地址约 16 秒）。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：`getTokenPrices` 约增加 22KB（gzip 约 9KB，含 blake2b、sha256），`getPortfolio`（含 LP 仓位）约 65KB（gzip 约 24KB）；已经用到 `/lp` 时 `getPortfolio` 再增加约 10KB（gzip 约 4KB）。
+
+## 域名解析
+
+子路径 `@w3lib/sui-batch-call/names`：SuiNS 的名字 → 地址、地址 → 默认名字。
+
+```ts
+import { formatSuiName, getAddressNames, getNameAddresses } from '@w3lib/sui-batch-call/names'
+
+await getNameAddresses(['example.sui', '@adeniyi', 'cny@stashed'])   // 节点参数同其他快捷函数
+// [{ name: 'example.sui', normalized: 'example.sui', address: '0x214a…9db0', expiresAt: 1912952738221 },
+//  { name: '@adeniyi', normalized: 'adeniyi.sui', address: '0x1eb7…e0b1', expiresAt: 1874340606618 }, …]
+await getAddressNames(['0x1eb7…e0b1'])
+// [{ address: '0x1eb7…e0b1', name: 'adeniyi.sui' }]
+formatSuiName('cny.stashed.sui', 'at')   // 'cny@stashed'
+```
+
+- 名字可以写点分格式（`example.sui`、`sub.example.sui`）或 `@` 格式（`@example`、`sub@example`），大小写不限；结果的 `normalized` 是小写的点分格式（`normalizeSuiName`），不合法的名字（不是 `.sui` 结尾、标签有非法字符等）为 null。显示成 `@` 格式用 `formatSuiName(name, 'at')`
+- 不需要索引服务：SuiNS 把名字记录放在注册表 `Table<Domain, NameRecord>` 里、默认名字放在反查表 `Table<address, Domain>` 里，条目是动态字段，对象 ID 按名字（标签倒序的 `Domain`）或地址在本地算出，再用 `BatchGetObjects` 读（每次 50 个，自动分批）。正查一轮，反查两轮
+- 有效性按 SuiNS 的规则（与 Sui GraphQL 的解析一致）：到期时间早于现在的名字 `address` 为 null（`expiresAt` 是过去的时间）；叶子子域名（没有自己的 NFT 和到期时间）跟随父域名，父域名过期或重新注册过（NFT 对不上）时无效。时间按链上时钟对象（`0x6`）算，不依赖本机时间。名字没有设置目标地址时 `address` 为 null
+- 反查读默认名字后再正查核对：名字没过期、目标地址就是这个地址才返回（名字过期、转手或改了指向后，旧的反查记录还在，不能直接用）
+- 内置主网和测试网的部署（`SUINS`，表 ID 从 SuiNS 对象的 `RegistryKey<Registry>` 动态字段里读出来核对过）；devnet 等网络传 `suins: { package, registry, reverseRegistry }`
+
+主网核对（2026-10）：`example.sui`、`@adeniyi`、`Manos.SUI`、叶子子域名 `cny.stashed.sui`、节点子域名 `shafiq.talise.sui` 的地址，过期的 `goodsoul.sui`、父域名重新注册过的叶子 `2349013927723.kns.sui`、没设地址的 `suins.sui` 为 null，反查（含反查记录还在、名字已过期的地址）都和 Sui GraphQL（`address(name:)`、`defaultNameRecord`）一致。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：约增加 13KB（gzip 约 5KB，主要是 blake2b 和 BCS 编码）；已经用到 `/price` 或 `/lp` 时约增加 3KB（gzip 不到 1.5KB）。
+
+## 手续费估算
+
+子路径 `@w3lib/sui-batch-call/fees`：当前的 gas 价格，和一笔交易要花多少 SUI。
+
+```ts
+import { getCostEstimate, getFeeEstimate } from '@w3lib/sui-batch-call/fees'
+import { PtbBuilder, pure } from '@w3lib/sui-batch-call/write'
+
+await getFeeEstimate()   // { epoch: '1285', referenceGasPrice: '100' }
+
+const ptb = new PtbBuilder()
+const coin = ptb.command({ kind: 'splitCoins', coin: ptb.gas, amounts: [ptb.pure(pure.u64(1_000_000n))] })
+ptb.command({ kind: 'transferObjects', objects: [ptb.nested(coin, 0)], address: ptb.pure(pure.address(to)) })
+await getCostEstimate({ from: owner, kind: ptb.build() })
+// { gasPrice: '100', computationCost: '100000', storageCost: '1976000', storageRebate: '987901', nonRefundableStorageFee: '99',
+//   total: '1088099', totalFormatted: '0.001088099', gasBudget: '2491200', gasBudgetFormatted: '0.0024912', symbol: 'SUI' }
+```
+
+- **为什么没有三档**：Sui 的参考 gas 价格（reference gas price）由验证者每个 epoch（约 24 小时）定一次，epoch 内不变，没有随区块变化的 baseFee，按参考价格发送就会被正常处理，所以 `getFeeEstimate` 只返回 `referenceGasPrice`（/write 默认用的价格）。出价更高只在交易用到拥堵的共享对象（如热门池子）时有用：这些交易按 gas 价格排队，这时给 /write 传 `gasPrice`
+- **一笔交易**：`kind` 同 `batchCall`（@mysten/sui 的 `tx.build({ onlyTransactionKind: true })` 的字节 / base64，或本库的 `ProgrammableTransaction`），`from` 是地址（只模拟，不需要私钥），`sponsor` 是付 gas 的地址。和 /write 发送时一样选 gas 币（没有 Coin 时用地址余额）、模拟执行一次，返回：
+  - `computationCost`（计算消耗 × gas 价格）、`storageCost`（写入的对象的存储费）、`storageRebate`（删除 / 改写的对象原来付的存储费，已扣掉 1% 不返还的 `nonRefundableStorageFee`）
+  - `total` = 计算费 + 存储费 − 返还，是实际花掉的 SUI，可能为负（合并、删除对象时返还多于花费）
+  - `gasBudget`：/write 发送时用的 gas 上限，(计算费 + 存储费) × `gasMultiplier`（默认 1.2），不低于 0.002 SUI，不超过付款地址可用的 SUI。执行前付款地址至少要有这么多 SUI（返还在执行后才到账）
+- `gasPrice`、`gasMultiplier` 同 /write；模拟失败（Move abort、付款地址没有 SUI 等）时抛出
+
+主网核对（2026-10，参考 gas 价格 100 MIST）：从持有 SUI 的地址转 0.001 SUI（从 gas 币拆出）净花费约 0.00109 SUI，gas 上限 0.0025 SUI；赞助交易整个转走一个 USDC Coin，存储返还几乎抵掉存储费，净花费约 0.0001 SUI；`gasPrice` 翻倍时计算费翻倍；没有 SUI 的地址报错。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：`getFeeEstimate` 不到 1KB；`getCostEstimate` 约增加 29KB（gzip 约 10KB，就是 /write 的选币、编码、模拟代码），已经用到 /write 时约增加 1KB。
+
+## 兑换
+
+子路径 `@w3lib/sui-batch-call/swap`：卖出固定数量（exact input），在 [LP 仓位](#lp-仓位) 支持的 12 个协议里找最好的路线。
+
+```ts
+import { SUI_COIN_TYPE, SuiClient } from '@w3lib/sui-batch-call'
+import { buildSwap, getSwapQuote, swap } from '@w3lib/sui-batch-call/swap'
+
+const plan = await getSwapQuote(owner, { tokenIn: SUI_COIN_TYPE, tokenOut: USDC, amountInFormatted: '10' })   // 节点参数同其他快捷函数
+// { amountOut: '9936693', amountOutFormatted: '9.936693', amountOutMin: '9887009', price: 0.9937, priceImpact: 0.00001,
+//   route: { path: [SUI, USDC], hops: [{ protocol: 'dipcoin', pool: '0x7fbd…', tokenIn, tokenOut, fee: 3000 }], amountOut }, routes: [...], kind, gasSpend }
+
+const sui = new SuiClient()
+const r = await swap(sui, key, { tokenIn: CETUS, tokenOut: SUI_COIN_TYPE, amountInFormatted: '500' }, { slippage: 0.01 })
+r.status // 'confirmed'；r.plan 是实际发出的交易和报价
+```
+
+- **报价**：每条候选路线在只读调用（SimulateTransaction，检查关闭）里执行一遍兑换的命令、读出买到的 Coin 的数量，是各 DEX 合约自己算的结果（含手续费、跨 tick、动态费率），不在本地重写每个 DEX 的数学。卖出 SUI 时用模拟的 gas 币，`owner` 不需要持有；卖出其他代币时从 `owner` 的 Coin 里拆，`owner` 要持有足够的数量（否则报 `Insufficient balance`）
+- **路线**（读池子 / Coin 时节点出错直接抛出，不当作没有路线）：直接兑换的每个池子；经过中间币（`intermediates`，默认 SUI、USDC）的两跳：先用第一跳的每个池子报价、取输出最多的，再和第二跳的每个池子组成两跳路线报价（两跳可以跨 DEX）。每条路线一次只读调用，按 `concurrency`（默认 `SuiClient` 的 concurrency）并发。`routes` 是报价成功的全部路线，从高到低
+- **找池子**：Cetus、Magma、Turbos、FlowX CLMM、DipCoin、FlowX V2 的工厂把池子登记在表里，条目的对象 ID 按两种币（和手续费档位）在本地算出，一轮 `BatchGetObjects` 读完（同 [价格](#价格)；Magma 与 Cetus 的算法相同，DipCoin / FlowX V2 的键是 `"LP-X-Y"`，两种顺序都查）。**Bluefin、Momentum、Kriya、Cetus DLMM、Aftermath 没有按币对登记的表**，要用 `pools` 传池子 ID（可以和自动找到的一起比较；`protocols: []` 时只用 `pools`）
+- **最少收到**：`amountOutMin` = 报价 × (1 − `slippage`)（默认 0.005）；中间的每一跳不设下限，交易最后从买到的 Coin 里拆出 `amountOutMin` 再合并回去（同 `/liquidity` 的 `guardMin`），不够时整笔失败（发送前的模拟就会失败，不花 gas）。每一跳把传入的币全部卖出，剩下的输入币要正好为 0（`destroy_zero`），没卖完时也失败
+- **价格影响**：同一路线卖出 1 / 10000 的数量的价格和这笔的价格差多少
+- **交易**：一笔 PTB。卖出 SUI 时从 gas 币拆（`gasSpend`），代币按 Coin + 地址余额凑；买到的币合并进发送者已有的同类 Coin（SUI 合并进 gas 币；发送者没有 SUI Coin 对象、只有地址余额时 gas 由地址余额付，没有 gas 币，买到的 SUI 照常转给发送者）。`buildSwap` 只构建（`kind` 可以交给 `batchCall` 或自己签名）；`swap` 发送时按最新的 Coin 重新构建（路线和 `amountOutMin` 不变），钱包、`sponsor`（赞助交易）、`dryRun` 等同 `/write`，`checkBalance`（默认 true）先检查卖出的币够不够（SUI 另留 0.05 SUI 的 gas）
+
+| 协议 | 兑换用的函数 |
+| --- | --- |
+| Cetus、Magma | integrate 包的 `router::swap` |
+| Bluefin | `pool::swap`（Balance 进出） |
+| Momentum、Kriya CLMM | `trade::flash_swap` + `swap_receipt_debts` + `repay_flash_swap` |
+| Turbos | `swap_router::swap_a_b_with_return_` / `swap_b_a_with_return_` |
+| FlowX CLMM | `swap_router::swap_exact_input`（经 PoolRegistry） |
+| Cetus DLMM | `pool::flash_swap` + `pay_amount` + `repay_flash_swap` |
+| DipCoin | `router::swap_exact_x_to_y_with_return` / `…y_to_x…` |
+| FlowX V2 | `router::swap_exact_input_direct`（经 Container） |
+| Kriya AMM | `spot_dex::swap_token_x` / `swap_token_y` |
+| Aftermath | `swap::swap_exact_in_direct`（DAO 费池子走外壳包） |
+
+主网核对（2026-10，`test/swap-live.test.ts`）：以真实持币地址的身份，对每个协议的 SUI / USDC 池子（Kriya AMM 是 Wormhole USDC）两个方向各兑换 1 个，再自动找路线兑换 SUI ↔ USDC、SUI ↔ CETUS（含 SUI → USDC → CETUS、CETUS → USDC → SUI 两跳）：把构建好的交易用真实的 gas 币模拟（检查开启），按余额变化算出买到的数量（SUI 加回 gas），全部 ≥ `amountOutMin`；模拟的同时只用选中的池子再报一次价，模拟结果与报价逐位相等（这期间池子正好有成交时重来）（例：10 SUI → 9.936693 USDC，500 CETUS → 11.225536491 SUI）。Kriya CLMM 在 2026-10 关闭了交易（所有池子的 `pool::assert_trading_enabled` 都失败），报价时没有路线。
+
+**局限**：只支持卖出固定数量（不支持买入固定数量）；最多两跳、每跳一个池子（不拆单）；中间币只试 `intermediates` 里的；没有按币对登记的 DEX 只能传 `pools`；报价时卖出的币（SUI 除外）要在 `owner` 名下。报价是当时的状态，执行时由 `amountOutMin` 保护。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：`buildSwap` 约增加 60KB（gzip 约 22KB，12 个协议的池子解析和兑换命令、找池子的哈希），加上 `swap` 共约 79KB（gzip 约 28KB，含 `/write` 的发送代码）；已经用到 `/liquidity` 时再增加约 18KB（gzip 约 7KB）。
+
+## 代币风险
+
+子路径 `@w3lib/sui-batch-call/risk`：Sui 的 Coin 是标准对象，没有转账税，合约也拦不住转账，风险主要在发行方保留的权限。
+
+```ts
+import { getCoinRisks } from '@w3lib/sui-batch-call/risk'
+
+const [usdc, cetus] = await getCoinRisks([USDC, CETUS], { address: owner })   // 节点参数同其他快捷函数
+// usdc：{ regulated: true, allowGlobalPause: true, paused: false, denied: false, supply: 'mintable',
+//         treasuryCap: { owner: 'object', root: { type: '0xecf4…::treasury::Treasury<…USDC>', owner: 'shared' } }, metadataMutable: true,
+//         sell: { stage: 'ok', route: [{ protocol: 'cetus', pool: '0x51e8…' }], roundTripLoss: 0.0002 }, honeypot: false,
+//         flags: ['regulated', 'global-pause', 'mintable', 'mutable-metadata'] }
+// cetus：{ regulated: false, supply: 'fixed', treasuryCap: { owner: 'immutable' }, metadataCap: { owner: 'address', address: '0x69d3…' }, flags: ['mutable-metadata'] }
+```
+
+- **监管币**（`regulated`）：发行时创建了 DenyCapV2（`coin::create_regulated_currency_v2` 或 Coin Registry 的 `make_regulated`）或 v1 的 DenyCap，持有者可以冻结地址（被冻结的地址不能再用这个币作交易输入）；`allowGlobalPause` 时还能全局暂停（v1 没有）。改名单要 `&mut DenyCap`：DenyCap 或包着它的最外层对象已冻结 / 转给 0x0 时 `canFreeze: false`，不标记 `regulated` / `global-pause`。`paused`（当前 epoch 是否全局暂停）、`denied`（`address` 是否被冻结）用 DenyList（`0x403`）的 `coin::deny_list_v2_*_current_epoch` 在只读调用里读出；v1 用 `coin::deny_list_contains`，`paused` 为 null
+- **增发**（`supply`）：`fixed`：节点报告固定供应（Coin Registry 的 `make_supply_fixed`），或 TreasuryCap 已冻结 / 转给了 0x0（`burned`），或包着它的最外层对象已冻结 / 转给了 0x0（增发要 `&mut TreasuryCap`）；`burn-only`：只能销毁；`mintable`：TreasuryCap 在地址名下、在别的对象里（`root` 是一路往上找到的最外层对象，如 USDC 放在 Circle 的 `treasury::Treasury` 共享对象里，增发由它的合约控制）或是共享对象；`unknown`：节点不知道 TreasuryCap 在哪（包在别的对象的字段里而不是动态字段、或已删除），这时没法从链上直接判断（没有反向索引），标记为 `supply-unknown`
+- **元数据**（`metadataMutable`）：Coin Registry 的 `Currency` 看 MetadataCap：已删除 = 不能改；已领取 = 拿着 MetadataCap 的人能改（`metadataCap` 是它的持有者；setter 按引用取它，只有转给 0x0 才算没人能改）；未领取 = TreasuryCap 的持有者能领取后修改（领取只要 `&TreasuryCap`，TreasuryCap 冻结时谁都能传它，也算能改；转给 0x0 时不能改）。旧的 `CoinMetadata` 冻结了就不能改，否则同样看 TreasuryCap。权限对象在冻结的对象里（只能经那个合约）或节点读不到时为 null
+- **能不能卖**（`sell`，默认开启，`sell: false` 关闭）：用 `/swap` 找 SUI → 代币最好的路线（`swap` 传 `pools` 等参数，同 `/swap`），在同一笔只读调用里用 `amount`（默认 0.1 SUI，模拟的 gas 币，不需要持有）买入、再按原路全部卖回 SUI。`stage`：`ok`、`no-pool`（没有池子）、`buy-failed`（有池子但买不进）、`sell-failed`（买进后卖不出）；`roundTripLoss` 是来回一趟的损失（两次手续费 + 价格影响）。卖不出或损失 ≥ 90% 时 `honeypot: true`。兑换的代码按需加载
+- `flags` 汇总：`not-found`、`regulated`（还能冻结地址）、`global-pause`、`paused`、`denied`、`mintable`、`supply-unknown`、`mutable-metadata`、`honeypot`、`cannot-buy`、`no-pool`、`high-round-trip-loss`（> 10%）
+- 信息来自节点的 `GetCoinInfo`（元数据、TreasuryCap、监管信息）和这些对象本身：每个代币一次 `GetCoinInfo`、一轮读权限对象（在别的对象里时往上多读几层），监管币多一次只读调用
+
+主网核对（2026-10，`test/risk-live.test.ts`）：USDC 是监管币、可以全局暂停、没有暂停，TreasuryCap 和 DenyCapV2 都在 Circle 的 `treasury::Treasury` 共享对象里；SUI 固定供应、元数据不能改；CETUS 的 TreasuryCap 已冻结（固定供应），MetadataCap 在一个地址名下；meme 币 FUD 的 TreasuryCap 转给了 0x0；DEEP 的 TreasuryCap 在 `ProtectedTreasury` 里；它们都能买进卖出（来回损失 0.02%~2%）。
+
+**局限**：Sui 上的“貔貅”主要靠监管币冻结买家地址，这在同一笔交易里模拟不出来（冻结检查的是交易输入的 Coin），所以要结合 `regulated` / `denied` 看；TreasuryCap 包在别的对象的普通字段里时找不到持有者（`supply: 'unknown'`）；`root` 只给出最外层对象的类型，那个合约允许谁增发要看合约本身。
+
+打包（esbuild、minify，对比只用 `SuiClient`）：约增加 24KB（gzip 约 9KB）；检查能不能卖时按需加载兑换的代码（约 62KB，gzip 约 23KB）。
+
 ## 节点
 
 - 节点是 gRPC-web 的 URL（如 `https://fullnode.mainnet.sui.io`），或自己实现的 `GrpcTransport`（`unary(method, request)`）；数组时依次故障切换
@@ -302,6 +461,7 @@ await removeLiquidity(sui, key, { pool, protocol: 'aftermath', percent: 100, out
 pnpm test                  # 单元测试（假的 gRPC-web 节点，不需要网络）
 pnpm test:live             # 连主网（SUI_GRPC 可以指定节点；需要代理时加 NODE_USE_ENV_PROXY=1），写操作只模拟
 pnpm test:live:liquidity   # 各 DEX 的 LP 仓位和加减流动性（主网模拟；DEX=bluefin 时 dex-live / amm-live 只跑这一个 DEX）
+pnpm test:live:swap        # 兑换和代币风险（主网报价、模拟最终的交易并按余额变化核对；DEX=bluefin 只跑这个 DEX 的单池子用例）
 SUI_DEVNET_KEY=suiprivkey1… pnpm test:devnet   # 在 devnet 真实执行写操作（这个私钥要有几个 devnet SUI）
 pnpm demo                  # 本地运行 demo（demo/，直接用 src 的源码）
 ```

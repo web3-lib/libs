@@ -10,10 +10,10 @@ import { stringFieldId, typeNameOf } from '../dynamicField.js'
 import { pure } from '../write/bcs.js'
 import type { AmmReader, AmmWriter } from './types.js'
 
-const PKG = '0xdae28ab9ab072c647c4e8f2057a8f17dcc4847e42d6a8258df4b376ae183c872'
-const GLOBAL: SharedRef = { objectId: '0x935229a3c32399e9fb207ec8461a54f56c6af5744c64442435ac217ab28f0d59', initialSharedVersion: 557604664n }
+export const PKG = '0xdae28ab9ab072c647c4e8f2057a8f17dcc4847e42d6a8258df4b376ae183c872'
+export const GLOBAL: SharedRef = { objectId: '0x935229a3c32399e9fb207ec8461a54f56c6af5744c64442435ac217ab28f0d59', initialSharedVersion: 557604664n }
 /** Global.registered_pools（Table<String, address>） */
-const REGISTRY = '0x55c65b7b67b0ccdf28e13b3b6d204e859dd19556603e3b94137a19306a7254d8'
+export const REGISTRY = '0x55c65b7b67b0ccdf28e13b3b6d204e859dd19556603e3b94137a19306a7254d8'
 
 export const dipcoin: AmmReader = {
   protocol: 'dipcoin',

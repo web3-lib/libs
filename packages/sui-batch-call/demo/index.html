@@ -154,7 +154,136 @@
       </section>
 
       <section class="card">
-        <h2>NFT <small class="muted">getNfts：地址拥有的 NFT，名称、图片取自节点渲染的 Display</small></h2>
+        <h2>价格 / 资产总值 <small class="muted">子路径 /price：tokenPrices（DefiLlama，没收录的从 Cetus、Turbos、FlowX 的池子算）、portfolio（持有的全部代币 × 价格，可选加上 LP 仓位）</small></h2>
+        <div class="row">
+          <label for="priceCoins">代币</label>
+          <textarea id="priceCoins" placeholder="代币类型，每行一个（价格查询用；资产总值用“地址”栏的地址，代币留空时算持有的全部）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="priceAt">历史价格</label>
+          <input id="priceAt" type="date" aria-label="历史价格的日期（可选）" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="priceLp" /> 资产总值：计入 LP 仓位</label></span>
+          <span class="checks"><label>只列出价值 ≥ <input id="priceMinUsd" class="small" value="0" spellcheck="false" /> 美元</label></span>
+          <button class="primary" id="runPrices">查询价格</button>
+          <button class="primary" id="runPortfolio">资产总值</button>
+          <span class="stats" id="priceStats"></span>
+        </div>
+        <p class="hint">
+          历史价格只有 DefiLlama 能给（不填日期为当前价格，链上价格源只给当前的）。资产总值要读每个代币的信息、给没收录的代币找池子，持币很多的地址会发出较多请求；
+          “只列出价值”只影响列出的代币，不影响合计。
+        </p>
+        <div class="result" id="priceResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>域名 <small class="muted">子路径 /names：SuiNS，名字 → 地址（resolveNames），地址 → 默认名字（lookupAddresses，正查核对过）</small></h2>
+        <div class="row">
+          <label for="nameList">名字</label>
+          <textarea id="nameList" placeholder="SuiNS 名字，每行一个（example.sui、@example、sub.example.sui、sub@example）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runNames">名字 → 地址</button>
+          <span class="stats" id="namesStats"></span>
+        </div>
+        <div class="row">
+          <label for="nameAddresses">地址</label>
+          <textarea id="nameAddresses" placeholder="地址，每行一个（留空用上面“地址”栏的地址）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runAddressNames">地址 → 名字</button>
+          <span class="stats" id="addressNamesStats"></span>
+        </div>
+        <p class="hint">SuiNS 只部署在主网和测试网（节点填测试网地址时用测试网的部署）。过期的名字没有地址；地址的反查记录要指回这个地址才算默认名字。</p>
+        <div class="result" id="namesResult"></div>
+        <div class="result" id="addressNamesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>手续费 <small class="muted">子路径 /fees：estimateFees（当前参考 gas 价格），estimateCost（一笔交易模拟执行，不发送）</small></h2>
+        <div class="actions">
+          <button class="primary" id="runGasPrice">参考 gas 价格</button>
+          <span class="stats" id="gasPriceStats"></span>
+        </div>
+        <div class="result" id="gasPriceResult"></div>
+        <div class="row">
+          <label for="feeTo">转账</label>
+          <div class="inline">
+            <input id="feeTo" placeholder="接收地址（0x…；不填为转给自己）" spellcheck="false" />
+            <input id="feeAmount" class="small" value="0.001" spellcheck="false" aria-label="转账的 SUI 数量" /> SUI
+          </div>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runCost">估算手续费</button>
+          <span class="stats" id="costStats"></span>
+        </div>
+        <p class="hint">
+          估算一笔“从 gas 币拆出这些 SUI 转给接收地址”的交易，发送者是上面“地址”栏的地址，要持有 SUI（只模拟，不需要私钥，不会发送）。
+          Sui 的 gas 价格每个 epoch 才定一次，没有分档；gas 上限是发送时给的上限，实际花费是净花费。
+        </p>
+        <div class="result" id="costResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>兑换 <small class="muted">子路径 /swap：在 12 个协议里找最好的路线（直接或经过 SUI / USDC 两跳），每条路线用只读调用报价；连接钱包后可以发送</small></h2>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="swapWalletInfo">未连接（只报价时用上面“地址”栏的地址）</span>
+            <button id="swapConnect">连接钱包</button>
+          </div>
+        </div>
+        <div class="row">
+          <label for="swapIn">卖出</label>
+          <div class="inline">
+            <input id="swapIn" placeholder="代币类型（卖出）" spellcheck="false" />
+            <input id="swapAmount" class="small" value="1" spellcheck="false" aria-label="卖出的数量" />
+          </div>
+        </div>
+        <div class="row">
+          <label for="swapOut">买入</label>
+          <input id="swapOut" placeholder="代币类型（买入）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="swapPools">池子</label>
+          <textarea id="swapPools" placeholder="另外参与比较的池子 ID，每行一个（可选：Bluefin、Momentum、Kriya、Cetus DLMM、Aftermath 的池子只能这样给）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
+          <button class="primary" id="runSwapQuote">报价（只构建）</button>
+          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <span class="stats" id="swapStats"></span>
+        </div>
+        <p class="hint">
+          只支持卖出固定数量；卖出 SUI 以外的代币时，发送者要持有足够的数量（否则报价报 Insufficient balance）。最少收到的数量在交易里检查，超出滑点时交易失败。
+          发送会在钱包里确认，交易真实上链，请先用小额试。
+        </p>
+        <div class="result" id="swapResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币风险 <small class="muted">子路径 /risk：监管币（能否冻结地址、全局暂停）、增发权限（TreasuryCap 在谁手里）、元数据能否修改，可选模拟买入再卖出</small></h2>
+        <div class="row">
+          <label for="riskCoins">代币</label>
+          <textarea id="riskCoins" placeholder="代币类型，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="riskSell" /> 模拟买入再卖出（能不能卖）</label></span>
+          <span class="checks"><label>买入 <input id="riskAmount" class="small" value="0.1" spellcheck="false" /> SUI</label></span>
+          <span class="checks"><label><input type="checkbox" id="riskDenied" /> 检查“地址”栏的地址有没有被冻结</label></span>
+          <button class="primary" id="runRisk">检查风险</button>
+          <span class="stats" id="riskStats"></span>
+        </div>
+        <p class="hint">
+          模拟买入再卖出在只读调用里执行（不发送交易、不需要持有 SUI），会多发出每条候选路线一次调用，默认不开。
+          Sui 上的“貔貅”主要靠监管币冻结买家地址，模拟看不出来，要结合“监管币”一列看。
+        </p>
+        <div class="result" id="riskResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>NFT<small class="muted">getNfts：地址拥有的 NFT，名称、图片取自节点渲染的 Display</small></h2>
         <div class="row">
           <label for="nftType">类型</label>
           <input id="nftType" placeholder="只看这个类型或前缀（可选，如 0x…::suins_registration::SuinsRegistration）" spellcheck="false" />

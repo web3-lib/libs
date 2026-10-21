@@ -9,8 +9,8 @@ import { big, keepBalance } from './env.js'
 import type { DexReader, DexWriter, DexPool, SharedRef } from './types.js'
 import { coinTypeOf, i32, i32Bits, json, refOf, sharedOf, typeArgs } from './util.js'
 
-const PKG = '0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267'
-const CONFIG: SharedRef = { objectId: '0x03db251ba509a8d5d8777b6338836082335d93eecbdd09a11e190a1cff51c352', initialSharedVersion: 406496849n }
+export const PKG = '0x3492c874c1e3b3e2984e8c41b589e642d4d0a5d6459e5a9cfc2d52fd7c89c267'
+export const CONFIG: SharedRef = { objectId: '0x03db251ba509a8d5d8777b6338836082335d93eecbdd09a11e190a1cff51c352', initialSharedVersion: 406496849n }
 
 const poolArg = (pool: DexPool) => pool.shared as SharedRef
 

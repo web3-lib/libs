@@ -31,6 +31,7 @@ export {
   type SuiLpReward,
   type SuiLpToken,
   type SuiPriceSource,
+  type SuiPriceSourceContext,
 } from '../lp.js'
 export { CETUS, CETUS_POSITION_TYPE } from '../cetus.js'
 export { CETUS_DLMM, CETUS_DLMM_POSITION_TYPE } from '../dlmm.js'

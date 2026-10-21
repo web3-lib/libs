@@ -61,10 +61,11 @@ export async function payCoin(
 
 /**
  * 发送者已有的一个 coinType 的 Coin（交易里还没用到的）：找零和领取的币合并进去，不新建对象。
- * SUI 在发送者自己付 gas 时用 gas 币；没有时为 null（照常转给发送者）
+ * SUI 在发送者自己付 gas、且有 SUI Coin 对象时用 gas 币（交易用到 gas 币时发送一定用 Coin 付 gas）；
+ * 只有地址余额的 SUI 时发送会用地址余额付 gas、没有 gas 币可用，这时为 null（照常转给发送者）
  */
 export async function sinkFor(ptb: PtbBuilder, ctx: BuildContext, owner: string, coinType: string, fromGas: boolean): Promise<Argument | (() => Argument) | null> {
-  if (coinType === SUI_COIN_TYPE) return fromGas ? ptb.gas : null
+  if (coinType === SUI_COIN_TYPE) return fromGas && (await ctx.coins(owner, SUI_COIN_TYPE, 1n)).length ? ptb.gas : null
   const [coin] = await ctx.coins(owner, coinType, 1n)
   return coin ? () => ptb.owned(coin) : null
 }
