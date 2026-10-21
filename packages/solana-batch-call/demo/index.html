@@ -183,6 +183,144 @@
         </div>
         <div class="result" id="ownerNftsResult"></div>
       </section>
+
+      <section class="card">
+        <h2>价格 <small class="muted">子路径 /price：getTokenPrices（DefiLlama，没有收录的从链上 Raydium / Orca 池子算）、getPortfolio（资产总值）</small></h2>
+        <div class="row">
+          <label for="priceMints">代币</label>
+          <textarea id="priceMints" placeholder="mint 地址，每行一个（SOL 自动加上）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runPrices">查询价格</button>
+          <span class="stats" id="pricesStats"></span>
+        </div>
+        <div class="result" id="pricesResult"></div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="portfolioListed" checked /> 只算上面列出的代币（取消：地址的全部持仓，需要自己的节点）</label></span>
+          <span class="checks"><label><input type="checkbox" id="portfolioLp" /> 加上 LP 仓位（用“LP 仓位”里的 mint / 池子；留空时扫描全部代币账户，需要自己的节点）</label></span>
+          <button class="primary" id="runPortfolio">查询资产总值</button>
+          <span class="stats" id="portfolioStats"></span>
+        </div>
+        <div class="result" id="portfolioResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>授权管理 <small class="muted">子路径 /approvals：代币账户的授权（delegate）、可以关闭回收租金的空账户，批量撤销 / 关闭</small></h2>
+        <div class="row">
+          <label for="apprMints">代币</label>
+          <textarea id="apprMints" placeholder="mint 地址，每行一个：读这些代币的关联代币账户（免费节点也能用）。留空时列出地址的全部代币账户，需要自己的节点" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="apprAll" /> 列出全部代币账户（含没有授权、有余额的）</label></span>
+          <button class="primary" id="runApprovals">查询授权</button>
+          <span class="stats" id="apprStats"></span>
+        </div>
+        <div class="row">
+          <label for="apprAction">操作</label>
+          <select id="apprAction">
+            <option value="revoke">撤销授权（上面查到的、有 delegate 且没有冻结的账户）</option>
+            <option value="close">关闭空代币账户（余额为 0 且能关闭的账户，租金退回）</option>
+          </select>
+        </div>
+        <div class="row" id="apprDestinationRow" hidden>
+          <label for="apprDestination">租金退给</label>
+          <input id="apprDestination" placeholder="地址（可选，默认账户的 owner）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runApprBuild">构建（只看指令）</button>
+          <button class="primary" id="runApprSend">发送（钱包确认）</button>
+        </div>
+        <p class="hint">
+          撤销 / 关闭只处理上面最近一次查询出的账户，钱包要是这些账户的 owner（在“添加 / 移除流动性”里连接钱包）。关闭账户会退回租金并去掉授权，不可恢复；发送在钱包里确认，交易真实上链。
+        </p>
+        <div class="result" id="apprResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>域名解析 <small class="muted">子路径 /names：SNS（Bonfida，.sns）名字 → 地址、地址 → 主域名</small></h2>
+        <div class="row">
+          <label for="nameList">名字</label>
+          <textarea id="nameList" placeholder="域名，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="nameLegacySol" /> 也解析 .sol（legacySol）</label></span>
+          <span class="checks"><label><input type="checkbox" id="nameAllowPda" /> owner 是 PDA 时也返回地址（allowPda）</label></span>
+          <button class="primary" id="runNames">解析名字</button>
+          <button class="primary" id="runAddressNames">查询“地址”栏的主域名</button>
+          <span class="stats" id="namesStats"></span>
+        </div>
+        <p class="hint">
+          默认不解析 <code>.sol</code>：它正在迁到另一个注册服务（SRS），SNS 官方 SDK 从 2026-10-15 前后起不再解析，同一个 <code>.sol</code> 名字以后可能属于别人，
+          这时结果里服务为空、地址为空。勾选“也解析 .sol”才会当作同名的 <code>.sns</code> 解析，转账前请自己确认。
+        </p>
+        <div class="result" id="namesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>手续费 <small class="muted">子路径 /fees：三档优先费建议，一笔交易的花费（基础费 + 优先费 + 新建账户的押金）</small></h2>
+        <div class="row">
+          <label for="feeAccounts">账户</label>
+          <textarea id="feeAccounts" placeholder="可写账户（如要交易的池子），每行一个（可选）：只看会写这些账户的交易。留空看全网，大多是 0" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runFees">查询优先费</button>
+          <button class="primary" id="runCost">估算一笔 SOL 转账的花费</button>
+          <span class="stats" id="feesStats"></span>
+        </div>
+        <p class="hint">估算转账：地址是“地址”栏的（付手续费，要有 SOL），转给自己 0.000001 SOL，只在节点上模拟，不发送。</p>
+        <div class="result" id="feesResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>兑换 <small class="muted">子路径 /swap：Raydium CLMM / Orca Whirlpool / Raydium CPMM / AMM v4 的池子里找最好的路线，本地报价，连接钱包后可以发送</small></h2>
+        <div class="row">
+          <label for="swapIn">卖出</label>
+          <div class="inline">
+            <input id="swapIn" placeholder="卖出的代币 mint" spellcheck="false" />
+            <input id="swapAmount" placeholder="数量（如 0.01）" spellcheck="false" />
+          </div>
+        </div>
+        <div class="row">
+          <label for="swapOut">买入</label>
+          <input id="swapOut" placeholder="买入的代币 mint" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="swapPools">池子</label>
+          <textarea id="swapPools" placeholder="额外的池子地址，每行一个（可选）：Raydium AMM v4 的池子要在这里给出才会用" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
+          <span class="checks"><label><input type="checkbox" id="swapNative" checked /> SOL 那一边自动包装 / 解包</label></span>
+          <button class="primary" id="runSwapQuote">报价（只构建）</button>
+          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <span class="stats" id="swapStats"></span>
+        </div>
+        <p class="hint">
+          报价用连接的钱包地址，没连接时用“地址”栏的。发送会在钱包里确认，交易真实上链，请先用小额试；最少收到按滑点计算，价格影响大时不要发。
+        </p>
+        <div class="result" id="swapResult"></div>
+      </section>
+
+      <section class="card">
+        <h2>代币风险 <small class="muted">子路径 /risk：增发 / 冻结权限，Token-2022 里影响持有人的扩展；可选模拟买入再卖出判断能不能卖</small></h2>
+        <div class="row">
+          <label for="riskMints">代币</label>
+          <textarea id="riskMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="riskConcentration" /> 持币集中度（getTokenLargestAccounts，免费节点大多不支持）</label></span>
+          <button class="primary" id="runRisk">检查风险</button>
+          <span class="stats" id="riskStats"></span>
+        </div>
+        <div class="result" id="riskResult"></div>
+        <div class="actions">
+          <span class="checks"><label>买入 <input id="tradeAmount" class="small" value="0.05" spellcheck="false" /> SOL</label></span>
+          <button class="primary" id="runTrade">模拟买卖（能不能卖）</button>
+          <span class="stats" id="tradeStats"></span>
+        </div>
+        <p class="hint">模拟买卖用连接的钱包地址（没连接时用“地址”栏的），需要有足够的 SOL；只在节点上模拟，不发送、不扣费。</p>
+        <div class="result" id="tradeResult"></div>
+      </section>
     </main>
 
     <footer class="foot">

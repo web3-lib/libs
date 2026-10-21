@@ -334,7 +334,7 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
           return (options.priorityFees ?? [0]).map((fee, i) => ({ slot: i, prioritizationFee: fee })) as T
         case 'simulateTransaction': {
           const tx = parse(base64.decode(params[0] as string))
-          const config = (params[1] ?? {}) as { sigVerify?: boolean; replaceRecentBlockhash?: boolean; minContextSlot?: number }
+          const config = (params[1] ?? {}) as { sigVerify?: boolean; replaceRecentBlockhash?: boolean; minContextSlot?: number; accounts?: { addresses: string[] } }
           if (config.minContextSlot !== undefined && config.minContextSlot > node.slot) {
             throw new RpcError('Minimum context slot has not been reached', MIN_CONTEXT_SLOT_NOT_REACHED)
           }
@@ -347,7 +347,12 @@ export function createFakeSolana(options: FakeSolanaOptions = {}) {
           }
           try {
             const result = execute(tx, accounts)
-            return { context: { slot: node.slot }, value: { err: result.err, logs: result.logs, unitsConsumed: result.units } } as T
+            // accounts：返回执行后的这些账户（与真实节点一致：不存在时为 null）
+            const after = config.accounts?.addresses.map((a) => {
+              const acc = result.state[a]
+              return acc ? { lamports: Number(acc.lamports ?? 0n), owner: acc.owner, data: [base64.encode(acc.data ?? new Uint8Array()), 'base64'], executable: false } : null
+            })
+            return { context: { slot: node.slot }, value: { err: result.err, logs: result.logs, unitsConsumed: result.units, ...(after ? { accounts: after } : {}) } } as T
           } catch (err) {
             if (err instanceof TxError) return { context: { slot: node.slot }, value: { err: err.err, logs: err.logs, unitsConsumed: 0 } } as T
             throw err

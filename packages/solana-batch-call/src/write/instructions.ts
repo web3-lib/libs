@@ -1,4 +1,4 @@
-import { ASSOCIATED_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID } from '../constants.js'
+import { ASSOCIATED_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '../constants.js'
 import type { Instruction } from './transaction.js'
 
 export const COMPUTE_BUDGET_PROGRAM_ID = 'ComputeBudget111111111111111111111111111111'
@@ -71,6 +71,31 @@ export function closeAccount(account: string, destination: string, owner: string
       { pubkey: owner, isSigner: true, isWritable: false },
     ],
     data: new Uint8Array([9]),
+  }
+}
+
+/** 撤销代币账户的授权（Approve 设置的 delegate），owner 签名 */
+export function revoke(account: string, owner: string, tokenProgram: string): Instruction {
+  return {
+    programId: tokenProgram,
+    keys: [
+      { pubkey: account, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+    ],
+    data: new Uint8Array([5]),
+  }
+}
+
+/**
+ * Token-2022 HarvestWithheldTokensToMint：把代币账户里暂存的转账手续费收到 mint 上（任何人都可以调用，不需要签名）。
+ * 账户里有未提取的手续费时关不掉，关闭前先调用它
+ */
+export function harvestWithheldTokensToMint(mint: string, accounts: readonly string[]): Instruction {
+  return {
+    programId: TOKEN_2022_PROGRAM_ID,
+    keys: [{ pubkey: mint, isSigner: false, isWritable: true }, ...accounts.map((pubkey) => ({ pubkey, isSigner: false, isWritable: true }))],
+    // TransferFeeExtension（26）的 HarvestWithheldTokensToMint（4）
+    data: new Uint8Array([26, 4]),
   }
 }
 

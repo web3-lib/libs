@@ -134,8 +134,8 @@ export function parseMint(data: Uint8Array): MintInfo {
   }
 }
 
-/** 在 Token-2022 账户的扩展（TLV：u16 类型 + u16 长度 + 数据）里找指定类型，返回其数据；没有或数据不完整时为 null */
-function findExtension(data: Uint8Array, extensionType: number): Uint8Array | null {
+/** 在 Token-2022 账户的扩展（TLV：u16 类型 + u16 长度 + 数据）里找指定类型，返回其数据；没有或数据不完整时为 null（包内使用，不从主入口导出） */
+export function findExtension(data: Uint8Array, extensionType: number): Uint8Array | null {
   if (data.length <= EXTENSIONS_OFFSET) {
     return null
   }

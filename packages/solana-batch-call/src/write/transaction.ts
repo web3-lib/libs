@@ -179,3 +179,65 @@ export function messageBlockhash(message: Uint8Array): string {
   const start = keysStart + 32 * keys
   return encodeAddress(message.slice(start, start + 32))
 }
+
+/** 解析后的消息（legacy / v0） */
+export interface ParsedMessage {
+  version: 'legacy' | 0
+  /** 需要的签名数 */
+  signatures: number
+  /** 消息里直接列出的账户 */
+  staticKeys: string[]
+  /** staticKeys 里可写的 */
+  writable: string[]
+  instructions: Array<{ programId: string; accounts: number[]; data: Uint8Array }>
+  /** v0 的地址查找表：表地址 + 要用的可写 / 只读下标 */
+  lookups: Array<{ table: string; writable: number[]; readonly: number[] }>
+}
+
+/** 解析 legacy / v0 消息；其他版本抛错 */
+export function parseMessage(message: Uint8Array): ParsedMessage {
+  const first = message[0] as number
+  const versioned = (first & 0x80) !== 0
+  if (versioned && (first & 0x7f) !== 0) {
+    throw new Error(`Unsupported transaction version ${first & 0x7f} (only legacy and v0)`)
+  }
+  let o = versioned ? 1 : 0
+  const byte = () => {
+    const b = message[o++]
+    if (b === undefined) throw new Error('Invalid transaction: truncated')
+    return b
+  }
+  const take = (n: number) => {
+    if (o + n > message.length) throw new Error('Invalid transaction: truncated')
+    const out = message.slice(o, o + n)
+    o += n
+    return out
+  }
+  const compact = () => {
+    const [value, next] = readCompactU16(message, o)
+    o = next
+    return value
+  }
+  const [required, readonlySigned, readonlyUnsigned] = [byte(), byte(), byte()]
+  const keyCount = compact()
+  const staticKeys = Array.from({ length: keyCount }, () => encodeAddress(take(32)))
+  take(32) // blockhash
+  const instructions = Array.from({ length: compact() }, () => {
+    const program = byte()
+    const accounts = Array.from({ length: compact() }, byte)
+    const data = take(compact())
+    const programId = staticKeys[program]
+    if (programId === undefined) throw new Error('Invalid transaction: bad program index')
+    return { programId, accounts, data }
+  })
+  const lookups = versioned
+    ? Array.from({ length: compact() }, () => {
+        const table = encodeAddress(take(32))
+        const writable = Array.from({ length: compact() }, byte)
+        const readonly = Array.from({ length: compact() }, byte)
+        return { table, writable, readonly }
+      })
+    : []
+  const writable = staticKeys.filter((_, i) => (i < required ? i < required - readonlySigned : i < keyCount - readonlyUnsigned))
+  return { version: versioned ? 0 : 'legacy', signatures: required, staticKeys, writable, instructions, lookups }
+}

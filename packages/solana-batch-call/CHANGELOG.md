@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 价格，子路径 `@w3lib/solana-batch-call/price`：
+  - `getTokenPrices` / `tokenPrices`：代币（含原生 SOL）的美元价格，依次使用多个价格源，结果带给出价格的源
+  - `onchainPrices()`：从 Raydium CLMM、Orca Whirlpool、Raydium CPMM 的池子算价格（按 PDA 推导池子地址，不需要 `getProgramAccounts`；对 Wrapped SOL、USDC、USDT，用最深的池子，流动性下限 `minLiquidityUsd`）
+  - `defillamaPrices({ at })`：历史价格
+  - `combinePrices([...])`：组合多个价格源，可以传给 `getLpPositions` 的 `prices`
+  - `getPortfolio` / `portfolio`：地址的资产总值（指定代币按 ATA 读余额，或列出全部持仓；可选加上 LP 仓位）
+- 手续费估算，子路径 `@w3lib/solana-batch-call/fees`：`getFeeEstimate` / `estimateFees`（按 `getRecentPrioritizationFees` 的三档优先费，可以只看交易会写的账户）、`getCostEstimate` / `estimateCost`（模拟一次算一笔交易的花费：每个签名 5000 lamports + 计算单元上限 × 单价 + 新建账户的免租押金；支持指令和构建好的 legacy / v0 交易）
+- 域名解析，子路径 `@w3lib/solana-batch-call/names`：SNS（Bonfida，`.sns`）的 `getNameAddresses` / `resolveNames`（名字 → 地址，解析顺序同官方 SDK：代币化域名的 NFT 持有人、V2 / V1 的 SOL 记录、owner）、`getAddressNames` / `lookupAddresses`（地址 → 主域名，核对名字和归属）。`.sol` 已迁到 SRS、SNS 官方 SDK 不再解析，默认不认，`legacySol: true` 时按同名 `.sns` 解析
+- 授权管理，子路径 `@w3lib/solana-batch-call/approvals`：
+  - `getApprovals` / `approvals`：代币账户的 delegate 授权、别人持有的关闭权限、余额为 0 可以关闭的账户（指定 mints 时读 ATA，免费公共节点也能用；不传时列出全部代币账户），带能否撤销 / 关闭和原因、Token-2022 暂存的转账手续费、mint 的永久授权
+  - `buildRevokes` / `revokeApprovals`：批量 Revoke；`buildCloses` / `closeTokenAccounts`：批量关闭回收租金（有暂存转账手续费时先 HarvestWithheldTokensToMint），发送同 `batchCall`
+  - `/write` 新增指令工具 `revoke`、`harvestWithheldTokensToMint`
+- 价格源的参数（`SolanaPriceSourceContext`）新增 `client`（链上价格源用）；`defillamaPrices`、`SolanaPriceSource` 仍可以从 `/lp` 导入
+- 兑换，子路径 `@w3lib/solana-batch-call/swap`（不依赖各 DEX 的 SDK、不调用聚合器）：
+  - `buildSwap` / `getSwapQuote` 只构建（报价、最少收到、所有候选路线、按顺序执行的指令），`swap` 构建后签名发送（钱包同 `/write`）
+  - Raydium CLMM、Orca Whirlpool、Raydium CPMM 按 PDA 推导池子，Raydium AMM v4 和其他池子用 `pools` 传入；直接兑换和经过 SOL / USDC / USDT 的两跳，选输出最多的
+  - 卖出 SOL 时余额检查给手续费和租金留 `SWAP_SOL_RESERVE`（0.01 SOL）；Raydium AMM v4 只支持 status 6（SwapOnly）的池子
+  - 本地报价照搬各程序的计算和取整：集中流动性逐个 tick 区间计算（Raydium 的 `fee_on`、动态费率、tick 上的限价单，Orca 的自适应费率），CPMM 的创建者手续费，AMM v4 的待提取收益，Token-2022 转账手续费；主网同一 slot 读账户 + 模拟交易核对 23 个场景（四个协议两个方向、大额穿过上百个 tick、限价单、两跳、转账手续费）全部逐位一致
+  - SOL 自动包装 / 解包、缺少的代币账户自动创建、按滑点设每一跳的最少收到、放不进一笔交易的路线跳过
+- 代币风险检查，子路径 `@w3lib/solana-batch-call/risk`：
+  - `getTokenRisks` / `tokenRisks`：增发 / 冻结权限，Token-2022 的转账手续费（当前和即将生效的费率、能不能改）、永久授权、转账 hook、不可转让、默认冻结、可暂停、保密转账、mint 关闭权限、显示数量会变、销毁需批准，汇总成 `flags`；可选持币集中度（`concentration: true`）
+  - `getTradeChecks` / `tradeChecks`：用 `/swap` 模拟“买入 → 卖出”，判断能不能买、能不能卖（`honeypot`）和来回损失
+
+### 修复
+
+- publicnode（默认节点）对单次超过 10 个账户的 `getMultipleAccounts` 返回 HTTP 403 “Request blocked”（2026-10 起），之前会被当成节点故障、换到限频很严的官方节点，`getBalances` 等较大的读取经常失败。现在按 10 个一组重新拆分；从报错里学到的节点限制按节点地址共享，新建的客户端不用再试一遍
+
 ## 0.4.0
 
 ### 新功能

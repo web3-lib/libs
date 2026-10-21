@@ -210,8 +210,9 @@ describe('lpPositions（主网快照回放）', () => {
     const { client } = replay()
     const prices: SolanaPriceSource = {
       name: 'test',
-      async prices({ mints }) {
+      async prices({ mints, client: ctxClient }) {
         expect([...mints].sort()).toEqual(['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'So11111111111111111111111111111111111111112'])
+        expect(ctxClient).toBe(client) // 链上价格源用它读池子
         return new Map([
           ['So11111111111111111111111111111111111111112', 100],
           ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 1],

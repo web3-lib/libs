@@ -240,7 +240,7 @@ describe('09：大数兜底跳过字符串字面量', () => {
 describe('10：节点限制单次 getMultipleAccounts 的账户数', () => {
   it('“Too many accounts requested”：减半后分多次请求、合并结果，并记住上限；不当成节点故障', async () => {
     const sizes: number[] = []
-    const rpc = new HttpRpc('https://rpc.example', {
+    const rpc = new HttpRpc('https://too-many.example', {
       batch: false,
       fetch: fakeFetch((body) => {
         const req = body as RpcCall
@@ -259,6 +259,47 @@ describe('10：节点限制单次 getMultipleAccounts 的账户数', () => {
     sizes.length = 0
     await rpc.request('getMultipleAccounts', [addresses, {}])
     expect(sizes.every((n) => n <= 2)).toBe(true) // 记住了上限，直接拆分
+  })
+})
+
+/** 记录每次的账户数、都成功的节点 */
+function fetchOf(sizes: number[]): typeof fetch {
+  return (async (_url: string, init?: { body?: string }) => {
+    const req = JSON.parse(init?.body ?? '{}') as RpcCall
+    const addresses = req.params[0] as string[]
+    sizes.push(addresses.length)
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { context: { slot: 1 }, value: addresses.map((a) => ({ a })) } }), { status: 200 })
+  }) as typeof fetch
+}
+
+describe('10b：publicnode 对超过 10 个账户返回 403 + Request blocked', () => {
+  it('账户数多时同样缩小重试并记住上限；账户数很少还被拒绝时抛出（交给上层换节点）', async () => {
+    const sizes: number[] = []
+    let blockAll = false
+    const rpc = new HttpRpc('https://blocked.example', {
+      batch: false,
+      fetch: (async (_url: string, init?: { body?: string }) => {
+        const req = JSON.parse(init?.body ?? '{}') as RpcCall
+        const addresses = req.params[0] as string[]
+        sizes.push(addresses.length)
+        if (blockAll || addresses.length > 10) {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: req.id, error: { code: -32602, message: 'Request blocked' } }), { status: 403 })
+        }
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: { context: { slot: 1 }, value: addresses.map((a) => ({ a })) } }), { status: 200 })
+      }) as typeof fetch,
+    })
+    const addresses = Array.from({ length: 30 }, (_, i) => `a${i}`)
+    const res = (await rpc.request('getMultipleAccounts', [addresses, {}])) as { value: Array<{ a: string }> }
+    expect(res.value.map((v) => v.a)).toEqual(addresses)
+    expect(sizes).toEqual([30, 10, 10, 10]) // 被拒后直接按 10 个拆分，不逐次减半
+    // 学到的上限按节点地址共享：同一个节点的新连接直接拆分
+    sizes.length = 0
+    const again = new HttpRpc('https://blocked.example', { batch: false, fetch: fetchOf(sizes) })
+    await again.request('getMultipleAccounts', [addresses, {}])
+    expect(sizes.every((n) => n <= 10)).toBe(true)
+    // 少量账户也被拒绝：不是数量限制，原样抛出
+    blockAll = true
+    await expect(rpc.request('getMultipleAccounts', [['x', 'y'], {}])).rejects.toThrow(/Request blocked/)
   })
 })
 

@@ -15,6 +15,16 @@ import {
   type RequestEvent,
 } from '@w3lib/solana-batch-call'
 import {
+  buildCloses,
+  buildRevokes,
+  closeTokenAccounts,
+  getApprovals,
+  revokeApprovals,
+  type ApprovalCall,
+  type TokenAccountApproval,
+} from '@w3lib/solana-batch-call/approvals'
+import { getFeeEstimate, getCostEstimate } from '@w3lib/solana-batch-call/fees'
+import {
   addLiquidity,
   buildAddLiquidity,
   buildCollectFees,
@@ -29,6 +39,11 @@ import {
   type SolanaRemoveLiquidityParams,
 } from '@w3lib/solana-batch-call/liquidity'
 import { SOLANA_LP_PROTOCOLS, getLpPositions, type SolanaLpPosition, type SolanaLpProtocol } from '@w3lib/solana-batch-call/lp'
+import { getAddressNames, getNameAddresses } from '@w3lib/solana-batch-call/names'
+import { getPortfolio, getTokenPrices } from '@w3lib/solana-batch-call/price'
+import { getTokenRisks, getTradeChecks, type SolanaTokenRisk } from '@w3lib/solana-batch-call/risk'
+import { getSwapQuote, swap, type SolanaSwapParams, type SolanaSwapPlan, type SolanaSwapResult, type SolanaSwapStepResult } from '@w3lib/solana-batch-call/swap'
+import { systemTransfer } from '@w3lib/solana-batch-call/write'
 import { createWallet } from '@w3lib/wallet'
 import { solana } from '@w3lib/wallet/solana'
 import { createWalletModal } from '@w3lib/wallet/ui'
@@ -653,4 +668,409 @@ bind('runLiqSend', 'liq', async () => {
   note.textContent = `结果：${result.status}（可以在“LP 仓位”里重新查询）`
   view.append(note, planView(result.plan, result.results))
   return { data: { ...result, plan: withoutSecrets(result.plan) }, view }
+})
+
+// ---- 以下几个区块各自用子路径导入（/price /approvals /names /fees /swap /risk）；写操作和上面一样用浏览器钱包 ----
+
+$<HTMLTextAreaElement>('priceMints').value = SAMPLE_MINTS.join('\n')
+$<HTMLTextAreaElement>('apprMints').value = SAMPLE_MINTS.join('\n')
+$<HTMLTextAreaElement>('nameList').value = ['bonfida.sns', 'toly.sns', 'bonfida.sol'].join('\n')
+$<HTMLTextAreaElement>('feeAccounts').value = SAMPLE_POOLS['raydium-clmm']
+$<HTMLTextAreaElement>('swapPools').value = SAMPLE_POOLS['raydium-amm']
+$<HTMLTextAreaElement>('riskMints').value = SAMPLE_MINTS.join('\n')
+
+/** 查询 / 报价 / 模拟用的地址：连了钱包用钱包地址，否则用“地址”栏的 */
+const actingAddress = () => connection()?.address ?? owner()
+
+/** 连接钱包（没连接时弹出连接窗口）；写操作用 */
+async function walletForSend() {
+  const c = connection() ?? (await modal.open('solana'))
+  if (!c) throw new Error('没有连接钱包')
+  // 钱包的网络要和所选节点的网络一致（Wallet Standard 的链标识，如 solana:mainnet）
+  const cluster = /devnet/i.test(settings.rpc) ? 'devnet' : /testnet/i.test(settings.rpc) ? 'testnet' : 'mainnet'
+  if (typeof c.chainId === 'string' && c.chainId !== `solana:${cluster}`) {
+    throw new Error(`钱包在 ${c.chainId}，而所选节点是 ${cluster}：请在钱包里切到 ${cluster}，或换节点`)
+  }
+  return c
+}
+
+/** Wallet Standard 钱包直接当签名器，指定连接的账户 */
+const walletSigner = (c: { provider: unknown; address: string }) => ({ wallet: c.provider, account: c.address }) as never
+
+const usdText = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `$${v.toLocaleString('en-US', { maximumFractionDigits: 2 })}`)
+/** 单价按有效数字显示（价格很小的代币） */
+const usdPrice = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `$${price(v)}`)
+const shorten = (v: string) => (v === NATIVE_MINT ? 'SOL' : v.length > 14 ? `${v.slice(0, 4)}…${v.slice(-4)}` : v)
+
+/** 状态标签：confirmed 绿，failed / reverted 红，其他灰 */
+const statusTag = (status: string, error?: string | null) => tag(status + (error ? `：${error}` : ''), status === 'confirmed' ? 'ok' : status === 'failed' || status === 'reverted' ? 'bad' : '')
+
+function note(text: string, view: Node): Node {
+  const wrap = document.createElement('div')
+  const p = document.createElement('p')
+  p.className = 'hint'
+  p.textContent = text
+  wrap.append(p, view)
+  return wrap
+}
+
+// ---- 价格（子路径 /price） ----
+
+bind('runPrices', 'prices', async () => {
+  const mints = [...new Set([NATIVE_MINT, ...lines($<HTMLTextAreaElement>('priceMints').value)])]
+  const list = await getTokenPrices(mints, nodeOptions())
+  return {
+    data: list,
+    view: table(
+      ['代币', '价格', '价格源', 'mint'],
+      list.map((p) => [p.native ? 'SOL' : null, usdPrice(p.price), p.source ? tag(p.source, 'ok') : tag('没有价格', 'bad'), p.native ? 'SOL' : addr(p.token)]),
+      [1],
+    ),
+  }
+})
+
+bind('runPortfolio', 'portfolio', async () => {
+  const from = owner()
+  const listed = $<HTMLInputElement>('portfolioListed').checked
+  const withLp = $<HTMLInputElement>('portfolioLp').checked
+  const lpMints = lines($<HTMLTextAreaElement>('lpMints').value)
+  const lpPools = lines($<HTMLTextAreaElement>('lpPools').value)
+  // 列全部持仓、扫描 LP 代币账户都要索引方法
+  const node = !listed || (withLp && !lpMints.length) ? indexedNode() : nodeOptions()
+  let priceError: unknown = null
+  const p = await getPortfolio(from, {
+    ...node,
+    ...(listed ? { tokens: [...new Set([NATIVE_MINT, ...lines($<HTMLTextAreaElement>('priceMints').value)])] } : {}),
+    ...(withLp ? { lp: lpMints.length ? { mints: lpMints, ...(lpPools.length ? { pools: lpPools } : {}) } : true } : {}),
+    onPriceError: (err) => {
+      priceError = err
+    },
+  })
+  const wrap = document.createElement('div')
+  wrap.append(
+    table(
+      ['合计', '代币', 'LP 仓位', '没有价格的'],
+      [[usdText(p.totalUsd), usdText(p.tokensUsd), usdText(p.lpUsd), p.unpriced]],
+      [0, 1, 2, 3],
+    ),
+    table(
+      ['代币', '余额', '价格', '价值', '价格源', 'mint'],
+      p.tokens.map((t) => [t.symbol, amount(t.formatted), usdPrice(t.price), usdText(t.value), t.priceSource, t.native ? 'SOL' : addr(t.token)]),
+      [1, 2, 3],
+    ),
+  )
+  if (p.lp.length) wrap.append(table(['LP 仓位', '价值'], p.lp.map((l) => [`${l.protocolName} · ${pairOf(l)}`, usdText(l.valueUsd)]), [1]))
+  return { data: p, view: withPriceWarning(wrap, priceError) }
+})
+
+// ---- 授权管理（子路径 /approvals） ----
+
+const appr = { action: $<HTMLSelectElement>('apprAction'), destination: $<HTMLInputElement>('apprDestination') }
+appr.action.addEventListener('change', () => {
+  $('apprDestinationRow').hidden = appr.action.value !== 'close'
+})
+
+/** 上一次“查询授权”的结果：撤销 / 关闭只处理这里面的账户 */
+let lastApprovals: TokenAccountApproval[] = []
+
+const CLOSE_BLOCKERS: Record<string, string> = { balance: '有余额', 'close-authority': '关闭权限是别人', 'confidential-balance': '机密余额不为 0' }
+
+bind('runApprovals', 'appr', async () => {
+  const mints = lines($<HTMLTextAreaElement>('apprMints').value)
+  // 不指定 mints 时列出全部代币账户：内置公共节点不支持
+  const node = mints.length ? nodeOptions() : indexedNode()
+  lastApprovals = []
+  const list = await getApprovals(owner(), { ...node, ...(mints.length ? { mints } : {}), all: $<HTMLInputElement>('apprAll').checked })
+  lastApprovals = list
+  return {
+    data: list,
+    view: table(
+      ['代币', '账户', '余额', '授权给', '还能转走', '状态', '撤销', '关闭'],
+      list.map((a) => {
+        const flags = document.createElement('span')
+        if (a.native) flags.append(tag('wSOL'))
+        if (a.frozen) flags.append(tag('已冻结', 'bad'))
+        if (a.permanentDelegate) flags.append(tag('永久授权（撤销不了）', 'bad'))
+        if (a.closeAuthority && a.closeAuthority !== a.owner) flags.append(tag('关闭权限是别人', 'bad'))
+        return [
+          a.symbol ?? addr(a.mint),
+          addr(a.account),
+          amount(a.formatted),
+          a.delegate ? addr(a.delegate) : null,
+          a.delegate ? amount(a.delegatedFormatted) : null,
+          flags,
+          a.revocable ? tag('可撤销', 'ok') : '—',
+          a.closable ? tag(a.amount === '0' ? '空账户，可关闭' : '可关闭', 'ok') : a.closeBlocker ? CLOSE_BLOCKERS[a.closeBlocker] ?? a.closeBlocker : '—',
+        ]
+      }),
+      [2, 4],
+    ),
+  }
+})
+
+/** 这次要处理的账户：撤销 = 有 delegate 且没有冻结的；关闭 = 余额为 0 且能关闭的（有余额的 wSOL 也能关，但这里不动） */
+function approvalTargets() {
+  if (!lastApprovals.length) throw new Error('请先在上面“查询授权”，撤销 / 关闭只处理最近一次查到的账户')
+  const action = appr.action.value === 'close' ? ('close' as const) : ('revoke' as const)
+  const list = action === 'revoke' ? lastApprovals.filter((a) => a.revocable) : lastApprovals.filter((a) => a.closable && a.amount === '0')
+  if (!list.length) throw new Error(action === 'revoke' ? '查到的账户里没有可以撤销的授权' : '查到的账户里没有可以关闭的空账户')
+  const destination = text(appr.destination)
+  return { action, list, destination: action === 'close' ? destination : undefined }
+}
+
+const callsView = (calls: ApprovalCall[]) =>
+  table(
+    ['#', '操作', '账户', '代币', '指令数', '被授权方 / 租金退给'],
+    calls.map((c, i) => [i + 1, c.kind === 'revoke' ? '撤销授权' : '关闭账户', addr(c.account), c.approval.symbol ?? addr(c.approval.mint), c.instructions.length, c.kind === 'revoke' ? addr(c.approval.delegate) : addr(text(appr.destination) ?? c.owner)]),
+  )
+
+bind('runApprBuild', 'appr', async () => {
+  const { action, list, destination } = approvalTargets()
+  const calls = action === 'revoke' ? buildRevokes(list) : buildCloses(list, { destination })
+  // 原始结果里只放每条指令的程序和账户数，不放指令数据
+  const data = calls.map(({ instructions, ...c }) => ({ ...c, instructions: instructions.map((ix) => ({ programId: ix.programId, accounts: ix.keys.length })) }))
+  return { data, view: note('只构建、没有发送：下面是会发送的操作（每个账户一个调用，打包进同一笔交易）。', callsView(calls)) }
+})
+
+bind('runApprSend', 'appr', async () => {
+  const { action, list, destination } = approvalTargets()
+  if (destination !== undefined) buildCloses(list, { destination }) // 发送前先检查退租金的地址
+  const c = await walletForSend()
+  const wrong = list.find((a) => a.owner !== c.address)
+  if (wrong) throw new Error(`账户 ${wrong.account} 是 ${wrong.owner} 的，钱包是 ${c.address}：换成这个账户，或用钱包地址重新查询授权`)
+  const progress = $('apprStats')
+  const options = { onUpdate: (r: { index: number; status: string }) => (progress.textContent = `第 ${r.index + 1} / ${list.length} 个：${r.status}`) }
+  const client = liquidityClient()
+  const results = action === 'revoke' ? await revokeApprovals(client, walletSigner(c), list, options) : await closeTokenAccounts(client, walletSigner(c), list, { ...options, destination })
+  return {
+    data: results,
+    view: note(
+      '已发送（可以重新“查询授权”确认）。',
+      table(
+        ['#', '操作', '账户', '状态', '交易签名'],
+        results.map((r, i) => [i + 1, r.kind === 'revoke' ? '撤销授权' : '关闭账户', addr(r.account), statusTag(r.status, r.error), r.signature ? link(r.signature) : null]),
+      ),
+    ),
+  }
+})
+
+// ---- 域名解析（子路径 /names） ----
+
+bind('runNames', 'names', async () => {
+  const names = lines($<HTMLTextAreaElement>('nameList').value)
+  if (!names.length) throw new Error('请填写要解析的名字')
+  const legacySol = $<HTMLInputElement>('nameLegacySol').checked
+  const list = await getNameAddresses(names, { ...nodeOptions(), legacySol, allowPda: $<HTMLInputElement>('nameAllowPda').checked })
+  const view = table(
+    ['名字', '规范化', '地址', 'owner', '来源', '服务'],
+    list.map((n) => [n.name, n.normalized, n.address ? addr(n.address) : tag('没有地址', 'bad'), addr(n.owner), n.source, n.service ?? tag('不归 SNS 解析', 'bad')]),
+  )
+  const skippedSol = !legacySol && list.some((n) => n.name.toLowerCase().endsWith('.sol') && n.service === null)
+  return { data: list, view: skippedSol ? note('.sol 默认不解析（正在迁到另一个注册服务）：勾选“也解析 .sol”才会当作同名的 .sns 解析。', view) : view }
+})
+
+bind('runAddressNames', 'names', async () => {
+  const list = await getAddressNames([owner()], nodeOptions())
+  return {
+    data: list,
+    view: table(
+      ['地址', '主域名', '服务'],
+      list.map((n) => [addr(n.address), n.name ?? tag('没有设置主域名', 'bad'), n.service]),
+    ),
+  }
+})
+
+// ---- 手续费（子路径 /fees） ----
+
+bind('runFees', 'fees', async () => {
+  const accounts = lines($<HTMLTextAreaElement>('feeAccounts').value)
+  const fees = await getFeeEstimate({ ...nodeOptions(), ...(accounts.length ? { accounts } : {}) })
+  return {
+    data: fees,
+    view: note(
+      `统计了最近 ${fees.slots} 个 slot 里${accounts.length ? '会写这些账户' : '全网'}的落块交易的最低单价，三档取第 50 / 75 / 90 百分位。`,
+      table(
+        ['档位', '单价（micro-lamports / 计算单元）'],
+        [
+          ['slow', fees.slow],
+          ['normal', fees.normal],
+          ['fast', fees.fast],
+        ],
+        [1],
+      ),
+    ),
+  }
+})
+
+bind('runCost', 'fees', async () => {
+  const from = owner()
+  // 转给自己：只用来演示 getCostEstimate，模拟一次、不发送
+  const cost = await getCostEstimate({ feePayer: from, instructions: [systemTransfer(from, from, 1000n)] }, nodeOptions())
+  const rows: Array<[string, string]> = [
+    ['计算单元（模拟消耗 / 上限）', `${cost.computeUnits} / ${cost.computeUnitLimit}`],
+    ['优先费单价', `${cost.priorityFee} micro-lamports / 计算单元`],
+    ['基础费（签名数）', `${cost.baseFee} lamports（${cost.signatures}）`],
+    ['优先费', `${cost.priorityFeeLamports} lamports`],
+    ['手续费', `${cost.fee} lamports`],
+    ['新建账户的押金', `${cost.rent} lamports（${cost.createdAccounts.length} 个账户，关闭时退回）`],
+    ['合计', `${cost.totalFormatted} ${cost.symbol}`],
+  ]
+  return { data: cost, view: table(['项目', '值'], rows) }
+})
+
+// ---- 兑换（子路径 /swap） ----
+
+const sw = {
+  tokenIn: $<HTMLInputElement>('swapIn'),
+  tokenOut: $<HTMLInputElement>('swapOut'),
+  amount: $<HTMLInputElement>('swapAmount'),
+  pools: $<HTMLTextAreaElement>('swapPools'),
+  slippage: $<HTMLInputElement>('swapSlippage'),
+  native: $<HTMLInputElement>('swapNative'),
+}
+sw.tokenIn.value = NATIVE_MINT
+sw.tokenOut.value = SAMPLE_MINTS[0] as string
+sw.amount.value = '0.01'
+
+/** 表单 → 参数和选项（连接钱包之前先检查表单） */
+function swapRequest() {
+  const tokenIn = text(sw.tokenIn)
+  const tokenOut = text(sw.tokenOut)
+  const amountIn = text(sw.amount)
+  if (!tokenIn || !tokenOut) throw new Error('请填写卖出和买入的代币 mint（SOL 用 So11111111111111111111111111111111111111112）')
+  if (tokenIn === tokenOut) throw new Error('卖出和买入不能是同一个代币')
+  if (!amountIn || !/^\d+(\.\d+)?$/.test(amountIn) || !(Number(amountIn) > 0)) throw new Error(`数量要是大于 0 的数字：${amountIn ?? '（空）'}`)
+  const percent = numberOf(sw.slippage, '滑点')
+  if (percent !== undefined && !(percent >= 0 && percent < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
+  const pools = lines(sw.pools.value)
+  const params: SolanaSwapParams = { tokenIn, tokenOut, amountInFormatted: amountIn }
+  const options = { ...(percent === undefined ? {} : { slippage: percent / 100 }), native: sw.native.checked, ...(pools.length ? { pools } : {}) }
+  return { params, options }
+}
+
+const SWAP_STEP_NAMES: Record<string, string> = { setup: '准备（创建代币账户）', swap: '兑换（包装 SOL / 兑换 / 解包）' }
+
+/** 原始结果里只放每一步的指令数，不放指令数据 */
+const plainSwapPlan = (plan: SolanaSwapPlan) => ({ ...plan, steps: plan.steps.map((s) => ({ kind: s.kind, instructions: s.instructions.length })) })
+
+const routeKey = (r: SolanaSwapPlan['route']) => r.hops.map((h) => h.pool).join()
+
+function swapView(plan: SolanaSwapPlan, results?: SolanaSwapStepResult[]): Node {
+  const { tokenIn, tokenOut } = plan
+  const sIn = tokenIn.symbol ?? 'tokenIn'
+  const sOut = tokenOut.symbol ?? 'tokenOut'
+  const out = (v: string | null) => (v === null ? '—' : `${units(v, tokenOut.decimals)} ${sOut}`)
+  const rows: Array<[string, string | null]> = [
+    ['卖出', `${amount(plan.amountInFormatted)} ${sIn}`],
+    ['预计收到', out(plan.amountOut)],
+    ['最少收到（按滑点）', out(plan.amountOutMin)],
+    ['价格', plan.price === null ? null : `1 ${sIn} = ${price(plan.price)} ${sOut}`],
+    ['价格影响', plan.priceImpact === null ? null : `${(plan.priceImpact * 100).toFixed(4)}%`],
+    ['路线', plan.route.hops.map((h) => `${shorten(h.tokenIn)} → ${shorten(h.tokenOut)}（${h.protocolName} ${shorten(h.pool)}）`).join('，然后 ')],
+    ['SOL 自动包装 / 解包', plan.native ? (plan.native === 'tokenIn' ? `卖出的 ${sIn}` : `买入的 ${sOut}`) : null],
+    ['留在账户里的中间代币', plan.leftover ? `${plan.leftover.amount}（最小单位）${shorten(plan.leftover.mint)}` : null],
+  ]
+  const wrap = document.createElement('div')
+  wrap.append(
+    table(
+      ['项目', '值'],
+      rows.filter(([, v]) => v !== null),
+    ),
+    table(
+      ['候选路线', '预计收到', '选中'],
+      plan.routes.map((r) => [r.hops.map((h) => `${h.protocolName} ${shorten(h.pool)}`).join(' → '), out(r.amountOut), routeKey(r) === routeKey(plan.route) ? tag('选中', 'ok') : null]),
+      [1],
+    ),
+  )
+  if (plan.skipped.length) wrap.append(table(['没用上的池子', '协议', '原因'], plan.skipped.map((s) => [addr(s.pool), s.protocol, s.reason])))
+  wrap.append(
+    table(
+      ['#', '步骤', '指令数', ...(results ? ['状态', '交易签名'] : [])],
+      plan.steps.map((step, i) => {
+        const r = results?.[i]
+        return [i + 1, SWAP_STEP_NAMES[step.kind] ?? step.kind, step.instructions.length, ...(results ? [r ? statusTag(r.status, r.error) : '等待', r?.signature ? link(r.signature) : null] : [])]
+      }),
+    ),
+  )
+  return wrap
+}
+
+bind('runSwapQuote', 'swap', async () => {
+  const { params, options } = swapRequest()
+  const plan = await getSwapQuote(actingAddress(), params, { ...nodeOptions(), ...options })
+  return { data: plainSwapPlan(plan), view: swapView(plan) }
+})
+
+bind('runSwapSend', 'swap', async () => {
+  const { params, options } = swapRequest()
+  const c = await walletForSend()
+  const progress = $('swapStats')
+  const result: SolanaSwapResult = await swap(liquidityClient(), walletSigner(c), params, {
+    ...options,
+    onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 步（${SWAP_STEP_NAMES[r.kind] ?? r.kind}）：${r.status}`),
+  })
+  return { data: { ...result, plan: plainSwapPlan(result.plan) }, view: note(`结果：${result.status}`, swapView(result.plan, result.results)) }
+})
+
+// ---- 代币风险（子路径 /risk） ----
+
+function riskDetails(r: SolanaTokenRisk): string {
+  const parts: string[] = []
+  if (r.transferFee) parts.push(`转账手续费 ${r.transferFee.basisPoints / 100}%${r.transferFee.authority ? '（可改）' : ''}`)
+  if (r.permanentDelegate) parts.push(`永久授权 ${shorten(r.permanentDelegate)}`)
+  if (r.transferHook) parts.push(`转账 hook ${r.transferHook.program ? shorten(r.transferHook.program) : '（已取消）'}`)
+  if (r.nonTransferable) parts.push('不可转让')
+  if (r.defaultFrozen) parts.push('账户默认冻结')
+  if (r.pausable) parts.push(r.pausable.paused ? '可暂停（已暂停）' : '可暂停')
+  if (r.confidentialTransfer) parts.push('保密转账')
+  if (r.mintCloseAuthority) parts.push(`mint 可关闭 ${shorten(r.mintCloseAuthority)}`)
+  if (r.uiAmountAuthority) parts.push('显示数量会变化')
+  if (r.burnAuthority) parts.push('只有指定地址能销毁')
+  if (r.topHolders) parts.push(`前 10 个账户占 ${(r.topHolders.top10Share * 100).toFixed(1)}%`)
+  return parts.join('；')
+}
+
+const authority = (value: string | null): Node => (value ? tag(shorten(value), 'bad') : tag('已放弃', 'ok'))
+
+function flagTags(flags: string[]): Node {
+  const span = document.createElement('span')
+  if (!flags.length) span.append(tag('无标记', 'ok'))
+  for (const f of flags) span.append(tag(f, 'bad'))
+  return span
+}
+
+bind('runRisk', 'risk', async () => {
+  const mints = lines($<HTMLTextAreaElement>('riskMints').value)
+  if (!mints.length) throw new Error('请填写要检查的代币 mint')
+  const list = await getTokenRisks(mints, { ...nodeOptions(), concentration: $<HTMLInputElement>('riskConcentration').checked })
+  return {
+    data: list,
+    view: table(
+      ['mint', '程序', '增发权限', '冻结权限', '风险标记', '详情'],
+      list.map((r) => [addr(r.mint), r.exists ? r.program : tag('找不到 mint', 'bad'), r.exists ? authority(r.mintAuthority) : null, r.exists ? authority(r.freezeAuthority) : null, flagTags(r.flags), riskDetails(r)]),
+    ),
+  }
+})
+
+bind('runTrade', 'trade', async () => {
+  const mints = lines($<HTMLTextAreaElement>('riskMints').value)
+  if (!mints.length) throw new Error('请填写要检查的代币 mint')
+  const amountFormatted = text($<HTMLInputElement>('tradeAmount'))
+  if (!amountFormatted || !/^\d+(\.\d+)?$/.test(amountFormatted) || !(Number(amountFormatted) > 0)) throw new Error(`买入的 SOL 数量要是大于 0 的数字：${amountFormatted ?? '（空）'}`)
+  const list = await getTradeChecks(mints, { ...nodeOptions(), owner: actingAddress(), amountFormatted })
+  return {
+    data: list,
+    view: table(
+      ['mint', '结果', '来回损失', '买入路线', '标记', '错误'],
+      list.map((t) => [
+        addr(t.mint),
+        t.stage === null ? tag('没做成', 'bad') : tag(t.stage === 'ok' ? '能买能卖' : t.stage === 'sell-failed' ? '卖不出（貔貅）' : t.stage, t.stage === 'ok' ? 'ok' : 'bad'),
+        t.roundTripLoss === null ? null : `${(t.roundTripLoss * 100).toFixed(2)}%`,
+        t.buyRoute ? t.buyRoute.map((h) => `${h.protocol} ${shorten(h.pool)}`).join(' → ') : null,
+        flagTags(t.flags),
+        t.error,
+      ]),
+      [2],
+    ),
+  }
 })

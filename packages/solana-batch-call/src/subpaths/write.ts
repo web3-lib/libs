@@ -19,6 +19,8 @@ export {
   COMPUTE_BUDGET_PROGRAM_ID,
   closeAccount,
   createAssociatedTokenAccountIdempotent,
+  harvestWithheldTokensToMint,
+  revoke,
   setComputeUnitLimit,
   setComputeUnitPrice,
   systemTransfer,

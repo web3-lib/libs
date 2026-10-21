@@ -6,6 +6,7 @@ import type { RequestOptions, SolanaClient } from './client.js'
 import { formatUnits, parseMint, parseTokenAccount, type AccountInfo } from './layout.js'
 import { AllNodesFailedError, HttpError, RpcError } from './rpc.js'
 import { getAmountsForLiquidity, getFeeGrowthInside, getFeesOwed, orcaSqrtPriceAtTick, raydiumSqrtPriceAtTick, sqrtPriceToPrice, tickToPrice, type TickFeeData } from './lpMath.js'
+import { defillamaPrices, type SolanaPriceSource } from './price.js'
 
 export const RAYDIUM_CLMM_PROGRAM_ID = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'
 export const ORCA_WHIRLPOOL_PROGRAM_ID = 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc'
@@ -25,45 +26,8 @@ export const SOLANA_LP_PROTOCOLS: Readonly<Record<SolanaLpProtocol, { name: stri
   'raydium-cpmm': { name: 'Raydium CPMM', type: 'amm', programId: RAYDIUM_CPMM_PROGRAM_ID },
 }
 
-// ---------------------------------------------------------------------------
-// 价格源
-// ---------------------------------------------------------------------------
-
-export interface SolanaPriceSource {
-  readonly name: string
-  /** 返回 mint → 美元价格；没有价格的不返回 */
-  prices(ctx: { mints: readonly string[]; fetch: typeof fetch; signal?: AbortSignal }): Promise<Map<string, number>>
-}
-
-/** DefiLlama 价格（免费免 Key，按 100 个一批查询）；confidence 低于 minConfidence（默认 0.9）的价格不用 */
-export function defillamaPrices(options: { minConfidence?: number } = {}): SolanaPriceSource {
-  const minConfidence = options.minConfidence ?? 0.9
-  return {
-    name: 'defillama',
-    async prices({ mints, fetch: fetchFn, signal }) {
-      const result = new Map<string, number>()
-      const batches: string[][] = []
-      for (let i = 0; i < mints.length; i += 100) {
-        batches.push(mints.slice(i, i + 100))
-      }
-      await Promise.all(
-        batches.map(async (batch) => {
-          const res = await fetchFn(`https://coins.llama.fi/prices/current/${batch.map((m) => `solana:${m}`).join(',')}`, { signal })
-          if (!res.ok) {
-            throw new Error(`DefiLlama prices: HTTP ${res.status}`)
-          }
-          const body = (await res.json()) as { coins?: Record<string, { price?: number; confidence?: number }> }
-          for (const [key, coin] of Object.entries(body.coins ?? {})) {
-            if (typeof coin.price === 'number' && Number.isFinite(coin.price) && (coin.confidence === undefined || coin.confidence >= minConfidence)) {
-              result.set(key.slice(key.indexOf(':') + 1), coin.price)
-            }
-          }
-        }),
-      )
-      return result
-    },
-  }
-}
+// 价格源在 price.ts（子路径 /price）；这里继续导出，旧的 import 不受影响
+export { defillamaPrices, type SolanaPriceSource, type SolanaPriceSourceContext } from './price.js'
 
 // ---------------------------------------------------------------------------
 // 结果类型
@@ -152,7 +116,7 @@ export interface LpPositionsOptions extends RequestOptions {
   pools?: readonly string[]
   /** 返回已清空的仓位（流动性为 0、手续费也领完，NFT 还在）。默认 false */
   includeClosed?: boolean
-  /** 查美元价值：true 用 DefiLlama，也可以传自己的 SolanaPriceSource。默认不查 */
+  /** 查美元价值：true 用 DefiLlama，也可以传自己的 SolanaPriceSource（如 /price 的 combinePrices([defillamaPrices(), onchainPrices()])）。默认不查 */
   prices?: boolean | SolanaPriceSource
   /**
    * 价格源出错时调用（服务不可用、被拦截等）：这时照样返回仓位，只是 valueUsd / feesUsd 为 null，
@@ -671,9 +635,9 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
 
 /**
  * 节点不提供这个方法（方法不存在、被拦截、需要付费 / Token、403 等）：这时报错里说明怎么绕过。
- * 多节点时所有节点都是这个原因才算；限频、超时、网络不对等原样抛出
+ * 多节点时所有节点都是这个原因才算；限频、超时、网络不对等原样抛出（资产总值 portfolio 也用）
  */
-function methodUnavailable(err: unknown): boolean {
+export function methodUnavailable(err: unknown): boolean {
   if (err instanceof AllNodesFailedError) {
     return err.errors.length > 0 && err.errors.every((e) => methodUnavailable(e.error))
   }
@@ -751,8 +715,8 @@ async function finalize(client: SolanaClient, raw: readonly (RawClmm | RawAmm)[]
       return new Map()
     }
     try {
-      // wSOL 的价格就是 SOL 的价格，DefiLlama 用 So111…112 查得到
-      return await priceSource.prices({ mints, fetch: fetchFn, signal })
+      // wSOL 的价格就是 SOL 的价格，DefiLlama 用 So111…112 查得到；client 给链上价格源读池子
+      return await priceSource.prices({ mints, fetch: fetchFn, signal, client })
     } catch (err) {
       if (signal?.aborted) {
         throw err

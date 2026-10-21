@@ -62,6 +62,31 @@ const TRANSIENT = /\bbusy\b|overload|temporar(il)?y|unavailable|try again|timed?
 
 /** 节点限制单次 getMultipleAccounts 的账户数（如 “Too many accounts requested”）：缩小每次的账户数后重试，不是节点故障 */
 const TOO_MANY_ACCOUNTS = /too many accounts/i
+/**
+ * publicnode 对单次超过 10 个账户的 getMultipleAccounts 返回 HTTP 403 +“Request blocked”（2026-10，而且要等 3 秒多才返回）：
+ * 账户数超过 BLOCKED_LIMIT 时直接按它拆分（逐次减半要多等好几轮），还被拒绝再减半；
+ * 账户数已经很少（≤ BLOCKED_FLOOR）还被拒绝时，是节点真的拒绝访问，交给上层换节点
+ */
+const REQUEST_BLOCKED = /request blocked/i
+const BLOCKED_LIMIT = 10
+const BLOCKED_FLOOR = 8
+
+/** 从报错里学到的节点限制，按节点地址共享（同一个节点的多个客户端不用各自再试一遍） */
+const learnedLimits = new Map<string, { methods: Map<string, number>; maxAccounts?: number }>()
+
+function learnedFor(url: string): { methods: Map<string, number>; maxAccounts?: number } {
+  let entry = learnedLimits.get(url)
+  if (!entry) {
+    entry = { methods: new Map() }
+    learnedLimits.set(url, entry)
+  }
+  return entry
+}
+
+/** 测试用：清空学到的节点限制 */
+export function resetLearnedLimits(): void {
+  learnedLimits.clear()
+}
 
 /** HTTP 层错误（非 2xx、网络错误、超时） */
 export class HttpError extends Error {
@@ -178,20 +203,19 @@ export class HttpRpc implements RpcTransport {
   readonly #retries: number
   readonly #fetch: typeof fetch
   #maxBatchSize: number
-  /** 节点对单个方法在一个批量里的数量限制（如 publicnode：getMultipleAccounts 最多 1 个），从报错里学到 */
-  readonly #methodLimits = new Map<string, number>()
+  /** 从报错里学到的限制（按节点地址共享）：单个方法在一个批量里的数量（如 publicnode：getMultipleAccounts 最多 1 个）、单次的账户数 */
+  readonly #learned: { methods: Map<string, number>; maxAccounts?: number }
   /** options.batch：调用方是否允许批量 */
   readonly #batchOption: boolean
   /** 节点明确表示不支持批量时，在这之前逐条请求（之后重新尝试批量） */
   #batchDisabledUntil = 0
-  /** 节点限制单次 getMultipleAccounts 的账户数时学到的上限 */
-  #maxAccounts: number | undefined
   #queue: Pending[] = []
   #timer: ReturnType<typeof setTimeout> | null = null
 
   constructor(url: string, options: HttpRpcOptions = {}) {
     this.url = url
     this.#safeUrl = safeOrigin(url)
+    this.#learned = learnedFor(url)
     this.#timeout = options.timeout ?? 10_000
     this.#headers = { 'content-type': 'application/json', ...options.headers }
     this.#maxBatchSize = Math.max(1, options.maxBatchSize ?? 20)
@@ -214,7 +238,7 @@ export class HttpRpc implements RpcTransport {
    */
   async #getMultipleAccounts(params: readonly unknown[]): Promise<unknown> {
     const [addresses, ...rest] = params as [unknown[], ...unknown[]]
-    const max = this.#maxAccounts
+    const max = this.#learned.maxAccounts
     if (max !== undefined && addresses.length > max) {
       const parts: unknown[][] = []
       for (let i = 0; i < addresses.length; i += max) {
@@ -234,8 +258,11 @@ export class HttpRpc implements RpcTransport {
     try {
       return await this.#enqueue('getMultipleAccounts', params)
     } catch (err) {
-      if (err instanceof RpcError && TOO_MANY_ACCOUNTS.test(err.message) && addresses.length > 1) {
-        this.#maxAccounts = Math.max(1, Math.min(this.#maxAccounts ?? Number.POSITIVE_INFINITY, Math.floor(addresses.length / 2)))
+      const tooMany = err instanceof RpcError && TOO_MANY_ACCOUNTS.test(err.message) && addresses.length > 1
+      const blocked = err instanceof RpcError && REQUEST_BLOCKED.test(err.message) && addresses.length > BLOCKED_FLOOR
+      if (tooMany || blocked) {
+        const next = blocked && addresses.length > BLOCKED_LIMIT ? BLOCKED_LIMIT : Math.floor(addresses.length / 2)
+        this.#learned.maxAccounts = Math.max(1, Math.min(this.#learned.maxAccounts ?? Number.POSITIVE_INFINITY, next))
         return this.#getMultipleAccounts(params)
       }
       throw err
@@ -276,7 +303,7 @@ export class HttpRpc implements RpcTransport {
     let current: Pending[] = []
     let counts = new Map<string, number>()
     for (const item of items) {
-      const limit = this.#methodLimits.get(item.method)
+      const limit = this.#learned.methods.get(item.method)
       const count = counts.get(item.method) ?? 0
       if (current.length >= this.#maxBatchSize || (limit !== undefined && count >= limit)) {
         chunks.push(current)
@@ -303,7 +330,7 @@ export class HttpRpc implements RpcTransport {
     if (!method || !Number.isFinite(limit) || limit < 1 || items.filter((item) => item.method === method).length <= limit) {
       return false
     }
-    this.#methodLimits.set(method, limit)
+    this.#learned.methods.set(method, limit)
     await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
     return true
   }
