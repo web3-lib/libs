@@ -605,9 +605,9 @@ export function evaluateTrace(
  * toncenter 的 emulateTrace：模拟外部消息引起的整条交易链（与 v3 接口同一个服务，路径 /api/emulate/v1）。
  * rejected：钱包不接受这条外部消息（签名、seqno、过期、余额不够付手续费等）；unavailable：模拟服务不可用
  */
-export async function emulate(client: TonClient, ext: Cell, ignoreSignature: boolean, signal?: AbortSignal): Promise<{ trace: Trace | null; rejected: string | null; unavailable: string | null }> {
+export async function emulate(client: TonClient, ext: Cell, ignoreSignature: boolean, signal?: AbortSignal, extra?: Record<string, unknown>): Promise<{ trace: Trace | null; rejected: string | null; unavailable: string | null }> {
   try {
-    const trace = await client.transport.post<Trace>('../emulate/v1/emulateTrace', { boc: ext.toBase64(), ignore_chksig: ignoreSignature }, { signal })
+    const trace = await client.transport.post<Trace>('../emulate/v1/emulateTrace', { boc: ext.toBase64(), ignore_chksig: ignoreSignature, ...extra }, { signal })
     if (!trace?.trace || !trace.transactions) return { trace: null, rejected: null, unavailable: 'unexpected response' }
     return { trace, rejected: null, unavailable: null }
   } catch (err) {

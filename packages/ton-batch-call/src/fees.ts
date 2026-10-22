@@ -189,17 +189,21 @@ async function estimateOne(client: TonClient, index: number, wallet: WalletConte
  * ```
  */
 export async function estimateCosts(client: TonClient, calls: readonly FeeCall[], options: EstimateCostOptions = {}): Promise<TonCostEstimate[]> {
-  // 同一个地址用同一个只读钱包对象（resolveWallets 按输入去重）
+  const wallets = await resolveCallWallets(client, calls.map((c) => c.from), options.signal)
+  return Promise.all(calls.map((call, i) => estimateOne(client, i, wallets[i] as WalletContext, call, options)))
+}
+
+/** 钱包：同 FeeCall.from（助记词、私钥、签名器、TON Connect，或只读的钱包地址；同一个地址共用一个只读对象，一次请求读出状态） */
+export async function resolveCallWallets(client: TonClient, froms: readonly TonSignerInput[], signal?: AbortSignal): Promise<WalletContext[]> {
   const watched = new Map<string, TonConnectLike>()
-  const inputs = calls.map((c) => {
-    if (typeof c.from !== 'string' || !isValidTonAddress(c.from.trim())) return c.from
-    const raw = toRawAddress(c.from.trim())
+  const inputs = froms.map((from) => {
+    if (typeof from !== 'string' || !isValidTonAddress(from.trim())) return from
+    const raw = toRawAddress(from.trim())
     let w = watched.get(raw)
     if (!w) watched.set(raw, (w = watchOnly(raw)))
     return w
   })
-  const wallets = await resolveWallets(client, inputs, options.signal)
-  return Promise.all(calls.map((call, i) => estimateOne(client, i, wallets[i] as WalletContext, call, options)))
+  return resolveWallets(client, inputs, signal)
 }
 
 /** 估算一笔交易的手续费（见 estimateCosts） */

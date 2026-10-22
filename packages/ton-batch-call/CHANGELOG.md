@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 模拟，子路径 `@w3lib/ton-batch-call/simulate`：`getSimulation` / `simulateTransaction`
+  - 用 toncenter 的 emulateTrace 模拟整条交易链（不检查签名、不发送）；输入是构建器的消息（`buildSwap`、流动性、`batchCall` 的 `messages`）或外部 / 内部消息的 BOC
+  - 结果：成功与否和可读的错误（账户、退出码说明、处理的消息）、每个钱包 / 普通地址的 TON 和 Jetton 余额变化（按账户模拟前后的余额和 Jetton 钱包存储的 balance 算）、手续费明细（gas、转发、存储）、消息体解码、警告（可回弹消息发给没部署的地址、Jetton 转给合约、未知 op、过高的 forward、花掉 90% 以上余额、兑换被退款、诈骗代币，可选 `/risk` 检查）；可选美元价值
+  - 单独导出 `decodeMessage`（Jetton / NFT 转账、销毁、pTON、STON.fi v1 / v2、DeDust 的兑换和存入）、`decodeExternalMessage`（钱包 v4r2 / v5r1 的外部消息和里面的消息）、`parseInternalMessage`、`describeExitCode`（TVM、动作阶段、钱包、标准 Jetton 钱包和 USD₮ 钱包的码）
+- 交易历史，子路径 `@w3lib/ton-batch-call/history`：`getHistory` / `history`
+  - 默认用 toncenter v3 的 `/actions`（同一条交易链的动作合成一条 Activity：兑换、转账、流动性、增发、失败），出错退回 `/transactions` + `/jetton/transfers`；游标分页、`before` / `after`、`types` 过滤
+  - 数据源可插拔：`adapters`（`HistoryAdapter`），依次尝试；导出 `toncenterActions()`、`toncenterTransactions()`
+
 ## 0.2.0
 
 ### 新功能

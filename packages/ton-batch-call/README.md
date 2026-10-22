@@ -351,6 +351,56 @@ r.trade   // { stage: 'ok', protocol: 'stonfi-v2', buyQuote, bought, sellQuote, 
 
 打包：在已经用到 `getBalances` 的基础上 `getTokenRisks` 约增加 21KB（minify，gzip 约 8KB，大部分是算代码哈希的 Cell 编解码和 SHA-256）；`simulate: true` 时按需加载 `/swap` 和发送的代码（约 39KB，gzip 约 16KB）。
 
+## 模拟
+
+子路径 `@w3lib/ton-batch-call/simulate`：用 toncenter 的 emulateTrace（`/api/emulate/v1/emulateTrace`，与 v3 同一个服务，公共节点可用）模拟整条交易链（钱包 → Jetton 钱包 → DEX → …），不检查签名、不发送。输入是本包构建器的消息（`buildSwap`、`buildAddLiquidity` / `buildRemoveLiquidity` 的 `plan.messages`、`batchCall` 的 `messages`），或外部消息 / 内部消息的 BOC。
+
+```ts
+import { buildSwap } from '@w3lib/ton-batch-call/swap'
+import { getSimulation } from '@w3lib/ton-batch-call/simulate'
+
+const plan = await buildSwap(ton, owner, { tokenIn: USDT, tokenOut: NATIVE_TON, amountInFormatted: '1' })
+const sim = await getSimulation({ from: owner, messages: plan.messages })
+if (!sim.success) throw new Error(sim.error)
+sim.decoded.summary   // 'Swap 1 USD₮ for 0.743854486 TON on STON.fi v2'
+sim.balanceChanges    // [{ address: 'UQCHY3…', asset: 'native', symbol: 'TON', delta: '738966451', … }, { asset: 'EQCxE6…', symbol: 'USD₮', delta: '-1000000', formatted: '-1', … }]
+sim.fees              // { total, wallet, gas, forward, storage, other }（nanoTON）
+
+await getSimulation({ boc: signedExternalBoc })              // 已签名的外部消息（签名不检查，seqno 要对得上）
+await getSimulation({ boc: internalMessageBoc, from: owner })  // 内部消息：由 from 钱包发出
+```
+
+- **结果**：`success` 要求钱包交易成功、消息都发出、后续合约没有失败退回；`error` 是可读的原因（账户、退出码的说明、在处理哪条消息，如 `EQCD-2L5…: exit code 47: not enough jettons in the wallet … while handling jetton_transfer; the message bounced`）；`failures` 是交易链里所有失败的交易；`simulated: false` 表示没有模拟结果（钱包拒绝外部消息，如 seqno 不对：`the wallet rejected the message (exit code 133: wrong seqno …)`；钱包没部署、模拟服务不可用）
+- **余额变化**：用交易链里每个账户模拟前后的余额：TON 按账户余额的差，Jetton 按 Jetton 钱包存储里 balance 的差（所以带税、特殊钱包代码的也准）。默认只列钱包 / 普通地址（含没部署的收款地址），不列 DEX、Jetton 钱包等合约（`includeContracts: true` 全列，`watch` 总是列出的地址）；`asset` 是 `'native'` 或 Jetton 主合约，`usd: true` 时加美元价值（按需加载 `/price`）
+- **手续费**：`fees.total`（整条链：所有交易的手续费 + 转发费）= `gas` + `forward` + `storage` + `other`（导入外部消息等）；`fees.wallet` 是钱包付的（同 `/fees`），`gasUsed` 是整条链的 gas 单位
+- **解码**：`decoded` 汇总（`type`：`transfer` / `swap` / `liquidity` / `contract` / `unknown`，`protocol`，`summary`）；有 DEX 动作（toncenter 的 `jetton_swap`、`dex_deposit_liquidity`、`dex_withdraw_liquidity`）时按实际执行的结果，否则按钱包发出的消息体。单独可用：`decodeMessage`（Jetton 转账 / 销毁、NFT 转账、pTON、STON.fi v1 / v2 的兑换和存入、DeDust 的兑换和存入，载荷里嵌套的兑换 / 存入也会解出）、`decodeExternalMessage`（钱包 v4r2 / v5r1 的外部消息：seqno、有效期、每条消息的发送模式和解码）、`describeExitCode`（标准 TVM 码、动作阶段、钱包 v4r2 / v5r1、标准 Jetton 钱包和 USD₮ 钱包的码；不认识的合约码只给数字）
+- **警告**（`warnings: { code, severity, message }[]`）：`bounceable-to-uninit`（可回弹的消息发给没部署的地址）、`jetton-to-contract`（Jetton 转给合约而不是钱包）、`unknown-opcode`、`high-forward-amount`（Jetton 转账的 forward TON 超过 `maxForwardTon`，默认 1 TON）、`drains-balance`（花掉余额的 90% 以上）、`swap-not-executed`（发出了兑换但交易链里没有兑换的结果，多半被退款）、`scam-token`（收到索引器标记的诈骗代币）、`trace-incomplete`；`risk: true` 时对收到的 Jetton 做 `/risk` 检查（按需加载），危险的标记（`honeypot`、`high-sell-tax` …）以 `token-risk` 给出
+- 没有授权（approve）：`approvalChanges` 恒为空
+
+主网核对（公共 toncenter，别人的钱包地址、不签名）：USD₮ → TON 的兑换（STON.fi v2 / DeDust）、Jetton + TON 的批量转账（USD₮ 的治理钱包，收款人新部署的 Jetton 钱包不当作收款地址列出）、TON 不够付兑换的附带 TON、seqno 不对的外部消息（v5r1 退出码 133）、Jetton 余额不够（USD₮ 钱包的退出码 47）、Jetton 转给 USD₮ 主合约（`jetton-to-contract`）。
+
+打包：`/simulate` 单独约 105KB（minify，含 `/risk`、`/price`、`/swap` 的按需代码被一起打进了没拆分的包；主入口不变）。
+
+## 交易历史
+
+子路径 `@w3lib/ton-batch-call/history`：一个地址的活动，统一成 `Activity`。默认用 toncenter v3 的 `/actions`（索引器已分类的动作，同一条交易链的动作合成一条），出错退回 `/transactions` + `/jetton/transfers`；请求走 `TonClient` 的传输层（限频、重试、多节点故障切换）。
+
+```ts
+import { getHistory } from '@w3lib/ton-batch-call/history'
+
+const page = await getHistory(owner, { limit: 20 })
+page.items[0]   // { hash, time, block, status: 'success', type: 'swap', label: 'Swapped 2.19956 XAUH for 289.070885 USD₮ on STON.fi v2', changes: [{ asset, symbol: 'XAUH', delta: '-2199560000000000000', … }, …], protocol: 'STON.fi v2' }
+const next = await getHistory(owner, { cursor: page.nextCursor })
+const swaps = await getHistory(owner, { types: ['swap', 'liquidity'], after: Math.floor(Date.now() / 1000) - 86400 })
+```
+
+- **Activity**：`type`：`transfer`（TON / Jetton / NFT）、`swap`、`liquidity`（存入 / 取出）、`mint`、`contract`、`other`（如销毁）；`status`：`failed` 为交易链里有失败的动作；`direction`、`counterparty`、`changes`（对这个地址的带符号变化，TON 的 `asset` 是 `'native'`）、`hash`（外部消息的规范化哈希的十六进制，同 `/write` 的 `hash`）。只有多余 TON 退回（excess）的交易链不单独成一条
+- **分页**：`limit`（默认 20，最多 100；`/actions` 按动作数分页，所以一页的活动数可能少于它），`cursor` / `nextCursor`（带适配器名，翻页用同一个适配器），`before` / `after`（unix 秒）。页末被截断的交易链会单独取完整，下一页跳过它。`types` 在结果里过滤并连续翻页（最多 `maxPages` 页），所以可能多于 `limit`
+- **适配器**：`adapters` 是 `{ name, fetch(query) → { items, nextCursor } }` 的数组，依次尝试（出错换下一个）；默认 `[toncenterActions(), toncenterTransactions()]`。应用有带 Key 的 toncenter 时传 `apiKey`（`TonClient` 的选项）；用 tonapi 等别的服务时自己实现一个适配器（返回 `Activity`）传进来
+- **退路的限制**：`/transactions` 没有协议分类：付出和收到资产（0.1 TON 以内的 gas 不算）的按 `swap` 算，没有 `protocol`，`hash` 是 trace id 的十六进制（与 `/actions` 的不同）；翻页是尽力而为（一条交易链的数据可能跨页）；有 `fee`（钱包发起的交易的手续费）
+
+主网核对：一个常有兑换的 v5r1 钱包：`/actions` 分出 `swap`（XAUH → USD₮、STON.fi v2）和 `transfer`，翻页没有重复，`types` 过滤；退路适配器同一批数据得到相同的兑换，第一个适配器出错时自动换下一个。
+
 ## 节点
 
 - 节点是 toncenter v3 风格的 URL（`https://toncenter.com/api/v3`、`https://testnet.toncenter.com/api/v3`，或自建 / 服务商的同格式接口），或自己实现的 `TonTransport`（`get` / `post`）；数组时依次故障切换

@@ -50,6 +50,14 @@
     "./risk": {
       "types": "./dist/subpaths/risk.d.ts",
       "import": "./dist/subpaths/risk.js"
+    },
+    "./simulate": {
+      "types": "./dist/subpaths/simulate.d.ts",
+      "import": "./dist/subpaths/simulate.js"
+    },
+    "./history": {
+      "types": "./dist/subpaths/history.d.ts",
+      "import": "./dist/subpaths/history.js"
     }
   },
   "files": [
@@ -75,6 +83,8 @@
     "test:live:fees": "LIVE=1 vitest run test/fees-live.test.ts",
     "test:live:swap": "LIVE=1 vitest run test/swap-live.test.ts",
     "test:live:risk": "LIVE=1 vitest run test/risk-live.test.ts",
+    "test:live:simulate": "LIVE=1 vitest run test/simulate-live.test.ts",
+    "test:live:history": "LIVE=1 vitest run test/history-live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "demo": "vite demo",
     "demo:build": "vite build demo"

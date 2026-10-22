@@ -1,3 +1,5 @@
+import { mountShell } from '../../demo-shared/shell'
+import { batchTransfer } from '@w3lib/ton-batch-call/write'
 import { NATIVE_TON, TonClient, formatUnits, isValidTonAddress, parseUnits, sameTonAddress, type NftDetails } from '@w3lib/ton-batch-call'
 import { estimateCost, type FeeCall, type TonCostEstimate } from '@w3lib/ton-batch-call/fees'
 import {
@@ -13,11 +15,16 @@ import {
 import { TON_LP_PROTOCOLS, lpPositions, type TonLpPosition, type TonLpProtocol } from '@w3lib/ton-batch-call/lp'
 import { lookupAddresses, resolveNames } from '@w3lib/ton-batch-call/names'
 import { defillamaPrices, portfolio, tokenPrices, type TonPriceSource } from '@w3lib/ton-batch-call/price'
+import { history, type Activity } from '@w3lib/ton-batch-call/history'
 import { tokenRisks, type TonTokenRisk } from '@w3lib/ton-batch-call/risk'
+import { simulateTransaction, type SimulationResult } from '@w3lib/ton-batch-call/simulate'
 import { buildSwap, swap, type SwapParams, type SwapResult, type TonSwapPlan, type TonSwapRoute } from '@w3lib/ton-batch-call/swap'
 import { createWallet } from '@w3lib/wallet'
 import { ton } from '@w3lib/wallet/ton'
 import { createWalletModal } from '@w3lib/wallet/ui'
+
+// 外壳：侧边分组导航 + 设置 / 连接面板（见 packages/demo-shared/shell.ts）
+mountShell()
 
 // ---- 示例数据 ----
 
@@ -146,8 +153,9 @@ const lines = (text: string) =>
     .filter(Boolean)
 
 function owner(): string {
-  const value = ownerInput.value.trim()
-  if (!value) throw new Error('请先填写地址（或点“示例地址”）')
+  // 没填地址时用已连接钱包的地址
+  const value = ownerInput.value.trim() || connection()?.address || ''
+  if (!value) throw new Error('请先在顶部“地址”里填写地址（或点“示例地址”，或连接钱包）')
   return value
 }
 
@@ -335,7 +343,8 @@ bind('runJettons', 'jettons', async () => {
   }
 })
 
-bind('runLp', 'lp', async () => {
+/** LP 查询（“LP 仓位”页的按钮和“加载我的仓位”共用） */
+async function queryLp() {
   const prices = $<HTMLInputElement>('lpPrices').checked
   let priceError: unknown = null
   const from = owner()
@@ -366,7 +375,8 @@ bind('runLp', 'lp', async () => {
       priceError,
     ),
   }
-})
+}
+bind('runLp', 'lp', queryLp)
 
 const pairOf = (p: TonLpPosition) => `${p.token0.symbol ?? '?'} / ${p.token1.symbol ?? '?'}`
 
@@ -424,8 +434,13 @@ const networkName = (chain: string | number | null) => (chain === '-239' ? '主�
 
 function renderWallet() {
   const c = connection()
+  // 连上钱包、地址栏还空着：填上钱包地址（查询默认查自己的钱包）
+  if (c && !ownerInput.value.trim()) {
+    ownerInput.value = c.address
+    ownerInput.dispatchEvent(new Event('change'))
+  }
   if (!c) {
-    $('walletInfo').textContent = '未连接（只构建时用上面“地址”栏的地址）'
+    $('walletInfo').textContent = '未连接（只读查询不需要钱包）'
     $('connectWallet').textContent = '连接钱包'
     return
   }
@@ -451,7 +466,7 @@ function setPositions(list: TonLpPosition[], of: string) {
   lastPositions = list
   positionsOwner = of
   const options = list.map((p, i) => new Option(`${p.protocolName} · ${pairOf(p)} · 份额 ${(p.share * 100).toPrecision(3)}%`, String(i)))
-  liq.position.replaceChildren(...(options.length ? options : [new Option('先在上面“LP 仓位”里查询（用同一个地址）', '')]))
+  liq.position.replaceChildren(...(options.length ? options : [new Option('没有仓位：点右边“加载我的仓位”，或在“LP 仓位”页查询', '')]))
 }
 
 for (const id of Object.keys(SAMPLE_POOLS) as TonLpProtocol[]) liq.protocol.append(new Option(TON_LP_PROTOCOLS[id].name, id))
@@ -732,7 +747,7 @@ let lastSwap: { plan: TonSwapPlan; from: string } | null = null
 function renderSwapWallet() {
   const c = connection()
   if (!c) {
-    $('swapWalletInfo').textContent = '未连接（报价时用上面“地址”栏的地址）'
+    $('swapWalletInfo').textContent = '未连接（报价时用顶部的地址）'
     $('swapConnect').textContent = '连接钱包'
     return
   }
@@ -938,5 +953,144 @@ bind('runRisk', 'risk', async () => {
         addr(r.address ?? r.token),
       ]),
     ),
+  }
+})
+
+// ---- 模拟（子路径 /simulate） ----
+
+const sim = { kind: $<HTMLSelectElement>('simKind'), to: $<HTMLInputElement>('simTo'), amount: $<HTMLInputElement>('simAmount') }
+sim.kind.addEventListener('change', () => {
+  $('simTransfer').hidden = sim.kind.value !== 'transfer'
+})
+
+function simView(r: SimulationResult): Node {
+  const wrap = document.createElement('div')
+  const rows: Array<[string, Cell]> = [
+    ['结果', !r.simulated ? tag(`没有模拟结果：${r.error}`, 'bad') : r.success ? tag('成功', 'ok') : tag(`失败：${r.error}`, 'bad')],
+    ['说明', r.decoded.summary],
+    ['类型', [r.decoded.type, r.decoded.protocol].filter(Boolean).join(' · ')],
+    ['钱包付的手续费', r.fees ? `${amount(formatUnits(BigInt(r.fees.wallet), 9))} TON` : null],
+    ['整条链的手续费', r.fees ? `${amount(formatUnits(BigInt(r.fees.total), 9))} TON（gas ${amount(formatUnits(BigInt(r.fees.gas), 9))}、转发 ${amount(formatUnits(BigInt(r.fees.forward), 9))}、存储 ${amount(formatUnits(BigInt(r.fees.storage), 9))}）` : null],
+    ['警告', r.warnings.length ? r.warnings.map((w) => `${w.code}：${w.message}`).join('\n') : null],
+  ]
+  wrap.append(
+    table(['项目', '值'], rows.filter(([, v]) => v !== null && v !== '')),
+    table(
+      ['地址', '资产', '变化'],
+      r.balanceChanges.map((c) => [addr(c.address), c.symbol, `${c.formatted.startsWith('-') ? '' : '+'}${amount(c.formatted)}`]),
+    ),
+  )
+  return wrap
+}
+
+bind('runSim', 'sim', async () => {
+  let call: FeeCall
+  if (sim.kind.value === 'swap') {
+    if (!lastSwap) throw new Error('请先在“兑换”里报价')
+    call = { from: lastSwap.from, messages: lastSwap.plan.messages }
+  } else {
+    const to = text(sim.to)
+    if (!to) throw new Error('请填写收款地址')
+    if (!isValidTonAddress(to)) throw new Error(`收款地址不合法：${to}`)
+    const value = parseUnits(text(sim.amount) ?? '', 9)
+    if (value <= 0n) throw new Error('转账的数量要大于 0')
+    call = { from: connection()?.address ?? owner(), messages: [{ to, value, bounce: false }] }
+  }
+  const result = await simulateTransaction(client(), call)
+  return { data: result, view: simView(result) }
+})
+
+// ---- 交易历史（子路径 /history） ----
+
+let historyCursor: string | undefined
+/** 游标属于哪次查询（地址、网络）：换了之后“下一页”不能接着用旧游标 */
+let historyFor = ''
+const historyKey = () => [owner(), client().network].join('|')
+const moreHistory = $<HTMLButtonElement>('moreHistory')
+
+function historyView(items: Activity[]): Node {
+  return table(
+    ['时间', '类型', '状态', '说明', '变化'],
+    items.map((a) => [
+      new Date(a.time * 1000).toLocaleString(),
+      [a.type, a.direction].filter(Boolean).join(' · '),
+      a.status === 'success' ? tag('成功', 'ok') : tag('失败', 'bad'),
+      a.label,
+      a.changes.map((c) => `${c.formatted.startsWith('-') ? '' : '+'}${amount(c.formatted)} ${c.symbol}`).join('\n'),
+    ]),
+  )
+}
+
+async function loadHistory(cursor: string | undefined) {
+  // 发请求前记下这次查询的条件：等待期间改了表单，游标也只属于发出去的那次查询
+  const key = historyKey()
+  const page = await history(client(), owner(), { limit: 10, cursor })
+  historyCursor = page.nextCursor
+  historyFor = key
+  moreHistory.disabled = !historyCursor
+  return { data: page, view: historyView(page.items) }
+}
+
+bind('runHistory', 'history', () => loadHistory(undefined))
+// “下一页”按钮的禁用状态会被 bind 在查询结束时恢复，不能只靠它：这里再检查一次
+bind('moreHistory', 'history', () => {
+  if (!historyCursor) throw new Error('没有下一页：请先点“查询”')
+  if (historyFor !== historyKey()) throw new Error('地址或网络变了：请重新点“查询”')
+  return loadHistory(historyCursor)
+})
+
+// ---- 批量转账（子路径 /write） ----
+
+const bt = { recipients: $<HTMLTextAreaElement>('btRecipients'), token: $<HTMLInputElement>('btToken'), dry: $<HTMLInputElement>('btDry') }
+
+bind('runBt', 'bt', async () => {
+  const rows = bt.recipients.value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [to, formatted] = l.split(/[\s,]+/)
+      if (!to || !formatted) throw new Error(`格式不对：${l}（每行“地址 数量”）`)
+      return { to, formatted }
+    })
+  if (!rows.length) throw new Error('请填收款地址和数量')
+  if (rows.length > 200) throw new Error('demo 一次最多 200 个收款人')
+  const dryRun = bt.dry.checked
+  const token = bt.token.value.trim()
+  const c = connection() ?? (await modal.open('ton'))
+  if (!c) throw new Error('没有连接钱包')
+  const expected = testnet() ? '-3' : '-239'
+  if (c.chainId !== expected) throw new Error(`钱包在${networkName(c.chainId)}，节点是${networkName(expected)}：请在钱包里切换网络，或改“节点”`)
+  if (!dryRun && !confirm(`用 ${c.address} 向 ${rows.length} 个地址转${token ? `（${token}）` : ' TON'}，确认发送？`)) throw new Error('已取消')
+  const progress = $('btStats')
+  const results = await batchTransfer(client(), c.provider as never, rows, {
+    ...(token ? { token } : {}),
+    dryRun,
+    onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 项：${r.status}`),
+  })
+  return {
+    data: results,
+    view: table(
+      ['#', '收款', '数量', '状态', '交易'],
+      results.map((r, i) => [i + 1, addr(r.to), r.formatted ?? r.amount, tag(r.status + (r.error ? `：${r.error}` : ''), r.status === 'confirmed' || r.status === 'simulated' ? 'ok' : r.status === 'failed' || r.status === 'reverted' ? 'bad' : ''), r.hash ? link(r.hash) : null]),
+      [2],
+    ),
+  }
+})
+
+// 仓位下拉框的内容来自 LP 查询：这里直接调用同一个查询（同一个地址），不用切页
+$('liqLoad').addEventListener('click', async () => {
+  const status = $('liqLoadStatus')
+  const button = $<HTMLButtonElement>('liqLoad')
+  button.disabled = true
+  status.textContent = '查询中…'
+  try {
+    await queryLp()
+    const count = Array.from($<HTMLSelectElement>('liqPosition').options).filter((o) => o.value).length
+    status.textContent = `找到 ${count} 个仓位`
+  } catch (err) {
+    status.textContent = `查询失败：${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    button.disabled = false
   }
 })
