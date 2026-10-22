@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@w3lib/overview demo</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23fff' stroke-width='2.5'/%3E%3C/svg%3E" />
+    <style>
+      /* 助记词默认遮住（显示助记词时去掉 masked） */
+      textarea.masked {
+        -webkit-text-security: disc;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="top">
+      <h1>@w3lib/overview <small>demo</small></h1>
+      <p>多链资产总览：每条链填一个地址（不填的链不查），一次调用得到合计、分链明细、跨链合并的资产和授权风险。链包由 loader 按需加载，某条链失败不影响其他链，每条链完成时马上显示。</p>
+    </header>
+
+    <main>
+      <div class="page-stack" data-group="资产查询" data-key="overview" data-title="多链总览" data-mode="read">
+      <section class="card">
+        <h2>地址</h2>
+        <script type="text/plain" data-usage vite-ignore>
+          import { getOverview } from '@w3lib/overview'
+
+          // 链包由应用传 loader：写成 () => import(…)，打包时只带上用到的链包（EVM 和 Tron 共用 evm）
+          const loaders = {
+            evm: () => import('@w3lib/evm-batch-call/price'),
+            evmApprovals: () => import('@w3lib/evm-batch-call/approvals'),         // approvals: true 时要
+            solana: () => import('@w3lib/solana-batch-call/price'),
+            solanaApprovals: () => import('@w3lib/solana-batch-call/approvals'),
+            sui: () => import('@w3lib/sui-batch-call/price'),
+            ton: () => import('@w3lib/ton-batch-call/price'),
+          }
+          // 每条链一个地址，不填的链不查；某条链失败不影响其他链
+          const o = await getOverview(
+            { evm: { address: '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', chains: [1, 56, 8453] }, tron: { address: 'TNXoiAJ3dct8Fjg4M9fkLFh9S2v9TXc32G' },
+              solana: { address: '5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9' }, ton: { address: 'UQAj-peZGPH-cC25EAv4Q-h8cBXszTmkch6ba6wXC8BM40qt' },
+              sui: { address: '0x9f63425709069336fec108bd4ba69a8f3d23e8ab237311f3ce58ae2bb0ed4d7f' } },
+            { loaders, lp: true, approvals: true, mergeBySymbol: false, onChain: (chain) => console.log(chain.chain, chain.totalUsd) },   // onChain：每条链完成时回调
+          )
+          // o.totalUsd 合计；o.byChain: [{ chain: 'evm:1', status, totalUsd, tokensUsd, lpUsd, tokens, lp, unpriced, approvals?, warnings, ms }]
+          // o.tokens 跨链合并的资产：[{ key: 'USDC', amount, usd, price, chains: [{ chain, token, formatted, value }] }]；o.approvals: { total, unlimited, unknownSpender, items }
+        </script>
+        <script type="text/plain" data-usage="连接钱包" vite-ignore>
+          import { getOverview, type OverviewInput } from '@w3lib/overview'
+          import { createWallet } from '@w3lib/wallet'
+          import { evm } from '@w3lib/wallet/evm'
+          import { solana } from '@w3lib/wallet/solana'
+          import { ton } from '@w3lib/wallet/ton'
+          import { createWalletModal } from '@w3lib/wallet/ui'
+
+          // mode: 'multi'：每条链各连一个钱包（EVM 用 MetaMask、Solana 用 Phantom…），连了哪条链就查哪条链
+          const wallet = createWallet({ mode: 'multi', connectors: [evm(), solana(), ton({ manifestUrl, load: () => import('@tonconnect/sdk') })] })
+          await createWalletModal(wallet).open()                 // 可以多次打开，再连别的链
+          const address = (ns: 'evm' | 'tron' | 'solana' | 'sui' | 'ton') => wallet.getConnection(ns)?.address
+          const input: OverviewInput = {}
+          if (address('evm')) input.evm = { address: address('evm')!, chains: [1, 56, 8453] }
+          if (address('solana')) input.solana = { address: address('solana')! }
+          if (address('ton')) input.ton = { address: address('ton')! }       // TON Connect 给的是 UQ… 格式
+          const o = await getOverview(input, { loaders })
+        </script>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（也可以直接填地址）</span>
+            <button id="connectWallet">连接钱包</button>
+            <button id="disconnectWallet" hidden>全部断开</button>
+          </div>
+        </div>
+        <p class="hint">可以连多条链（每条链各一个钱包，再点“连接钱包”连下一条）：连上的地址自动填进对应的栏；断开时只清空钱包填的栏，自己填的不动。</p>
+        <div class="row"><label for="evm">EVM</label><input id="evm" placeholder="0x…（下面勾选要查的链）" spellcheck="false" /></div>
+        <div class="row">
+          <label>EVM 链</label>
+          <div class="checks" id="chains">
+            <label><input type="checkbox" value="1" checked /> Ethereum</label>
+            <label><input type="checkbox" value="56" checked /> BNB Chain</label>
+            <label><input type="checkbox" value="8453" checked /> Base</label>
+            <label><input type="checkbox" value="42161" /> Arbitrum</label>
+            <label><input type="checkbox" value="10" /> Optimism</label>
+            <label><input type="checkbox" value="137" /> Polygon</label>
+            <label><input type="checkbox" value="43114" /> Avalanche</label>
+          </div>
+        </div>
+        <div class="row"><label for="tron">Tron</label><input id="tron" placeholder="T…" spellcheck="false" /></div>
+        <div class="row"><label for="solana">Solana</label><input id="solana" placeholder="Solana 地址（免费公共节点只查内置的主要代币）" spellcheck="false" /></div>
+        <div class="row"><label for="sui">Sui</label><input id="sui" placeholder="0x…" spellcheck="false" /></div>
+        <div class="row"><label for="ton">TON</label><input id="ton" placeholder="UQ… / EQ…（免费额度每秒 1 次请求，杂币多时较慢）" spellcheck="false" /></div>
+        <div class="checks">
+          <label><input type="checkbox" id="lp" /> 计入 LP 仓位</label>
+          <label><input type="checkbox" id="approvals" /> 授权风险</label>
+          <label><input type="checkbox" id="mergeBySymbol" /> 同符号也合并</label>
+        </div>
+        <div class="actions">
+          <button class="primary" id="run">查询总览</button>
+          <button id="cancel" disabled>取消</button>
+          <button id="sample">示例地址</button>
+          <span class="stats" id="stats"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>合计</h2>
+        <div class="result" id="summary"></div>
+      </section>
+      <section class="card">
+        <h2>分链 <small class="muted">byChain：每条链完成时（onChain）逐条出现</small></h2>
+        <div class="result" id="chainsResult"></div>
+      </section>
+      <section class="card">
+        <h2>跨链合并的资产 <small class="muted">tokens：USDC 等在各链上合成一项</small></h2>
+        <div class="result" id="assets"></div>
+      </section>
+      <section class="card">
+        <h2>授权风险 <small class="muted">approvals</small></h2>
+        <div class="result" id="approvalsResult"></div>
+      </section>
+      </div>
+
+      <div class="page-stack" data-group="资产查询" data-key="mnemonic" data-title="助记词总览" data-mode="read" data-desc="助记词在本地推导各链地址（EVM、Tron、Solana、Sui、TON），再查所有地址的总览">
+      <section class="card">
+        <h2>助记词</h2>
+        <script type="text/plain" data-usage vite-ignore>
+          import { deriveAddresses, getDerivedOverview } from '@w3lib/overview/mnemonic'
+
+          // TON 钱包地址用 ton-batch-call 的代码算（v4r2 / v5r1）
+          const tonLoaders = { tonWrite: () => import('@w3lib/ton-batch-call/write'), tonCore: () => import('@w3lib/ton-batch-call') }
+          // 只在本地推导，返回值只有地址和派生路径（没有私钥）；校验不通过时抛错，错误信息不含助记词
+          const addresses = await deriveAddresses(mnemonic, { accounts: 3, passphrase: '', loaders: tonLoaders })
+          // addresses.evm: ['0x…', …]，addresses.paths.evm: ["m/44'/60'/0'/0/0", …]；tron / solana / sui 同理
+          // addresses.ton: [{ index, v4r2: 'UQ…', v5r1: 'UQ…', scheme: 'bip39' | 'ton', path }]
+
+          // 之后不再需要助记词：查所有账户的总览（账户依次查；TON 查已部署或有余额的钱包版本）
+          const r = await getDerivedOverview(addresses, { evm: { chains: [1, 56, 8453] }, loaders: { ...loaders, ...tonLoaders }, onAccount: (a) => console.log(a.index, a.overview.totalUsd) })
+          // r.total：所有账户合计（同 getOverview 的返回值）；r.accounts: [{ index, addresses, ton: [{ version, address, status }], overview }]
+          // 一步完成：getOverviewFromMnemonic(mnemonic, { accounts: 3, evm: { chains: [1, 56] }, loaders })
+        </script>
+        <p class="hint" style="margin: 0 0 12px; padding: 10px 14px; border-left: 4px solid var(--warn); border-radius: 8px; background: var(--warn-soft, transparent); color: var(--fg); font-size: 14px">
+          <b>仅用测试助记词：本页只在浏览器本地推导地址，不保存、不上传；不要在网页里输入真实资产的助记词。</b>
+        </p>
+        <div class="row">
+          <label for="mnemonic">助记词</label>
+          <textarea id="mnemonic" class="masked" rows="3" placeholder="12 / 24 个词，空格分隔（BIP-39；TON 格式的 24 个词也可以）" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" data-lpignore="true"></textarea>
+        </div>
+        <div class="checks">
+          <label><input type="checkbox" id="mnShow" /> 显示助记词</label>
+          <label><input type="checkbox" id="mnClear" checked /> 推导后清空输入框</label>
+          <button id="mnSample">填入公开的测试助记词</button>
+        </div>
+        <div class="row"><label for="mnPassphrase">密码</label><input id="mnPassphrase" type="password" placeholder="BIP-39 密码（第 25 个词），没有就留空" autocomplete="off" /></div>
+        <div class="row"><label for="mnAccounts">账户数</label><input id="mnAccounts" type="number" min="1" max="20" value="1" /></div>
+        <div class="row">
+          <label>链</label>
+          <div class="checks" id="mnKinds">
+            <label><input type="checkbox" value="evm" checked /> EVM</label>
+            <label><input type="checkbox" value="tron" checked /> Tron</label>
+            <label><input type="checkbox" value="solana" checked /> Solana</label>
+            <label><input type="checkbox" value="sui" checked /> Sui</label>
+            <label><input type="checkbox" value="ton" checked /> TON</label>
+          </div>
+        </div>
+        <div class="row">
+          <label>EVM 链</label>
+          <div class="checks" id="mnChains">
+            <label><input type="checkbox" value="1" checked /> Ethereum</label>
+            <label><input type="checkbox" value="56" checked /> BNB Chain</label>
+            <label><input type="checkbox" value="8453" checked /> Base</label>
+            <label><input type="checkbox" value="42161" /> Arbitrum</label>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="mnDerive">推导地址</button>
+          <button class="primary" id="mnRun">查询总览</button>
+          <button id="mnCancel" disabled>取消</button>
+          <span class="stats" id="mnStats"></span>
+        </div>
+      </section>
+      <section class="card">
+        <h2>地址 <small class="muted">deriveAddresses：地址和派生路径</small></h2>
+        <div class="result" id="mnAddresses"></div>
+      </section>
+      <section class="card">
+        <h2>总览 <small class="muted">每个账户一次 getOverview，再合计</small></h2>
+        <div class="result" id="mnSummary"></div>
+        <div class="result" id="mnAccountsResult"></div>
+      </section>
+      </div>
+    </main>
+    <p class="foot">源码：<a href="https://github.com/web3-lib/libs/tree/main/packages/overview">packages/overview</a></p>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

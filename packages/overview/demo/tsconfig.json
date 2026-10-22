@@ -1,0 +1,22 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@w3lib/overview": ["../src/index.ts"],
+      "@w3lib/overview/*": ["../src/subpaths/*.ts"],
+      "@w3lib/wallet": ["../../wallet/src/index.ts"],
+      "@w3lib/wallet/*": ["../../wallet/src/*/index.ts"],
+      "@w3lib/ton-batch-call": ["../../ton-batch-call/src/index.ts"],
+      "@w3lib/evm-batch-call/*": ["../../evm-batch-call/src/subpaths/*.ts"],
+      "@w3lib/solana-batch-call/*": ["../../solana-batch-call/src/subpaths/*.ts"],
+      "@w3lib/sui-batch-call/*": ["../../sui-batch-call/src/subpaths/*.ts"],
+      "@w3lib/ton-batch-call/*": ["../../ton-batch-call/src/subpaths/*.ts"]
+    }
+  },
+  "include": ["main.ts", "vite.config.ts"]
+}

@@ -5,3 +5,9 @@ autoInstallPeers: true
 
 allowBuilds:
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@w3lib/evm-batch-call@0.7.0'
+  - '@w3lib/solana-batch-call@0.5.0'
+  - '@w3lib/sui-batch-call@0.2.0'
+  - '@w3lib/ton-batch-call@0.2.0'

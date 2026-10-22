@@ -128,6 +128,46 @@ importers:
         specifier: ^8.3.4
         version: 8.3.4(esbuild@0.28.2)
 
+  packages/overview:
+    dependencies:
+      '@noble/curves':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@noble/hashes':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@scure/base':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@scure/bip32':
+        specifier: ^2.4.0
+        version: 2.4.0
+      '@scure/bip39':
+        specifier: ^2.4.0
+        version: 2.4.0
+    devDependencies:
+      '@tonconnect/sdk':
+        specifier: 3.4.1
+        version: 3.4.1
+      '@w3lib/evm-batch-call':
+        specifier: workspace:*
+        version: link:../evm-batch-call
+      '@w3lib/solana-batch-call':
+        specifier: workspace:*
+        version: link:../solana-batch-call
+      '@w3lib/sui-batch-call':
+        specifier: workspace:*
+        version: link:../sui-batch-call
+      '@w3lib/ton-batch-call':
+        specifier: workspace:*
+        version: link:../ton-batch-call
+      ethers:
+        specifier: ^6.17.0
+        version: 6.17.0
+      vite:
+        specifier: ^8.3.4
+        version: 8.3.4(esbuild@0.28.2)
+
   packages/solana-batch-call:
     dependencies:
       '@noble/hashes':
@@ -661,6 +701,12 @@ packages:
 
   '@scure/base@2.4.0':
     resolution: {integrity: sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg==}
+
+  '@scure/bip32@2.4.0':
+    resolution: {integrity: sha512-i3DS0CptAocyvqE4n3SUkpzeQK4vJMFwWLofTwRiiKo2aWojBOfyMCgfKw9HVpO6fSY5AK86sHS/Uzn8kK9Few==}
+
+  '@scure/bip39@2.4.0':
+    resolution: {integrity: sha512-82dxFbZUYboyOf0AXiydsQrFQ5Q4h9mX+O2UkE91ROYmsc0BKMGZLwDmy96Jpa2+vrtoxomjUhy1RPIgH/r2nA==}
 
   '@tonconnect/isomorphic-eventsource@0.0.2':
     resolution: {integrity: sha512-B4UoIjPi0QkvIzZH5fV3BQLWrqSYABdrzZQSI9sJA9aA+iC0ohOzFwVVGXanlxeDAy1bcvPbb29f6sVUk0UnnQ==}
@@ -1476,6 +1522,16 @@ snapshots:
     optional: true
 
   '@scure/base@2.4.0': {}
+
+  '@scure/bip32@2.4.0':
+    dependencies:
+      '@noble/curves': 2.4.0
+      '@noble/hashes': 2.4.0
+      '@scure/base': 2.4.0
+
+  '@scure/bip39@2.4.0':
+    dependencies:
+      '@noble/hashes': 2.4.0
 
   '@tonconnect/isomorphic-eventsource@0.0.2':
     dependencies:
