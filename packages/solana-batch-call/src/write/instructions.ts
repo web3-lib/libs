@@ -74,6 +74,23 @@ export function closeAccount(account: string, destination: string, owner: string
   }
 }
 
+/** SPL Token / Token-2022 BurnChecked：销毁代币账户里的代币（校验 mint 和精度），owner 签名 */
+export function burnChecked(account: string, mint: string, owner: string, amount: bigint, decimals: number, tokenProgram: string): Instruction {
+  return {
+    programId: tokenProgram,
+    keys: [
+      { pubkey: account, isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: true, isWritable: false },
+    ],
+    data: bytes(10, (v) => {
+      v.setUint8(0, 15)
+      v.setBigUint64(1, amount, true)
+      v.setUint8(9, decimals)
+    }),
+  }
+}
+
 /** 撤销代币账户的授权（Approve 设置的 delegate），owner 签名 */
 export function revoke(account: string, owner: string, tokenProgram: string): Instruction {
   return {

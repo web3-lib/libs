@@ -249,6 +249,18 @@ export async function raydiumAdd(ctx: Ctx, params: SolanaIncreaseLiquidityParams
   })
 }
 
+/**
+ * 关闭已清空的仓位（流动性、手续费、奖励都为 0）：销毁仓位 NFT、关闭 NFT 的代币账户和仓位账户，租金退给 owner（程序固定，不能指定别人）。
+ * pool 是仓位所在的池子（官方 SDK 也带着它）
+ */
+export function raydiumClosePosition(owner: string, positionMint: string, nftProgram: string, pool: string, nftAccount = getAssociatedTokenAddress(owner, positionMint, nftProgram)): Instruction {
+  return {
+    programId: PROGRAM,
+    keys: [w(owner, true), w(positionMint), w(nftAccount), w(personalPositionAddress(positionMint)), r(SYSTEM_PROGRAM_ID), r(nftProgram), w(pool)],
+    data: anchorIx('close_position'),
+  }
+}
+
 /** 移除（liquidity > 0）/ 只领取手续费和奖励（collectOnly：流动性为 0 的 decrease） */
 export async function raydiumRemove(ctx: Ctx, params: SolanaRemoveLiquidityParams, collectOnly = false): Promise<SolanaLiquidityPlan> {
   const mint = refMint(params.position)
@@ -308,11 +320,7 @@ export async function raydiumRemove(ctx: Ctx, params: SolanaRemoveLiquidityParam
   }
   const main: Instruction[] = [decrease]
   if (burn) {
-    main.push({
-      programId: PROGRAM,
-      keys: [w(ctx.owner, true), w(mint), w(nftAta), w(personal), r(SYSTEM_PROGRAM_ID), r(nftProgram), w(pool.address)],
-      data: anchorIx('close_position'),
-    })
+    main.push(raydiumClosePosition(ctx.owner, mint, nftProgram, pool.address))
   }
   return makePlan(ctx, {
     action: collectOnly ? 'collect' : 'remove',

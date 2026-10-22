@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@w3lib/solana-batch-call demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M10 11h13l-3 3H7zM7 18h13l3 3H10z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header class="top">
@@ -14,7 +13,7 @@
     </header>
 
     <main>
-      <section class="card">
+      <section class="card" data-role="settings">
         <h2>设置</h2>
         <div class="row">
           <label for="rpc">节点</label>
@@ -27,14 +26,29 @@
             <button id="sample">示例地址</button>
           </div>
         </div>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（只读查询不需要钱包）</span>
+            <button id="connectWallet">连接钱包</button>
+          </div>
+        </div>
         <p class="hint">
           内置公共节点（publicnode）限频严，也不支持 <code>getTokenAccountsByOwner</code> 等索引方法：余额、代币信息、NFT 详情可以直接查，
           <b>资产列表、持有的 NFT、NFT 持有人</b>需要填自己的节点（Helius 等的免费额度即可）。官方节点 api.mainnet-beta 拒绝浏览器里的请求。设置保存在本地浏览器。
         </p>
       </section>
 
-      <section class="card">
-        <h2>余额 <small class="muted">getBalances：SOL + SPL Token / Token-2022，本地推导 ATA 地址，一次 getMultipleAccounts</small></h2>
+      <section class="card" data-group="资产查询" data-key="balances" data-title="余额" data-mode="read" data-desc="查 SOL 和 SPL 代币余额，一次 getMultipleAccounts。">
+        <h2>余额<small class="muted">getBalances：SOL + SPL Token / Token-2022，本地推导 ATA 地址，一次 getMultipleAccounts</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_MINT, getBalances } from '@w3lib/solana-batch-call'
+
+          const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          // SOL + 代币余额：本地推导 ATA，一次 getMultipleAccounts；不传 provider 时用内置 mainnet 公共节点
+          const list = await getBalances(owner, [NATIVE_MINT, USDC], { symbol: true })
+          // [{ token: NATIVE_MINT, native: true, balance: '1500000000', decimals: 9, formatted: '1.5', tokenProgram: null, symbol: 'SOL', success: true }, …]
+        </script>
         <div class="row">
           <label for="balanceMints">代币</label>
           <textarea id="balanceMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
@@ -46,8 +60,17 @@
         <div class="result" id="balancesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币信息 <small class="muted">getTokens：name / symbol / decimals / supply / 所属程序 / 转账手续费</small></h2>
+      <section class="card" data-group="资产查询" data-key="tokens" data-title="代币信息" data-mode="read" data-desc="读 mint 的名称、符号、精度、供应量和转账手续费。">
+        <h2>代币信息<small class="muted">getTokens：name / symbol / decimals / supply / 所属程序 / 转账手续费</small></h2>
+        <script type="text/plain" data-usage>
+          import { getTokens } from '@w3lib/solana-batch-call'
+
+          const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          const PYUSD = '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo' // Token-2022
+          // 字段可选，结果类型随之收窄；transferFee 是 Token-2022 当前 epoch 生效的转账手续费
+          const list = await getTokens([USDC, PYUSD], { fields: ['name', 'symbol', 'decimals', 'supply', 'tokenProgram', 'transferFee'] })
+          // [{ address: USDC, native: false, name: 'USD Coin', symbol: 'USDC', decimals: 6, supply: '…', supplyFormatted: '…', tokenProgram: 'Tokenkeg…', transferFee: null, success: true }, …]
+        </script>
         <div class="row">
           <label for="tokenMints">代币</label>
           <textarea id="tokenMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
@@ -59,8 +82,19 @@
         <div class="result" id="tokensResult"></div>
       </section>
 
-      <section class="card">
-        <h2>资产列表 <small class="muted">getOwnerTokens：地址持有的全部代币（需要自己的节点）</small></h2>
+      <section class="card" data-group="资产查询" data-key="owner-tokens" data-needs-node="列出地址的全部代币需要支持 getTokenAccountsByOwner 的节点：钱包不提供节点，免费公共节点也都不开放这个方法，需要自己的节点（Helius 等的免费额度即可）。没有的话可以用“余额”页按代币列表查（常用代币已预填）。" data-title="资产列表" data-mode="read" data-desc="列出地址持有的全部代币（需要自己的节点）。">
+        <h2>资产列表<small class="muted">getOwnerTokens：地址持有的全部代币（需要自己的节点）</small></h2>
+        <script type="text/plain" data-usage>
+          import { getOwnerTokens } from '@w3lib/solana-batch-call'
+
+          // 地址持有的全部代币（SOL 在第一位，同一代币的多个账户合计）；需要支持 getTokenAccountsByOwner 的节点
+          const list = await getOwnerTokens(owner, {
+            provider: 'https://my-rpc.example',
+            includeNfts: false, // 默认不含 NFT
+            includeZero: false, // 默认不含余额为 0 的代币账户
+          })
+          // [{ token: NATIVE_MINT, native: true, name: 'Solana', symbol: 'SOL', formatted: '1.5', accounts: 1, … }, { token: USDC, symbol: 'USDC', formatted: '1235', accounts: 2, … }, …]
+        </script>
         <div class="actions">
           <span class="checks"><label><input type="checkbox" id="includeNfts" /> 包含 NFT</label></span>
           <span class="checks"><label><input type="checkbox" id="includeZero" /> 包含余额为 0 的账户</label></span>
@@ -70,8 +104,21 @@
         <div class="result" id="ownerResult"></div>
       </section>
 
-      <section class="card">
-        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：Raydium CLMM / Orca Whirlpool 仓位 NFT，Raydium AMM v4 / CPMM 的 LP 代币</small></h2>
+      <section class="card" data-group="流动性" data-key="lp" data-needs-node="不填仓位 / 池子时要扫描地址的全部仓位，需要自己的节点。" data-title="LP 仓位" data-mode="read" data-desc="列出 Raydium / Orca 的仓位和 LP 代币，含数量、待领手续费和美元价值。">
+        <h2>LP 仓位<small class="muted">getLpPositions（子路径 /lp）：Raydium CLMM / Orca Whirlpool 仓位 NFT，Raydium AMM v4 / CPMM 的 LP 代币</small></h2>
+        <script type="text/plain" data-usage>
+          import { getLpPositions } from '@w3lib/solana-batch-call/lp'
+
+          // 免费公共节点：指定仓位 NFT / LP 代币的 mint（按 ATA 读余额）；不传 mints 时扫描全部代币账户（需要自己的节点）
+          const list = await getLpPositions(owner, {
+            mints: ['6MZXirXpM1RcD6NT6LYr5QFs2XHkm6RtmYn6LAdexu7u'],
+            pools: ['58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2'], // Raydium AMM v4 / CPMM 的池子：不用 getProgramAccounts 找
+            prices: true,                                       // 美元价值（DefiLlama）：valueUsd、feesUsd，按价值排序
+            onPriceError: (err) => console.warn(err),           // 价格服务出错时仓位照样返回
+          })
+          // [{ type: 'clmm', protocol: 'raydium-clmm', pool, positionMint, token0: { mint, symbol: 'SOL', decimals: 9 }, token1,
+          //    amount0Formatted: '140.261364355', amount1Formatted: '6852.200542', fees0Formatted, fees1Formatted, inRange: true, valueUsd, feesUsd, … }, …]
+        </script>
         <div class="row">
           <label for="lpMints">mint</label>
           <textarea id="lpMints" placeholder="仓位 NFT / LP 代币的 mint，每行一个（可选）。留空时扫描地址的全部代币账户，需要自己的节点" spellcheck="false"></textarea>
@@ -89,15 +136,38 @@
         <div class="result" id="lpResult"></div>
       </section>
 
-      <section class="card">
-        <h2>添加 / 移除流动性 <small class="muted">子路径 /liquidity：build* 只构建（报价 + 要执行的指令），连接钱包后可以直接发送</small></h2>
-        <div class="row">
-          <label>钱包</label>
-          <div class="inline">
-            <span class="wallet-info" id="walletInfo">未连接（只构建时用上面“地址”栏的地址）</span>
-            <button id="connectWallet">连接钱包</button>
-          </div>
-        </div>
+      <section class="card" data-group="流动性" data-key="liquidity" data-title="添加 / 移除流动性" data-mode="mixed" data-wallet data-desc="新建、追加、移除仓位：先报价并构建指令，确认后用钱包发送。">
+        <h2>添加 / 移除流动性<small class="muted">子路径 /liquidity：build* 只构建（报价 + 要执行的指令），连接钱包后可以直接发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { SolanaClient } from '@w3lib/solana-batch-call'
+          import { buildAddLiquidity, buildRemoveLiquidity } from '@w3lib/solana-batch-call/liquidity'
+          import { getLpPositions } from '@w3lib/solana-batch-call/lp'
+
+          const client = new SolanaClient() // 或 new SolanaClient('https://my-rpc.example')
+          const pool = '3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv' // Raydium CLMM SOL / USDC
+          // 新建仓位：价格是“1 个 token0 值多少 token1”（不给区间时 fullRange: true），给一边的数量
+          const plan = await buildAddLiquidity(client, owner, { protocol: 'raydium-clmm', pool, priceLower: 140, priceUpper: 160, amount0Formatted: '0.01' }, { slippage: 0.005, native: true })
+          // 已有仓位：直接用 getLpPositions 的结果；percent 按比例移除，burn: true 全部移除并关闭仓位
+          const [position] = await getLpPositions(owner, { mints: [positionMint] }) // 或 { protocol: 'raydium-clmm', positionMint }
+          if (!position) throw new Error('没有这个仓位')
+          const removal = await buildRemoveLiquidity(client, owner, { position, percent: 50 })
+          // { type: 'clmm', token0: { mint, symbol: 'SOL', decimals: 9 }, token1, tickLower, tickUpper, price, liquidity, amount0Formatted, amount1Formatted,
+          //   amount0Max, amount1Max, native: 'token0', positionMint, steps: [{ kind: 'setup', instructions }, { kind: 'add', instructions }], signers }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { addLiquidity, collectFees, removeLiquidity, type SignerInput } from '@w3lib/solana-batch-call/liquidity'
+
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          // 构建后签名发送：SOL 自动包装 / 解包，新仓位 NFT 的临时密钥由库一起签名
+          const res = await addLiquidity(client, signer, { protocol: 'orca-whirlpool', pool: 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE', fullRange: true, amount0Formatted: '0.01' }, {
+            slippage: 0.005,
+            onUpdate: (r) => console.log(r.kind, r.status),
+          })
+          await removeLiquidity(client, signer, { position, burn: true }) // 全部移除并关闭仓位（退回租金）
+          await collectFees(client, signer, { position })                 // 只领取手续费和奖励
+          // res: { status: 'confirmed', signature: '5x…', plan, results: [{ index: 0, kind: 'add', status: 'confirmed', signature, fee: '5000', error: null, … }] }
+        </script>
         <div class="row">
           <label for="liqAction">操作</label>
           <select id="liqAction">
@@ -134,7 +204,7 @@
         <div id="liqExisting" hidden>
           <div class="row">
             <label for="liqPosition">仓位</label>
-            <select id="liqPosition"><option value="">先在上面“LP 仓位”里查询</option></select>
+            <div class="inline"><select id="liqPosition"><option value="">点右边“加载我的仓位”，或在“LP 仓位”页查询</option></select><button id="liqLoad" type="button">加载我的仓位</button><span class="stats" id="liqLoadStatus"></span></div>
           </div>
           <div class="row" id="liqAddAmounts">
             <label>数量</label>
@@ -155,7 +225,7 @@
           <span class="checks"><label>滑点 <input id="liqSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <span class="checks"><label><input type="checkbox" id="liqNative" checked /> SOL 那一边自动包装 / 解包</label></span>
           <button class="primary" id="runLiqBuild">报价（只构建）</button>
-          <button class="primary" id="runLiqSend">发送（钱包确认）</button>
+          <button class="primary send" id="runLiqSend">发送（钱包确认）</button>
           <span class="stats" id="liqStats"></span>
         </div>
         <p class="hint">
@@ -165,8 +235,19 @@
         <div class="result" id="liqResult"></div>
       </section>
 
-      <section class="card">
-        <h2>NFT <small class="muted">getNfts / getNftOwners / getOwnerNfts：Metaplex 元数据、持有人</small></h2>
+      <section class="card" data-group="资产查询" data-key="nft" data-needs-node="“持有的 NFT”和“NFT 持有人”需要自己的节点；按 mint 查 NFT 详情不需要。" data-title="NFT" data-mode="read" data-desc="查 Metaplex NFT 的元数据、持有人和地址持有的 NFT。">
+        <h2>NFT<small class="muted">getNfts / getNftOwners / getOwnerNfts：Metaplex 元数据、持有人</small></h2>
+        <script type="text/plain" data-usage>
+          import { getNftOwners, getNfts, getOwnerNfts } from '@w3lib/solana-batch-call'
+
+          const mints = ['7ueb3syffyNdjYHcvZ3YHFvqRbn3kvtNGefBpf6Ledya'] // Mad Lads #954
+          const node = { provider: 'https://my-rpc.example' } // 持有人、地址持有的 NFT 要用支持索引方法的节点
+          // 同时发出：同一个节点的调用合并成一个 JSON-RPC 批量请求
+          const [nfts, owners] = await Promise.all([getNfts(mints, node), getNftOwners(mints, node)])
+          // nfts: [{ mint, name, symbol, uri, collection: { address, verified: true }, creators, sellerFeeBasisPoints: 500, tokenStandard: 'ProgrammableNonFungible', success: true }]
+          // owners: [{ mint, owner, tokenAccount, success: true }]
+          const held = await getOwnerNfts(owner, node) // 地址持有的全部 NFT，元素同 nfts
+        </script>
         <div class="row">
           <label for="nftMints">mint</label>
           <textarea id="nftMints" placeholder="NFT 的 mint 地址，每行一个" spellcheck="false"></textarea>
@@ -184,8 +265,21 @@
         <div class="result" id="ownerNftsResult"></div>
       </section>
 
-      <section class="card">
-        <h2>价格 <small class="muted">子路径 /price：getTokenPrices（DefiLlama，没有收录的从链上 Raydium / Orca 池子算）、getPortfolio（资产总值）</small></h2>
+      <section class="card" data-group="资产查询" data-key="price" data-needs-node="资产总值取消“只算列出的代币”或计入 LP 时，需要自己的节点。" data-title="价格 / 资产总值" data-mode="read" data-desc="查代币美元价格，或算整个地址的资产总值。">
+        <h2>价格<small class="muted">子路径 /price：getTokenPrices（DefiLlama，没有收录的从链上 Raydium / Orca 池子算）、getPortfolio（资产总值）</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_MINT } from '@w3lib/solana-batch-call'
+          import { getPortfolio, getTokenPrices } from '@w3lib/solana-batch-call/price'
+
+          const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          const JUP = 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'
+          // DefiLlama 价格，没有收录的从链上 Raydium / Orca 池子算
+          const prices = await getTokenPrices([NATIVE_MINT, USDC, JUP])
+          // [{ token: 'So111…112', native: true, price: 187.4, source: 'defillama' }, …]
+          // 资产总值：tokens 按 ATA 读余额（免费节点也能用，不传时列出全部持仓，需要自己的节点）；lp 加上 LP 仓位（参数同 getLpPositions）
+          const p = await getPortfolio(owner, { tokens: [NATIVE_MINT, USDC, JUP], lp: { mints: [positionMint] } })
+          // { totalUsd, tokensUsd, lpUsd, unpriced, tokens: [...按价值排序], lp: [...LP 仓位] }
+        </script>
         <div class="row">
           <label for="priceMints">代币</label>
           <textarea id="priceMints" placeholder="mint 地址，每行一个（SOL 自动加上）" spellcheck="false"></textarea>
@@ -197,15 +291,38 @@
         <div class="result" id="pricesResult"></div>
         <div class="actions">
           <span class="checks"><label><input type="checkbox" id="portfolioListed" checked /> 只算上面列出的代币（取消：地址的全部持仓，需要自己的节点）</label></span>
-          <span class="checks"><label><input type="checkbox" id="portfolioLp" /> 加上 LP 仓位（用“LP 仓位”里的 mint / 池子；留空时扫描全部代币账户，需要自己的节点）</label></span>
+          <span class="checks"><label><input type="checkbox" id="portfolioLp" /> 加上 LP 仓位（用<a href="#/lp">“LP 仓位”里</a>的 mint / 池子；留空时扫描全部代币账户，需要自己的节点）</label></span>
           <button class="primary" id="runPortfolio">查询资产总值</button>
           <span class="stats" id="portfolioStats"></span>
         </div>
         <div class="result" id="portfolioResult"></div>
       </section>
 
-      <section class="card">
-        <h2>授权管理 <small class="muted">子路径 /approvals：代币账户的授权（delegate）、可以关闭回收租金的空账户，批量撤销 / 关闭</small></h2>
+      <section class="card" data-group="安全" data-key="approvals" data-needs-node="不填代币 mint 时要列出地址的全部代币账户，需要自己的节点。" data-title="授权" data-mode="mixed" data-wallet data-desc="查代币账户的 delegate 授权和可关闭的空账户，批量撤销 / 关闭。">
+        <h2>授权管理<small class="muted">子路径 /approvals：代币账户的授权（delegate）、可以关闭回收租金的空账户，批量撤销 / 关闭</small></h2>
+        <script type="text/plain" data-usage="查询">
+          import { getApprovals } from '@w3lib/solana-batch-call/approvals'
+
+          const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          const BONK = 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'
+          // 指定代币：读 ATA（免费节点也能用）；不传 mints 时列出全部代币账户（需要自己的节点）；all: true 含没有授权、有余额的
+          const list = await getApprovals(owner, { mints: [USDC, BONK], all: false })
+          // [{ account, mint: USDC, symbol: 'USDC', amount: '1500000', formatted: '1.5', delegate: 'GYFk…', delegatedAmount: '1000000',
+          //    revocable: true, closable: false, closeBlocker: 'balance', lamports: '2039280', withheldAmount: '0', permanentDelegate: null, … }, …]
+        </script>
+        <script type="text/plain" data-usage="撤销 / 关闭">
+          import { SolanaClient } from '@w3lib/solana-batch-call'
+          import { buildRevokes, closeTokenAccounts, revokeApprovals } from '@w3lib/solana-batch-call/approvals'
+          import type { SignerInput } from '@w3lib/solana-batch-call/write'
+
+          const client = new SolanaClient()
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          const calls = buildRevokes(list)                                   // 只构建（buildCloses 同理）：每个账户一个调用 { kind, account, instructions, … }
+          await revokeApprovals(client, signer, list.filter((a) => a.revocable)) // 撤销 delegate；dryRun: true 只模拟
+          await closeTokenAccounts(client, signer, list.filter((a) => a.closable), { destination: coldWallet }) // 关闭空账户，租金退给 destination（默认 owner）
+          // [{ index: 0, from, status: 'confirmed', signature: '5x…', fee: '5000', error: null, … }, …]
+        </script>
         <div class="row">
           <label for="apprMints">代币</label>
           <textarea id="apprMints" placeholder="mint 地址，每行一个：读这些代币的关联代币账户（免费节点也能用）。留空时列出地址的全部代币账户，需要自己的节点" spellcheck="false"></textarea>
@@ -228,16 +345,101 @@
         </div>
         <div class="actions">
           <button class="primary" id="runApprBuild">构建（只看指令）</button>
-          <button class="primary" id="runApprSend">发送（钱包确认）</button>
+          <button class="primary send" id="runApprSend">发送（钱包确认）</button>
         </div>
         <p class="hint">
-          撤销 / 关闭只处理上面最近一次查询出的账户，钱包要是这些账户的 owner（在“添加 / 移除流动性”里连接钱包）。关闭账户会退回租金并去掉授权，不可恢复；发送在钱包里确认，交易真实上链。
+          撤销 / 关闭只处理上面最近一次查询出的账户，钱包要是这些账户的 owner（在顶部连接钱包）。关闭账户会退回租金并去掉授权，不可恢复；发送在钱包里确认，交易真实上链。
         </p>
         <div class="result" id="apprResult"></div>
       </section>
 
-      <section class="card">
-        <h2>域名解析 <small class="muted">子路径 /names：SNS（Bonfida，.sns）名字 → 地址、地址 → 主域名</small></h2>
+      <section class="card" data-group="领取与回收" data-key="reclaim" data-needs-node="不填 mint 时要扫描地址的全部账户，需要自己的节点。" data-title="账户回收" data-mode="mixed" data-wallet data-desc="关闭空账户、垃圾币账户、Wrapped SOL 和已清空的仓位，退回租金。">
+        <h2>账户回收<small class="muted">子路径 /reclaim：空代币账户、垃圾币（销毁后关闭）、Wrapped SOL、已清空的 Orca / Raydium CLMM 仓位，关闭后退回租金（SOL）</small></h2>
+        <script type="text/plain" data-usage="扫描">
+          import { getReclaimable } from '@w3lib/solana-batch-call/reclaim'
+
+          // 免费节点传 mints 只看这些代币的 ATA；不传时扫描全部代币账户（需要自己的节点）
+          const r = await getReclaimable(owner, { mints: ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'] })
+          // { totalLamports, selectedLamports, items: [{ kind: 'empty-token', account, mint, lamports: '2039280', selected: true, reasons: ['empty'] },
+          //   { kind: 'junk-token', symbol, amount, lamports, selected: false, reasons: ['no-price', 'spam-name'] }, …], blocked: [{ kind, blocker: 'frozen', … }] }
+        </script>
+        <script type="text/plain" data-usage="模拟 / 回收">
+          import { SolanaClient } from '@w3lib/solana-batch-call'
+          import { buildReclaim, reclaim, simulateReclaim } from '@w3lib/solana-batch-call/reclaim'
+          import type { SignerInput } from '@w3lib/solana-batch-call/write'
+
+          const client = new SolanaClient()
+          const items = r.items.filter((i) => i.selected) // 建议勾选的；发送前请让用户确认列表
+          const sim = await simulateReclaim(client, await buildReclaim(client, owner, items))
+          // sim.lamports：预计退回的 lamports；sim.failed：会失败的账户
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          const { results } = await reclaim(client, signer, items) // 构建 → 模拟 → 签名发送；dryRun: true 只模拟
+        </script>
+        <div class="row">
+          <label for="reclaimMints">代币</label>
+          <textarea id="reclaimMints" placeholder="mint 地址，每行一个：只看这些代币的关联代币账户（免费节点也能用）。留空时列出地址的全部代币账户，需要自己的节点" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runReclaim">扫描“地址”栏</button>
+          <button class="primary" id="runReclaimSim">模拟（勾选的）</button>
+          <button class="primary send" id="runReclaimSend">回收（钱包确认）</button>
+          <span class="stats" id="reclaimStats"></span>
+        </div>
+        <p class="hint">
+          只列出能回收的账户；垃圾币的默认勾选很保守（有价格且价值高的、NFT、仓位 NFT 不会出现），没有价格也没有垃圾特征的只列出、不勾选，请自己确认。模拟用 /simulate，不签名；回收会在钱包里确认，垃圾币会被销毁、账户关闭，不可恢复。
+        </p>
+        <div class="result" id="reclaimResult"></div>
+      </section>
+
+      <section class="card" data-group="领取与回收" data-key="claim" data-needs-node="不填 mint 时要扫描地址的全部仓位，需要自己的节点。" data-title="领取手续费和奖励" data-mode="mixed" data-wallet data-desc="批量领取 Orca / Raydium CLMM 仓位的手续费和挖矿奖励。">
+        <h2>批量领取<small class="muted">子路径 /claim：Orca Whirlpool、Raydium CLMM 仓位的未领取手续费和挖矿奖励，预览、模拟、批量领取</small></h2>
+        <script type="text/plain" data-usage="预览">
+          import { getClaimable } from '@w3lib/solana-batch-call/claim'
+
+          // 只读预览：免费节点传 mints（仓位 NFT）只看指定仓位；不传时扫描全部代币账户（需要自己的节点）
+          const c = await getClaimable(owner, { mints: [positionMint] })
+          // { totalUsd, tokens: [...按代币汇总], incomplete: false,
+          //   positions: [{ protocol: 'raydium-clmm', positionMint, pool, inRange, totalUsd: 11.54, fees: [{ symbol: 'SOL', formatted: '0.0606', usd: 6.45 }, …],
+          //                 rewards: [{ index: 0, mint: RAY, symbol: 'RAY', formatted: '0.042698', usd: 0.083 }] }] }
+        </script>
+        <script type="text/plain" data-usage="模拟 / 领取">
+          import { SolanaClient } from '@w3lib/solana-batch-call'
+          import { buildClaimAll, claimAll, simulateClaim } from '@w3lib/solana-batch-call/claim'
+          import type { SignerInput } from '@w3lib/solana-batch-call/write'
+
+          const client = new SolanaClient()
+          const sim = await simulateClaim(client, await buildClaimAll(client, owner, c.positions))
+          // sim.received：收到的各代币合计（带 usd）；sim.failed：会失败的仓位
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          const res = await claimAll(client, signer, c.positions) // 构建 → 模拟 → 签名发送；dryRun: true 只模拟，minUsd 跳过太小的
+          // res: { plan, simulation, results: [{ index: 0, status: 'confirmed', signature: '5x…', … }] }
+        </script>
+        <div class="actions">
+          <button class="primary" id="runClaim">预览“地址”栏</button>
+          <button class="primary" id="runClaimSim">模拟领取</button>
+          <button class="primary send" id="runClaimSend">领取全部（钱包确认）</button>
+          <span class="stats" id="claimStats"></span>
+        </div>
+        <p class="hint">
+          预览只读取、不发交易；扫描仓位用<a href="#/lp">“LP 仓位”里</a>的 mint（留空时列出地址的全部代币账户，需要自己的节点）。模拟和领取处理最近一次预览出的全部仓位，钱包要是仓位的 owner。
+        </p>
+        <div class="result" id="claimResult"></div>
+      </section>
+
+      <section class="card" data-group="工具" data-key="names" data-title="域名" data-mode="read" data-desc="SNS（.sns）名字和地址互相解析。">
+        <h2>域名解析<small class="muted">子路径 /names：SNS（Bonfida，.sns）名字 → 地址、地址 → 主域名</small></h2>
+        <script type="text/plain" data-usage>
+          import { getAddressNames, getNameAddresses } from '@w3lib/solana-batch-call/names'
+
+          // 名字 → 地址：默认只认 .sns；legacySol: true 时 .sol 按同名的 .sns 解析；allowPda: true 时 owner 是 PDA 也返回
+          const list = await getNameAddresses(['bonfida.sns', 'toly.sns'], { legacySol: false, allowPda: false })
+          // [{ name: 'bonfida.sns', normalized: 'bonfida.sns', address: 'Fw1E…Lb1v', owner: 'Fw1E…Lb1v', source: 'owner', service: 'sns' }, …]
+          // 地址 → 主域名（核对域名仍属于这个地址）
+          const names = await getAddressNames([owner])
+          // [{ address: owner, name: 'couponvault.sns', service: 'sns' }]
+        </script>
         <div class="row">
           <label for="nameList">名字</label>
           <textarea id="nameList" placeholder="域名，每行一个" spellcheck="false"></textarea>
@@ -256,8 +458,19 @@
         <div class="result" id="namesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>手续费 <small class="muted">子路径 /fees：三档优先费建议，一笔交易的花费（基础费 + 优先费 + 新建账户的押金）</small></h2>
+      <section class="card" data-group="工具" data-key="fees" data-title="手续费 / 优先费" data-mode="read" data-desc="三档优先费建议，或估算一笔交易的花费。">
+        <h2>手续费<small class="muted">子路径 /fees：三档优先费建议，一笔交易的花费（基础费 + 优先费 + 新建账户的押金）</small></h2>
+        <script type="text/plain" data-usage>
+          import { getCostEstimate, getFeeEstimate } from '@w3lib/solana-batch-call/fees'
+          import { systemTransfer } from '@w3lib/solana-batch-call/write'
+
+          // 三档优先费（micro-lamports / 计算单元）：只看会写这些账户的交易，不传 accounts 看全网
+          const fees = await getFeeEstimate({ accounts: ['3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv'] })
+          // { slow: '0', normal: '1166', fast: '10000', slots: 150 }
+          // 一笔交易的花费：只模拟、不签名不发送；这里是转给自己 0.000001 SOL
+          const cost = await getCostEstimate({ feePayer: owner, instructions: [systemTransfer(owner, owner, 1000n)] })
+          // { computeUnits, computeUnitLimit, priorityFee: '1166', signatures: 1, baseFee: '5000', priorityFeeLamports, fee, rent: '0', createdAccounts: [], total, totalFormatted, symbol: 'SOL' }
+        </script>
         <div class="row">
           <label for="feeAccounts">账户</label>
           <textarea id="feeAccounts" placeholder="可写账户（如要交易的池子），每行一个（可选）：只看会写这些账户的交易。留空看全网，大多是 0" spellcheck="false"></textarea>
@@ -271,8 +484,30 @@
         <div class="result" id="feesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>兑换 <small class="muted">子路径 /swap：Raydium CLMM / Orca Whirlpool / Raydium CPMM / AMM v4 的池子里找最好的路线，本地报价，连接钱包后可以发送</small></h2>
+      <section class="card" data-group="交易" data-key="swap" data-title="兑换" data-mode="mixed" data-wallet data-desc="在 Raydium / Orca 池子里找最好的路线并报价，确认后用钱包发送。">
+        <h2>兑换<small class="muted">子路径 /swap：Raydium CLMM / Orca Whirlpool / Raydium CPMM / AMM v4 的池子里找最好的路线，本地报价，连接钱包后可以发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { NATIVE_MINT, SolanaClient } from '@w3lib/solana-batch-call'
+          import { getSwapQuote } from '@w3lib/solana-batch-call/swap'
+
+          const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
+          const params = { tokenIn: NATIVE_MINT, tokenOut: USDC, amountInFormatted: '0.01' }
+          // Raydium CLMM / Orca / CPMM 的池子按 PDA 自动找（直接或两跳）；AMM v4 的池子放进 pools 才会用
+          const options = { slippage: 0.005, native: true, pools: ['58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2'] }
+          const plan = await getSwapQuote(owner, params, options)
+          // { amountOut: '104338470', amountOutFormatted: '104.33847', amountOutMin: '103816777', price: 104.338, priceImpact: 0.00003,
+          //   route: { path, hops: [{ protocol: 'raydium-clmm', pool, amountIn, amountOut, amountOutMin }] }, routes, leftover: null, native: 'tokenIn', skipped, steps }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { swap, type SignerInput } from '@w3lib/solana-batch-call/swap'
+
+          const client = new SolanaClient() // 或 new SolanaClient('https://my-rpc.example')
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          // 重新报价 → 模拟 → 钱包确认 → 发送；卖出的余额不够时不发
+          const res = await swap(client, signer, params, { ...options, onUpdate: (r) => console.log(r.kind, r.status) })
+          // { status: 'confirmed', signature: '5x…', plan, results: [{ index: 0, kind: 'swap', status: 'confirmed', signature, fee: '5000', error: null, … }] }
+        </script>
         <div class="row">
           <label for="swapIn">卖出</label>
           <div class="inline">
@@ -292,7 +527,7 @@
           <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <span class="checks"><label><input type="checkbox" id="swapNative" checked /> SOL 那一边自动包装 / 解包</label></span>
           <button class="primary" id="runSwapQuote">报价（只构建）</button>
-          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <button class="primary send" id="runSwapSend">发送（钱包确认）</button>
           <span class="stats" id="swapStats"></span>
         </div>
         <p class="hint">
@@ -301,8 +536,53 @@
         <div class="result" id="swapResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币风险 <small class="muted">子路径 /risk：增发 / 冻结权限，Token-2022 里影响持有人的扩展；可选模拟买入再卖出判断能不能卖</small></h2>
+      <section class="card" data-group="交易" data-key="batch-transfer" data-title="批量转账" data-mode="write" data-wallet data-desc="用连接的钱包一次转给多个地址（SOL 或某个代币），默认只模拟不发送。">
+        <h2>批量转账 <small class="muted">子路径 /write：batchTransfer：多个收款人打包进同一笔交易（超过 1232 字节自动分笔）</small></h2>
+        <script type="text/plain" data-usage>
+          import { SolanaClient } from '@w3lib/solana-batch-call'
+          import { batchTransfer, type SignerInput } from '@w3lib/solana-batch-call/write'
+
+          const client = new SolanaClient()
+          const conn = wallet.getConnection('solana')!                                  // @w3lib/wallet 连接的 Wallet Standard 钱包
+          const signer = { wallet: conn.provider, account: conn.address } as SignerInput   // 也可以直接传私钥（base58 / Uint8Array / Keypair）
+          // 多个收款人打包进同一笔交易（超过 1232 字节自动分笔）；不传 token 时转 SOL，代币收款人没有 ATA 时自动创建
+          const results = await batchTransfer(client, signer, [
+            { to: '86xCnPeV69n6t3DnyGvkKobf9FdN2H9oiVDdaMpo2MMY', formatted: '0.5' },
+            { to: '7MNmCGMgdSzMzwNhQKCAs82pd5odi4xjg4VtUU7WiCNk', formatted: '20' },
+          ], { token: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', dryRun: true }) // dryRun：只模拟，不发送
+          // [{ index: 0, from, to, token, native: false, amount: '500000', formatted: '0.5', createdAccount: false, status: 'simulated', signature: null, fee: '5000', error: null, … }, …]
+        </script>
+        <div class="row">
+          <label for="btRecipients">收款</label>
+          <textarea id="btRecipients" placeholder="每行一个：地址 数量（按代币单位，如 5tzF… 0.5）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="btToken">代币</label>
+          <input id="btToken" placeholder="代币 mint（留空：转 SOL）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="btDry" checked /> 只模拟，不发送</label></span>
+          <button class="primary send" id="runBt">执行</button>
+          <span class="stats" id="btStats"></span>
+        </div>
+        <p class="hint">一笔交易装不下时自动分笔；代币收款人没有关联代币账户时自动创建（由你出租金）。取消勾选“只模拟”后会弹出确认再发送，钱包里还要再确认。归集（多个钱包 → 一个地址）和通用批量调用要多个钱包的私钥，不放进浏览器 demo，用法见 README 的“批量写操作”。</p>
+        <div class="result" id="btResult"></div>
+      </section>
+
+      <section class="card" data-group="安全" data-key="risk" data-title="代币风险" data-mode="read" data-desc="检查增发 / 冻结权限和 Token-2022 扩展，可选模拟买入再卖出。">
+        <h2>代币风险<small class="muted">子路径 /risk：增发 / 冻结权限，Token-2022 里影响持有人的扩展；可选模拟买入再卖出判断能不能卖</small></h2>
+        <script type="text/plain" data-usage>
+          import { getTokenRisks, getTradeChecks } from '@w3lib/solana-batch-call/risk'
+
+          const PYUSD = '2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo'
+          // 权限和 Token-2022 扩展，一次 getMultipleAccounts；concentration 用 getTokenLargestAccounts（免费节点大多不支持）
+          const [risk] = await getTokenRisks([PYUSD], { concentration: false })
+          // { program: 'token-2022', mintAuthority: '22mK…', freezeAuthority: '2apB…', permanentDelegate: '2apB…', transferFee: { basisPoints: 0, … },
+          //   flags: ['mintable', 'freezable', 'fee-changeable', 'permanent-delegate', 'transfer-hook', 'confidential-transfer', 'closable'] }
+          // 模拟“SOL 买入 → 全部卖回”（不签名、不上链）：owner 要有足够的 SOL
+          const [trade] = await getTradeChecks(['JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'], { owner, amountFormatted: '0.05' })
+          // { stage: 'ok', honeypot: false, roundTripLoss: 0.0002, bought: '20828496', sold: '198960224', buyRoute: [{ protocol: 'orca-whirlpool', pool }] }
+        </script>
         <div class="row">
           <label for="riskMints">代币</label>
           <textarea id="riskMints" placeholder="mint 地址，每行一个" spellcheck="false"></textarea>
@@ -320,6 +600,53 @@
         </div>
         <p class="hint">模拟买卖用连接的钱包地址（没连接时用“地址”栏的），需要有足够的 SOL；只在节点上模拟，不发送、不扣费。</p>
         <div class="result" id="tradeResult"></div>
+      </section>
+
+      <section class="card" data-group="安全" data-key="simulate" data-title="交易模拟" data-mode="read" data-desc="发送前预演一笔交易：余额变化、授权变化、程序错误和警告。">
+        <h2>交易模拟<small class="muted">子路径 /simulate：余额变化、授权变化、指令说明、程序错误、警告；不签名、不发送</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_MINT } from '@w3lib/solana-batch-call'
+          import { getSimulation } from '@w3lib/solana-batch-call/simulate'
+          import { getSwapQuote } from '@w3lib/solana-batch-call/swap'
+
+          // 输入可以是本库构建器的输出（这里是 /swap 的报价），也可以是 base64 的交易：getSimulation(base64Tx, { owner })
+          const plan = await getSwapQuote(owner, { tokenIn: NATIVE_MINT, tokenOut: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amountInFormatted: '0.1' })
+          const sim = await getSimulation(plan, { owner, prices: true }) // 余额变化按 owner 算，prices 加美元价值
+          // { success: true, gasUsed: '112394', fee: '5000', balanceChanges: [{ address: owner, asset: 'native', symbol: 'SOL', delta: '-100000000', formatted: '-0.1', usd: -10.68 }, …],
+          //   approvalChanges: [], decoded: { type: 'swap', protocol: 'Orca', summary: 'Swap 0.1 SOL for 10.677005 USDC on Orca', … }, warnings: [], logs, signers, version: 'legacy' }
+          if (!sim.success || sim.warnings.some((w) => w.severity === 'danger')) throw new Error(sim.error ?? sim.warnings[0]?.message)
+        </script>
+        <div class="row">
+          <label for="simTx">交易</label>
+          <textarea id="simTx" placeholder="base64 的交易（legacy / v0）；留空则模拟“用 0.1 SOL 兑换 USDC”（本库 /swap 构建）" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button class="primary" id="runSim">模拟</button>
+          <span class="stats" id="simStats"></span>
+        </div>
+        <p class="hint">以连接的钱包地址（没连接时用“地址”栏的）为准算余额变化；交易里的手续费支付者不是它时，余额变化按它自己的账户算。</p>
+        <div class="result" id="simResult"></div>
+      </section>
+
+      <section class="card" data-group="工具" data-key="history" data-title="历史记录" data-mode="read" data-desc="查地址的兑换、转账、授权、流动性等历史。">
+        <h2>交易历史<small class="muted">子路径 /history：兑换、转账、授权、流动性、铸造、失败；游标是最后一条签名</small></h2>
+        <script type="text/plain" data-usage>
+          import { getHistory } from '@w3lib/solana-batch-call/history'
+
+          // 默认数据源是节点（getSignaturesForAddress + getTransaction）；types 过滤类型，cursor 翻页（最后一条签名）
+          const page = await getHistory(owner, { limit: 10, types: ['swap'] })
+          const next = await getHistory(owner, { limit: 10, types: ['swap'], cursor: page.nextCursor })
+          // { items: [{ hash, time, block, status: 'success', type: 'swap', label: 'Swap 2.57 SOL for 274.47 USDC on Jupiter', protocol: 'Jupiter',
+          //             changes: [{ asset: 'native', symbol: 'SOL', delta: '-2569401878', formatted: '-2.569401878' }, …], fee: '5000' }, …], nextCursor: '4jNtY56m…' }
+        </script>
+        <div class="actions">
+          <span class="checks"><label>条数 <input id="histLimit" class="small" value="10" spellcheck="false" /></label></span>
+          <span class="checks"><label>类型 <select id="histType"><option value="">全部</option><option>swap</option><option>transfer</option><option>approve</option><option>liquidity</option><option>mint</option><option>contract</option></select></label></span>
+          <button class="primary" id="runHist">查询</button>
+          <button id="runHistMore">下一页</button>
+          <span class="stats" id="histStats"></span>
+        </div>
+        <div class="result" id="histResult"></div>
       </section>
     </main>
 

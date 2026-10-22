@@ -60,6 +60,22 @@
     "./risk": {
       "types": "./dist/subpaths/risk.d.ts",
       "import": "./dist/subpaths/risk.js"
+    },
+    "./simulate": {
+      "types": "./dist/subpaths/simulate.d.ts",
+      "import": "./dist/subpaths/simulate.js"
+    },
+    "./history": {
+      "types": "./dist/subpaths/history.d.ts",
+      "import": "./dist/subpaths/history.js"
+    },
+    "./reclaim": {
+      "types": "./dist/subpaths/reclaim.d.ts",
+      "import": "./dist/subpaths/reclaim.js"
+    },
+    "./claim": {
+      "types": "./dist/subpaths/claim.d.ts",
+      "import": "./dist/subpaths/claim.js"
     }
   },
   "files": [
@@ -86,6 +102,10 @@
     "test:live:fees": "LIVE=1 vitest run test/fees-live.test.ts",
     "test:live:swap": "LIVE=1 vitest run test/swap-live.test.ts",
     "test:live:risk": "LIVE=1 vitest run test/risk-live.test.ts",
+    "test:live:simulate": "LIVE=1 vitest run test/simulate-live.test.ts",
+    "test:live:history": "LIVE=1 vitest run test/history-live.test.ts",
+    "test:live:reclaim": "LIVE=1 vitest run test/reclaim-live.test.ts",
+    "test:live:claim": "LIVE=1 vitest run test/claim-live.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "demo": "vite demo",
     "demo:build": "vite build demo"

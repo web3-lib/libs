@@ -5,7 +5,19 @@ import { decodeAddress, encodeAddress, findProgramAddress, isAddress } from './a
 import type { RequestOptions, SolanaClient } from './client.js'
 import { formatUnits, parseMint, parseTokenAccount, type AccountInfo } from './layout.js'
 import { AllNodesFailedError, HttpError, RpcError } from './rpc.js'
-import { getAmountsForLiquidity, getFeeGrowthInside, getFeesOwed, orcaSqrtPriceAtTick, raydiumSqrtPriceAtTick, sqrtPriceToPrice, tickToPrice, type TickFeeData } from './lpMath.js'
+import {
+  getAmountsForLiquidity,
+  getFeeGrowthInside,
+  getFeesOwed,
+  getRewardGrowthInside,
+  orcaSqrtPriceAtTick,
+  raydiumSqrtPriceAtTick,
+  rewardGrowthGlobal,
+  sqrtPriceToPrice,
+  tickToPrice,
+  type RewardEmission,
+  type TickFeeData,
+} from './lpMath.js'
 import { defillamaPrices, type SolanaPriceSource } from './price.js'
 
 export const RAYDIUM_CLMM_PROGRAM_ID = 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'
@@ -97,6 +109,24 @@ export interface SolanaLpClmmPosition extends SolanaLpPositionBase {
   fees1Formatted: string | null
   /** 开启 prices 时：未领取手续费的美元价值（手续费为 null 或缺价格时为 null） */
   feesUsd?: number | null
+  /** 开启 rewards 时：未领取的挖矿奖励（池子里已初始化的每个奖励一项，数量为 0 的也在） */
+  rewards?: SolanaLpReward[]
+  /** 开启 rewards 和 prices 时：未领取挖矿奖励的美元价值（有数量的奖励缺价格或读不到时为 null） */
+  rewardsUsd?: number | null
+}
+
+/** 集中流动性仓位未领取的挖矿奖励（Raydium CLMM reward_infos / Orca Whirlpool reward_infos） */
+export interface SolanaLpReward {
+  /** 奖励在池子里的位置（0~2） */
+  index: number
+  mint: string
+  symbol: string | null
+  decimals: number | null
+  /** 未领取的数量（最小单位）：已记账的 + 按池子最新状态结算的新增；读不到两端的 tick 数据时为 null */
+  amount: string | null
+  formatted: string | null
+  /** 开启 prices 时：美元价值（没有价格时为 null） */
+  usd?: number | null
 }
 
 export type SolanaLpPosition = SolanaLpAmmPosition | SolanaLpClmmPosition
@@ -116,6 +146,13 @@ export interface LpPositionsOptions extends RequestOptions {
   pools?: readonly string[]
   /** 返回已清空的仓位（流动性为 0、手续费也领完，NFT 还在）。默认 false */
   includeClosed?: boolean
+  /**
+   * 集中流动性仓位同时算未领取的挖矿奖励（Raydium CLMM 农场奖励、Orca 的奖励 slot），放在 rewards 字段，照搬程序的结算：
+   * 池子的奖励增长按时间摊给当前流动性，再按仓位区间内的增长计算。默认 false。有奖励没领的仓位不算“已清空”
+   */
+  rewards?: boolean
+  /** rewards 结算到哪个时刻（unix 秒），默认当前时间；链上用的是区块时间，差几秒影响很小 */
+  now?: number
   /** 查美元价值：true 用 DefiLlama，也可以传自己的 SolanaPriceSource（如 /price 的 combinePrices([defillamaPrices(), onchainPrices()])）。默认不查 */
   prices?: boolean | SolanaPriceSource
   /**
@@ -160,6 +197,7 @@ export class Bytes {
   }
 }
 
+const ZERO_ADDRESS = '11111111111111111111111111111111'
 const RAYDIUM_POSITION_SIZE = 281
 const ORCA_POSITION_SIZE = 216
 /** 池子账户至少要读到的长度（Raydium PoolState 实际 1544 字节，Orca Whirlpool 653 字节） */
@@ -172,7 +210,7 @@ const RAYDIUM_TICK_SIZE = 168
 const ORCA_TICK_ARRAY_SIZE = 88
 const ORCA_TICK_SIZE = 113
 
-interface ClmmPositionState {
+export interface ClmmPositionState {
   protocol: 'raydium-clmm' | 'orca-whirlpool'
   address: string
   mint: string
@@ -184,7 +222,11 @@ interface ClmmPositionState {
   growthLast1: bigint
   owed0: bigint
   owed1: bigint
+  /** 三个挖矿奖励：上次记录的区间内增长、已记账未领取的数量 */
+  rewards: Array<{ growthLast: bigint; owed: bigint }>
 }
+
+const positionRewards = (b: Bytes, offset: number) => [0, 1, 2].map((i) => ({ growthLast: b.u128(offset + i * 24), owed: b.u64(offset + i * 24 + 16) }))
 
 function raydiumPosition(address: string, b: Bytes): ClmmPositionState {
   return {
@@ -199,6 +241,7 @@ function raydiumPosition(address: string, b: Bytes): ClmmPositionState {
     growthLast1: b.u128(113),
     owed0: b.u64(129),
     owed1: b.u64(137),
+    rewards: positionRewards(b, 145),
   }
 }
 
@@ -215,7 +258,19 @@ function orcaPosition(address: string, b: Bytes): ClmmPositionState {
     owed0: b.u64(112),
     growthLast1: b.u128(120),
     owed1: b.u64(136),
+    rewards: positionRewards(b, 144),
   }
+}
+
+/** 按程序和账户大小解析仓位账户（Raydium PersonalPositionState 281 字节、Orca Position 216 字节）；不是仓位账户时为 null */
+export function parseClmmPosition(protocol: 'raydium-clmm' | 'orca-whirlpool', address: string, account: AccountInfo): ClmmPositionState | null {
+  if (protocol === 'raydium-clmm' && account.owner === RAYDIUM_CLMM_PROGRAM_ID && account.data.length === RAYDIUM_POSITION_SIZE) {
+    return raydiumPosition(address, new Bytes(account.data))
+  }
+  if (protocol === 'orca-whirlpool' && account.owner === ORCA_WHIRLPOOL_PROGRAM_ID && account.data.length === ORCA_POSITION_SIZE) {
+    return orcaPosition(address, new Bytes(account.data))
+  }
+  return null
 }
 
 interface ClmmPoolState {
@@ -231,6 +286,41 @@ interface ClmmPoolState {
   /** Orca：池子里的费率；Raydium：在 AmmConfig 里，ammConfig 为它的地址 */
   fee: number | null
   ammConfig: string | null
+  /** 当前区间内的流动性 */
+  liquidity: bigint
+  /** 已初始化的挖矿奖励（index 是在池子里的位置） */
+  rewards: Array<{ index: number; mint: string; emission: RewardEmission }>
+}
+
+const U64_MAX_VALUE = (1n << 64n) - 1n
+
+/** Raydium reward_infos（每个 169 字节，从 397 开始）：open_time +1、end_time +9、last_update_time +17、emissions_per_second_x64 +25、mint +57、growth_global +153 */
+function raydiumRewards(b: Bytes): ClmmPoolState['rewards'] {
+  if (b.data.length < 397 + 3 * 169) {
+    return []
+  }
+  return [0, 1, 2].flatMap((index) => {
+    const o = 397 + index * 169
+    const mint = b.key(o + 57)
+    return mint === ZERO_ADDRESS
+      ? []
+      : [{ index, mint, emission: { initialized: true, openTime: b.u64(o + 1), endTime: b.u64(o + 9), lastUpdated: b.u64(o + 17), emissionsPerSecondX64: b.u128(o + 25), growthGlobalX64: b.u128(o + 153) } }]
+  })
+}
+
+/** Orca reward_last_updated_timestamp（261）和 reward_infos（每个 128 字节，从 269 开始）：mint +0、emissions_per_second_x64 +96、growth_global +112 */
+function orcaRewards(b: Bytes): ClmmPoolState['rewards'] {
+  if (b.data.length < 269 + 3 * 128) {
+    return []
+  }
+  const lastUpdated = b.u64(261)
+  return [0, 1, 2].flatMap((index) => {
+    const o = 269 + index * 128
+    const mint = b.key(o)
+    return mint === ZERO_ADDRESS
+      ? []
+      : [{ index, mint, emission: { initialized: true, openTime: 0n, endTime: U64_MAX_VALUE, lastUpdated, emissionsPerSecondX64: b.u128(o + 96), growthGlobalX64: b.u128(o + 112) } }]
+  })
 }
 
 function raydiumPool(b: Bytes): ClmmPoolState {
@@ -246,6 +336,8 @@ function raydiumPool(b: Bytes): ClmmPoolState {
     global0: b.u128(277),
     global1: b.u128(293),
     fee: null,
+    liquidity: b.u128(237),
+    rewards: raydiumRewards(b),
   }
 }
 
@@ -262,6 +354,8 @@ function orcaPool(b: Bytes): ClmmPoolState {
     global1: b.u128(245),
     decimals0: null,
     decimals1: null,
+    liquidity: b.u128(49),
+    rewards: orcaRewards(b),
   }
 }
 
@@ -346,7 +440,9 @@ export function orcaTickArray(pool: string, tick: number, spacing: number): { ad
   return { address: findProgramAddress([utf8('tick_array'), decodeAddress(pool), utf8(String(start))], ORCA_WHIRLPOOL_PROGRAM_ID), start }
 }
 
-function raydiumTick(account: AccountInfo, start: number, tick: number, spacing: number): TickFeeData | null {
+const rewardOutside = (b: Bytes, offset: number) => [b.u128(offset), b.u128(offset + 16), b.u128(offset + 32)]
+
+export function raydiumTick(account: AccountInfo, start: number, tick: number, spacing: number): TickFeeData | null {
   raydiumDiscriminator ??= discriminator('TickArrayState')
   const offset = 44 + ((tick - start) / spacing) * RAYDIUM_TICK_SIZE
   // 先认判别符、查长度再读字段（PDA 上可能是别的账户，如被转过 SOL 的系统账户）
@@ -358,7 +454,7 @@ function raydiumTick(account: AccountInfo, start: number, tick: number, spacing:
     return null
   }
   // Raydium 不区分是否初始化：没用过的 tick 各项都是 0，按程序的公式算出来就是对的
-  return { initialized: true, feeGrowthOutside0: b.u128(offset + 36), feeGrowthOutside1: b.u128(offset + 52) }
+  return { initialized: true, feeGrowthOutside0: b.u128(offset + 36), feeGrowthOutside1: b.u128(offset + 52), rewardGrowthsOutside: rewardOutside(b, offset + 68) }
 }
 
 /** Anchor 账户判别符：sha256("account:<名称>") 的前 8 字节 */
@@ -367,7 +463,7 @@ let orcaDiscriminators: { fixed: Uint8Array; dynamic: Uint8Array } | undefined
 let raydiumDiscriminator: Uint8Array | undefined
 const startsWith = (data: Uint8Array, prefix: Uint8Array) => data.length >= prefix.length && prefix.every((byte, i) => data[i] === byte)
 
-function orcaTick(account: AccountInfo, start: number, tick: number, spacing: number): TickFeeData | null {
+export function orcaTick(account: AccountInfo, start: number, tick: number, spacing: number): TickFeeData | null {
   orcaDiscriminators ??= { fixed: discriminator('TickArray'), dynamic: discriminator('DynamicTickArray') }
   if (account.data.length < 60) {
     return null // 两种格式的头部（判别符 + start + …）都放不下
@@ -380,7 +476,7 @@ function orcaTick(account: AccountInfo, start: number, tick: number, spacing: nu
     if (b.i32(8) !== start || offset + ORCA_TICK_SIZE > account.data.length) {
       return null
     }
-    return { initialized: b.u8(offset) === 1, feeGrowthOutside0: b.u128(offset + 33), feeGrowthOutside1: b.u128(offset + 49) }
+    return { initialized: b.u8(offset) === 1, feeGrowthOutside0: b.u128(offset + 33), feeGrowthOutside1: b.u128(offset + 49), rewardGrowthsOutside: rewardOutside(b, offset + 65) }
   }
   if (startsWith(account.data, orcaDiscriminators.dynamic)) {
     // 可变大小：start i32 | whirlpool | tick_bitmap u128 | ticks（未初始化 1 字节 0；初始化 1 字节 1 + 112 字节数据）
@@ -403,7 +499,7 @@ function orcaTick(account: AccountInfo, start: number, tick: number, spacing: nu
     if (offset + 113 > account.data.length) {
       return null
     }
-    return { initialized: true, feeGrowthOutside0: b.u128(offset + 33), feeGrowthOutside1: b.u128(offset + 49) }
+    return { initialized: true, feeGrowthOutside0: b.u128(offset + 33), feeGrowthOutside1: b.u128(offset + 49), rewardGrowthsOutside: rewardOutside(b, offset + 65) }
   }
   return null
 }
@@ -426,6 +522,8 @@ interface RawClmm {
   amount1: bigint
   fees0: bigint | null
   fees1: bigint | null
+  /** rewards 选项开启时：每个已初始化的奖励的未领取数量（读不到 tick 时为 null） */
+  rewards?: Array<{ index: number; mint: string; amount: bigint | null }>
 }
 
 interface RawAmm {
@@ -498,11 +596,9 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
     if (!account) {
       return
     }
-    const program = SOLANA_LP_PROTOCOLS[c.protocol].programId
-    if (c.protocol === 'raydium-clmm' && account.owner === program && account.data.length === RAYDIUM_POSITION_SIZE) {
-      positions.push(raydiumPosition(c.address, new Bytes(account.data)))
-    } else if (c.protocol === 'orca-whirlpool' && account.owner === program && account.data.length === ORCA_POSITION_SIZE) {
-      positions.push(orcaPosition(c.address, new Bytes(account.data)))
+    const parsed = parseClmmPosition(c.protocol, c.address, account)
+    if (parsed) {
+      positions.push(parsed)
     }
   })
   // LP mint 的权限是 AMM v4 / CPMM 的固定权限地址时才去找池子
@@ -605,10 +701,32 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
         fees1 = null
       }
     }
-    if (!options.includeClosed && position.liquidity === 0n && fees0 === 0n && fees1 === 0n) {
+    // 未领取的挖矿奖励：没有流动性时只有已记账的；有流动性时先把池子的奖励增长结算到 now，再按区间内的增长算新增
+    let rewards: RawClmm['rewards']
+    if (options.rewards) {
+      const now = BigInt(Math.floor(options.now ?? Date.now() / 1000))
+      const ticks = (() => {
+        if (!arrays) return null
+        const read = position.protocol === 'raydium-clmm' ? raydiumTick : orcaTick
+        const lowerAccount = byAddress.get(arrays.lower.address)
+        const upperAccount = byAddress.get(arrays.upper.address)
+        const lower = lowerAccount ? read(lowerAccount, arrays.lower.start, position.tickLower, pool.tickSpacing) : null
+        const upper = upperAccount ? read(upperAccount, arrays.upper.start, position.tickUpper, pool.tickSpacing) : null
+        return lower && upper ? { lower, upper } : null
+      })()
+      rewards = pool.rewards.map(({ index, mint, emission }) => {
+        const state = position.rewards[index] as { growthLast: bigint; owed: bigint }
+        if (!arrays) return { index, mint, amount: state.owed }
+        if (!ticks) return { index, mint, amount: null }
+        const global = rewardGrowthGlobal(pool.liquidity, emission, now)
+        const inside = getRewardGrowthInside(pool.tick, position.tickLower, ticks.lower, position.tickUpper, ticks.upper, index, global)
+        return { index, mint, amount: getFeesOwed(state.owed, position.liquidity, inside, state.growthLast) }
+      })
+    }
+    if (!options.includeClosed && position.liquidity === 0n && fees0 === 0n && fees1 === 0n && !rewards?.some((x) => x.amount !== 0n)) {
       continue
     }
-    raw.push({ type: 'clmm', position, pool: { ...pool, fee: pool.fee ?? (pool.ammConfig ? (feeRates.get(pool.ammConfig) ?? null) : null) }, amount0, amount1, fees0, fees1 })
+    raw.push({ type: 'clmm', position, pool: { ...pool, fee: pool.fee ?? (pool.ammConfig ? (feeRates.get(pool.ammConfig) ?? null) : null) }, amount0, amount1, fees0, fees1, rewards })
   }
   for (const pool of ammHeld) {
     const balance = held.get(pool.lpMint)?.amount ?? 0n
@@ -706,7 +824,7 @@ async function findAmmPool(client: SolanaClient, protocol: 'raydium-amm' | 'rayd
 
 async function finalize(client: SolanaClient, raw: readonly (RawClmm | RawAmm)[], options: LpPositionsOptions): Promise<SolanaLpPosition[]> {
   const { signal } = options
-  const mints = [...new Set(raw.flatMap((r) => [r.pool.mint0, r.pool.mint1]))]
+  const mints = [...new Set(raw.flatMap((r) => [r.pool.mint0, r.pool.mint1, ...(r.type === 'clmm' ? (r.rewards ?? []).map((x) => x.mint) : [])]))]
   const priceSource = options.prices === true ? defillamaPrices() : options.prices || null
   const fetchFn = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   // 价格源出错（服务不可用、被拦截、同步抛错等）时照样返回仓位，只是不带价格；取消查询时照常 reject
@@ -784,6 +902,11 @@ async function finalize(client: SolanaClient, raw: readonly (RawClmm | RawAmm)[]
     const d1 = token1.decimals
     const fees0Formatted = r.fees0 === null ? null : fmt(r.fees0, token0)
     const fees1Formatted = r.fees1 === null ? null : fmt(r.fees1, token1)
+    const rewards = r.rewards?.map((x): SolanaLpReward => {
+      const t = token(x.mint, null)
+      const formatted = x.amount === null ? null : fmt(x.amount, t)
+      return { index: x.index, mint: x.mint, symbol: t.symbol, decimals: t.decimals, amount: x.amount === null ? null : x.amount.toString(), formatted, ...(priceSource ? { usd: x.amount === 0n ? 0 : usd(t, formatted) } : {}) }
+    })
     return {
       ...base,
       type: 'clmm',
@@ -804,6 +927,8 @@ async function finalize(client: SolanaClient, raw: readonly (RawClmm | RawAmm)[]
       fees0Formatted,
       fees1Formatted,
       ...(priceSource ? { feesUsd: r.fees0 === null || r.fees1 === null ? null : sum(usd(token0, fees0Formatted), usd(token1, fees1Formatted), r.fees0, r.fees1) } : {}),
+      ...(rewards ? { rewards } : {}),
+      ...(rewards && priceSource ? { rewardsUsd: rewards.some((x) => x.usd === null || x.usd === undefined) ? null : rewards.reduce((acc, x) => acc + (x.usd ?? 0), 0) } : {}),
     }
   })
   if (priceSource) {

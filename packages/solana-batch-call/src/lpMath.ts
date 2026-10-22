@@ -153,6 +153,8 @@ export interface TickFeeData {
   initialized: boolean
   feeGrowthOutside0: bigint
   feeGrowthOutside1: bigint
+  /** 三个挖矿奖励的 tick 外增长（读 tick 时带上；只算手续费时可以不给） */
+  rewardGrowthsOutside?: readonly bigint[]
 }
 
 const wrap = (x: bigint) => ((x % (1n << 128n)) + (1n << 128n)) % (1n << 128n)
@@ -190,6 +192,42 @@ export function getFeeGrowthInside(
 export function getFeesOwed(owed: bigint, liquidity: bigint, growthInside: bigint, growthLast: bigint): bigint {
   const delta = (liquidity * wrap(growthInside - growthLast)) >> 64n
   return owed + (delta > U64_MAX ? 0n : delta)
+}
+
+/** 池子里一个挖矿奖励的状态（两个程序的 reward_infos 里的同名字段） */
+export interface RewardEmission {
+  /** 已初始化：奖励的 mint 不是默认地址 */
+  initialized: boolean
+  emissionsPerSecondX64: bigint
+  growthGlobalX64: bigint
+  /** 上次更新的时间（秒）。Raydium 每个奖励自己记；Orca 是池子的 reward_last_updated_timestamp（三个奖励相同） */
+  lastUpdated: bigint
+  /** 开始 / 结束时间（秒）：Raydium 的 open_time / end_time；Orca 没有，传 0n / 2^64 − 1 */
+  openTime: bigint
+  endTime: bigint
+}
+
+/**
+ * 池子在 now 时刻的奖励全局增长：程序每次操作池子（交易、增减流动性、领取）前先把排放按时间摊给当前的流动性，
+ * Q64.64：growth += Δt · emissions_per_second / liquidity（向下取整，u128 回绕）。
+ * Raydium：now ≤ open_time 不动，Δt 到 end_time 为止；Orca：池子流动性为 0 或 Δt 为 0 不动
+ */
+export function rewardGrowthGlobal(liquidity: bigint, reward: RewardEmission, now: bigint): bigint {
+  if (!reward.initialized || liquidity === 0n || now <= reward.openTime) {
+    return reward.growthGlobalX64
+  }
+  const latest = now < reward.endTime ? now : reward.endTime
+  const delta = latest > reward.lastUpdated ? latest - reward.lastUpdated : 0n
+  return wrap(reward.growthGlobalX64 + (delta * reward.emissionsPerSecondX64) / liquidity)
+}
+
+/** 区间内某个奖励的增长（u128 回绕），tick 未初始化的处理同 getFeeGrowthInside */
+export function getRewardGrowthInside(tick: number, tickLower: number, lower: TickFeeData, tickUpper: number, upper: TickFeeData, index: number, global: bigint): bigint {
+  const lowerOutside = lower.rewardGrowthsOutside?.[index] ?? 0n
+  const upperOutside = upper.rewardGrowthsOutside?.[index] ?? 0n
+  const below = !lower.initialized ? global : tick < tickLower ? wrap(global - lowerOutside) : lowerOutside
+  const above = !upper.initialized ? 0n : tick < tickUpper ? upperOutside : wrap(global - upperOutside)
+  return wrap(global - below - above)
 }
 
 /** Q64.64 sqrt 价格 → token1 / token0 的价格（按精度换算，浮点数，只用于展示） */

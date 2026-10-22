@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 交易模拟，子路径 `@w3lib/solana-batch-call/simulate`：`getSimulation` / `simulate` 在主网模拟一笔交易（`simulateTransaction`，不验签名、不上链），输入是 base64 / 字节的交易（legacy、v0 含地址查找表）或本库构建器的输出（`buildSwap`、流动性计划、`{ owner, instructions }`、`buildRevokes` / `buildCloses`）。给出余额变化（SOL 不含手续费、Wrapped SOL 并入 SOL、可选美元价值）、授权变化（delegate 设置 / 变更 / 撤销、账户 owner / 关闭权限 / mint 权限被改、关闭账户，按模拟前后的账户状态比较）、指令解码（System、Token / Token-2022、ATA、计算预算、Memo，Jupiter / Raydium / Orca / Meteora / Pump.fun 的协议和指令名）、程序错误解码、计算单元、手续费和警告（无限额度授权、SetAuthority、改 owner、关闭账户退给别人、不认识的程序、新收款地址、多余的签名者、手续费过高、花掉大部分余额；可选 `/risk` 检查变化的代币）。publicnode 的 `simulateTransaction` 最多返回 10 个账户，自动只看和钱包有关的账户并分批
+- 交易历史，子路径 `@w3lib/solana-batch-call/history`：`getHistory` 把地址的交易整理成统一的 `Activity`（兑换、转账、授权、流动性、铸造、合约调用、失败，带方向、对手方、资产变化、手续费、协议），`cursor` 是最后一条签名，支持 `limit`、`before` / `after`（区块时间）、`types` 过滤。数据源可换：默认 `rpcHistory()`（`getSignaturesForAddress` + `getTransaction`，限并发），可选 `heliusHistory({ apiKey })`；传数组时按顺序尝试
+- 账户回收，子路径 `@w3lib/solana-batch-call/reclaim`：`getReclaimable` / `reclaimable` 扫描钱包里关闭后能退回租金的账户并给出每项和合计的 lamports：空代币账户（SPL Token / Token-2022，有暂存转账手续费的先收到 mint 上）、垃圾币（销毁后关闭；保守的默认判断：有价格且价值高的、NFT、仓位 NFT 一律不当垃圾币，只勾选有价格的尘埃 / `/risk` 标记的，可疑名字只作提示不单独触发勾选，可传 `isJunk`、`prices`、`maxJunkUsd`）、Wrapped SOL（解包）、已清空的 Orca Whirlpool / Raydium CLMM 仓位（关闭仓位、销毁 NFT，Token-2022 的 NFT 连 mint 一起退回）；冻结 / 关闭权限是别人 / 仓位还有没领的手续费的列在 `blocked`。`buildReclaim` 发送前重新读取账户并核对（余额变了、冻结、仓位不再为空的跳过并给出原因），`simulateReclaim` 用 `/simulate` 逐笔模拟并给出预计退回的 SOL，`reclaim` 构建 → 模拟 → 签名发送（打包同 `batchCall`，`destination`、`feePayer`、`dryRun`）。`/write` 新增指令工具 `burnChecked`
+- 批量领取，子路径 `@w3lib/solana-batch-call/claim`：`getClaimable` / `claimable` 只读预览 Orca Whirlpool、Raydium CLMM 仓位的未领取手续费和挖矿奖励（Orca 奖励 slot、Raydium 农场奖励，数量按程序的公式结算），带美元价值和按代币汇总；`buildClaimAll` 复用 `/liquidity` 的 `collectFees` 为每个仓位构建领取（手续费 + 全部奖励），`simulateClaim` 用 `/simulate` 模拟并汇总收到的代币，`claimAll` 构建 → 模拟 → 签名发送（`minUsd`、`dryRun`）
+- `/lp`：`getLpPositions` 新增 `rewards: true`（仓位的 `rewards`、`rewardsUsd`，`now` 指定结算时刻），`/lp` 导出 `rewardGrowthGlobal`、`getRewardGrowthInside`；`/liquidity` 内部抽出 `orcaClosePosition` / `raydiumClosePosition`（关闭已清空的仓位）
+
+### 修复
+
+- publicnode 对 `getMultipleAccounts` 超过 10 个账户返回 “A maximum of 10 accounts is allowed”（之前只认 “too many accounts” 和 403 “Request blocked”），会被当成节点故障。现在识别这条报错，直接按它给出的上限拆分
+
 ## 0.5.0
 
 ### 新功能

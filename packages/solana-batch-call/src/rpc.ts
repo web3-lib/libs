@@ -61,7 +61,7 @@ const RATE_LIMITED = /rate.?limit|too many requests/i
 const TRANSIENT = /\bbusy\b|overload|temporar(il)?y|unavailable|try again|timed? ?out|timeout/i
 
 /** 节点限制单次 getMultipleAccounts 的账户数（如 “Too many accounts requested”）：缩小每次的账户数后重试，不是节点故障 */
-const TOO_MANY_ACCOUNTS = /too many accounts/i
+const TOO_MANY_ACCOUNTS = /too many accounts|maximum of \d+ accounts/i
 /**
  * publicnode 对单次超过 10 个账户的 getMultipleAccounts 返回 HTTP 403 +“Request blocked”（2026-10，而且要等 3 秒多才返回）：
  * 账户数超过 BLOCKED_LIMIT 时直接按它拆分（逐次减半要多等好几轮），还被拒绝再减半；
@@ -261,7 +261,9 @@ export class HttpRpc implements RpcTransport {
       const tooMany = err instanceof RpcError && TOO_MANY_ACCOUNTS.test(err.message) && addresses.length > 1
       const blocked = err instanceof RpcError && REQUEST_BLOCKED.test(err.message) && addresses.length > BLOCKED_FLOOR
       if (tooMany || blocked) {
-        const next = blocked && addresses.length > BLOCKED_LIMIT ? BLOCKED_LIMIT : Math.floor(addresses.length / 2)
+        // publicnode（2026-10）：“A maximum of 10 accounts is allowed”，报错里直接给出上限
+        const stated = Number(/maximum of (\d+) accounts/i.exec(err.message)?.[1])
+        const next = stated >= 1 ? stated : blocked && addresses.length > BLOCKED_LIMIT ? BLOCKED_LIMIT : Math.floor(addresses.length / 2)
         this.#learned.maxAccounts = Math.max(1, Math.min(this.#learned.maxAccounts ?? Number.POSITIVE_INFINITY, next))
         return this.#getMultipleAccounts(params)
       }

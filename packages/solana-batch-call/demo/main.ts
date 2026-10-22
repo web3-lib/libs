@@ -1,3 +1,4 @@
+import { mountShell } from '../../demo-shared/shell'
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
@@ -23,6 +24,8 @@ import {
   type ApprovalCall,
   type TokenAccountApproval,
 } from '@w3lib/solana-batch-call/approvals'
+import { buildClaimAll, claimAll, getClaimable, simulateClaim, type Claimable } from '@w3lib/solana-batch-call/claim'
+import { buildReclaim, getReclaimable, reclaim, simulateReclaim, type Reclaimable } from '@w3lib/solana-batch-call/reclaim'
 import { getFeeEstimate, getCostEstimate } from '@w3lib/solana-batch-call/fees'
 import {
   addLiquidity,
@@ -42,11 +45,16 @@ import { SOLANA_LP_PROTOCOLS, getLpPositions, type SolanaLpPosition, type Solana
 import { getAddressNames, getNameAddresses } from '@w3lib/solana-batch-call/names'
 import { getPortfolio, getTokenPrices } from '@w3lib/solana-batch-call/price'
 import { getTokenRisks, getTradeChecks, type SolanaTokenRisk } from '@w3lib/solana-batch-call/risk'
+import { getHistory, type Activity } from '@w3lib/solana-batch-call/history'
+import { getSimulation } from '@w3lib/solana-batch-call/simulate'
 import { getSwapQuote, swap, type SolanaSwapParams, type SolanaSwapPlan, type SolanaSwapResult, type SolanaSwapStepResult } from '@w3lib/solana-batch-call/swap'
-import { systemTransfer } from '@w3lib/solana-batch-call/write'
+import { batchTransfer, systemTransfer } from '@w3lib/solana-batch-call/write'
 import { createWallet } from '@w3lib/wallet'
 import { solana } from '@w3lib/wallet/solana'
 import { createWalletModal } from '@w3lib/wallet/ui'
+
+// 外壳：侧边分组导航 + 设置 / 连接面板（见 packages/demo-shared/shell.ts）
+mountShell()
 
 // ---- 示例数据 ----
 
@@ -136,13 +144,14 @@ const lines = (text: string) =>
 
 /** 需要索引方法（getTokenAccountsByOwner 等）的查询：内置公共节点都不支持，没填节点时直接提示，不发请求 */
 function indexedNode() {
-  if (!settings.rpc) throw new Error('这个查询需要支持 getTokenAccountsByOwner 等索引方法的节点：请在“设置”里填自己的 RPC URL（内置公共节点不支持）')
+  if (!settings.rpc) throw new Error('这个查询需要支持 getTokenAccountsByOwner 等索引方法的节点：请在右上角“节点设置”里填自己的 RPC URL（内置公共节点不支持）')
   return nodeOptions()
 }
 
 function owner(): string {
-  const value = ownerInput.value.trim()
-  if (!value) throw new Error('请先填写地址（或点“示例地址”）')
+  // 没填地址时用已连接钱包的地址
+  const value = ownerInput.value.trim() || connection()?.address || ''
+  if (!value) throw new Error('请先在顶部“地址”里填写地址（或点“示例地址”，或连接钱包）')
   return value
 }
 
@@ -353,7 +362,8 @@ bind('runOwnerNfts', 'ownerNfts', async () => {
   return { data: list, view: nftTable(list) }
 })
 
-bind('runLp', 'lp', async () => {
+/** LP 查询（“LP 仓位”页的按钮和“加载我的仓位”共用） */
+async function queryLp() {
   const mints = lines($<HTMLTextAreaElement>('lpMints').value)
   const pools = lines($<HTMLTextAreaElement>('lpPools').value)
   // 不指定 mints 时要扫描全部代币账户：内置公共节点不支持
@@ -399,7 +409,8 @@ bind('runLp', 'lp', async () => {
       priceError,
     ),
   }
-})
+}
+bind('runLp', 'lp', queryLp)
 
 const pairOf = (p: SolanaLpPosition) => `${p.token0.symbol ?? '?'} / ${p.token1.symbol ?? '?'}`
 
@@ -456,7 +467,12 @@ const connection = () => wallet.getConnection('solana')
 
 function renderWallet() {
   const c = connection()
-  $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只构建时用上面“地址”栏的地址）'
+  // 连上钱包、地址栏还空着：填上钱包地址（查询默认查自己的钱包）
+  if (c && !ownerInput.value.trim()) {
+    ownerInput.value = c.address
+    ownerInput.dispatchEvent(new Event('change'))
+  }
+  $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只读查询不需要钱包）'
   $('connectWallet').textContent = c ? '切换 / 断开' : '连接钱包'
 }
 wallet.subscribe(() => renderWallet())
@@ -479,7 +495,7 @@ function setPositions(list: SolanaLpPosition[], of: string) {
   lastPositions = list
   positionsOwner = of
   const options = list.map((p, i) => new Option(`${p.protocolName} · ${pairOf(p)} · ${p.type === 'amm' ? `份额 ${(p.share * 100).toPrecision(3)}%` : `仓位 ${p.positionMint.slice(0, 4)}…${p.positionMint.slice(-4)}`}`, String(i)))
-  liq.position.replaceChildren(...(options.length ? options : [new Option('先在上面“LP 仓位”里查询（用同一个地址）', '')]))
+  liq.position.replaceChildren(...(options.length ? options : [new Option('没有仓位：点右边“加载我的仓位”，或在“LP 仓位”页查询', '')]))
 }
 
 for (const [id, info] of Object.entries(SOLANA_LP_PROTOCOLS)) liq.protocol.append(new Option(`${info.name}（${info.type === 'clmm' ? '集中流动性' : 'AMM'}）`, id))
@@ -810,7 +826,7 @@ bind('runApprovals', 'appr', async () => {
 
 /** 这次要处理的账户：撤销 = 有 delegate 且没有冻结的；关闭 = 余额为 0 且能关闭的（有余额的 wSOL 也能关，但这里不动） */
 function approvalTargets() {
-  if (!lastApprovals.length) throw new Error('请先在上面“查询授权”，撤销 / 关闭只处理最近一次查到的账户')
+  if (!lastApprovals.length) throw new Error('请先“查询授权”，撤销 / 关闭只处理最近一次查到的账户')
   const action = appr.action.value === 'close' ? ('close' as const) : ('revoke' as const)
   const list = action === 'revoke' ? lastApprovals.filter((a) => a.revocable) : lastApprovals.filter((a) => a.closable && a.amount === '0')
   if (!list.length) throw new Error(action === 'revoke' ? '查到的账户里没有可以撤销的授权' : '查到的账户里没有可以关闭的空账户')
@@ -851,6 +867,128 @@ bind('runApprSend', 'appr', async () => {
         results.map((r, i) => [i + 1, r.kind === 'revoke' ? '撤销授权' : '关闭账户', addr(r.account), statusTag(r.status, r.error), r.signature ? link(r.signature) : null]),
       ),
     ),
+  }
+})
+
+// ---- 账户回收（子路径 /reclaim） ----
+
+const solText = (lamports: string | bigint) => `${formatUnits(BigInt(lamports), 9)} SOL`
+const RECLAIM_KINDS: Record<string, string> = {
+  'empty-token': '空代币账户',
+  'junk-token': '垃圾币（销毁后关闭）',
+  'wrapped-sol': 'Wrapped SOL（解包）',
+  'orca-position': 'Orca 空仓位',
+  'raydium-position': 'Raydium 空仓位',
+}
+const BLOCKERS: Record<string, string> = { frozen: '已冻结', 'close-authority': '关闭权限是别人', 'confidential-balance': '机密余额不为 0', paused: '代币已暂停', 'permissioned-burn': '只有指定地址能销毁', owed: '还有没领的手续费 / 奖励（先领取）' }
+
+/** 上一次扫描的结果：模拟 / 回收只处理其中建议勾选的项 */
+let lastReclaim: Reclaimable | null = null
+
+bind('runReclaim', 'reclaim', async () => {
+  const mints = lines($<HTMLTextAreaElement>('reclaimMints').value)
+  lastReclaim = null
+  // 预览查“地址”栏（空着时用已连接钱包的地址）；回收时库会核对账户确实属于发送的钱包
+  const r = await getReclaimable(owner(), { ...(mints.length ? { ...nodeOptions(), mints } : indexedNode()) })
+  lastReclaim = r
+  const rows = (list: Reclaimable['items'], blocked: boolean) =>
+    list.map((i) => [
+      RECLAIM_KINDS[i.kind] ?? i.kind,
+      i.position ? addr(i.position.positionMint) : (i.symbol ?? addr(i.mint)),
+      i.kind === 'empty-token' || i.position ? '—' : amount(i.formatted),
+      solText(i.lamports),
+      blocked ? tag(BLOCKERS[i.blocker ?? ''] ?? i.blocker ?? '', 'bad') : i.selected ? tag('建议回收', 'ok') : tag('仅列出'),
+      i.reasons.join(', '),
+    ])
+  const head = ['类型', '账户 / 代币', '余额', '退回', '状态', '依据']
+  const view = document.createElement('div')
+  view.append(
+    note(`能回收 ${solText(r.totalLamports)}（建议勾选的 ${solText(r.selectedLamports)}）${r.warnings.length ? `；${r.warnings.join('；')}` : ''}`, table(head, rows(r.items, false), [2, 3])),
+  )
+  if (r.blocked.length) view.append(note('暂时关不掉的', table(head, rows(r.blocked, true), [2, 3])))
+  return { data: r, view }
+})
+
+/** 构建并模拟建议勾选的项；destination 用钱包地址（没连接时用“地址”栏） */
+async function reclaimPlan() {
+  if (!lastReclaim) throw new Error('请先“扫描”，模拟 / 回收只处理最近一次扫描里建议勾选的项')
+  const items = lastReclaim.items.filter((i) => i.selected)
+  if (!items.length) throw new Error('没有建议回收的项')
+  return { items, plan: await buildReclaim(liquidityClient(), lastReclaim.owner, items) }
+}
+
+bind('runReclaimSim', 'reclaim', async () => {
+  const { plan } = await reclaimPlan()
+  const sim = await simulateReclaim(liquidityClient(), plan)
+  const data = { lamports: sim.lamports, source: sim.lamportsSource, fee: sim.fee, transactions: sim.transactions.length, failed: sim.failed, skipped: plan.skipped.map((s) => ({ account: s.item.account, reason: s.reason })), warnings: plan.warnings }
+  return { data, view: note(`${sim.success ? '模拟通过' : `有 ${sim.failed.length} 个账户会失败`}：预计退回 ${solText(sim.lamports)}（${sim.lamportsSource === 'simulation' ? '模拟的结果' : '按账户余额估算'}），${plan.calls.length} 个账户打包成 ${sim.transactions.length} 笔交易，手续费 ${solText(sim.fee)}`, table(['#', '账户', '原因'], sim.failed.map((f) => [f.index + 1, addr(plan.calls[f.index]?.account), f.error]))) }
+})
+
+bind('runReclaimSend', 'reclaim', async () => {
+  const { items } = await reclaimPlan()
+  const c = await walletForSend()
+  if (c.address !== lastReclaim?.owner) throw new Error(`钱包是 ${c.address}，扫描的是 ${lastReclaim?.owner}：请用钱包地址重新扫描`)
+  const done = await reclaim(liquidityClient(), walletSigner(c), items)
+  return {
+    data: done,
+    view: note(
+      `已发送：预计退回 ${solText(done.simulation?.lamports ?? done.plan.lamports)}`,
+      table(['#', '类型', '账户', '状态', '交易签名'], done.results.map((r, i) => [i + 1, RECLAIM_KINDS[r.kind] ?? r.kind, addr(r.account), statusTag(r.status, r.error), r.signature ? link(r.signature) : null])),
+    ),
+  }
+})
+
+// ---- 批量领取（子路径 /claim） ----
+
+let lastClaim: Claimable | null = null
+
+bind('runClaim', 'claim', async () => {
+  const mints = lines($<HTMLTextAreaElement>('lpMints').value)
+  lastClaim = null
+  const c = await getClaimable(owner(), { ...(mints.length ? { ...nodeOptions(), mints } : indexedNode()) })
+  lastClaim = c
+  const view = document.createElement('div')
+  view.append(
+    note(
+      `共 ${c.positions.length} 个仓位有可领的，合计 ${usdText(c.totalUsd)}（手续费 ${usdText(c.feesUsd)}、奖励 ${usdText(c.rewardsUsd)}）${c.warnings.length ? `；${c.warnings.join('；')}` : ''}`,
+      table(
+        ['协议', '仓位', '手续费', '奖励', '价值'],
+        c.positions.map((p) => [
+          p.protocolName,
+          addr(p.positionMint),
+          p.fees.map((f) => `${amount(f.formatted)} ${f.symbol ?? ''}`).join(' + '),
+          p.rewards.length ? p.rewards.map((r) => `${amount(r.formatted)} ${r.symbol ?? addr(r.mint)}`).join(' + ') : '—',
+          usdText(p.totalUsd),
+        ]),
+        [4],
+      ),
+    ),
+    note('按代币汇总', table(['代币', '数量', '价值'], c.tokens.map((t) => [t.symbol ?? addr(t.mint), amount(t.formatted), usdText(t.usd)]), [1, 2])),
+  )
+  return { data: c, view }
+})
+
+bind('runClaimSim', 'claim', async () => {
+  if (!lastClaim?.positions.length) throw new Error('请先“预览”，模拟 / 领取处理最近一次预览出的全部仓位')
+  const plan = await buildClaimAll(liquidityClient(), lastClaim.owner, lastClaim.positions)
+  const sim = await simulateClaim(liquidityClient(), plan)
+  return {
+    data: { success: sim.success, fee: sim.fee, transactions: sim.transactions.length, failed: sim.failed, built: plan.failed, received: sim.received },
+    view: note(
+      `${sim.success ? '模拟通过' : `有 ${sim.failed.length + plan.failed.length} 个仓位会失败`}：${plan.calls.length} 个仓位打包成 ${sim.transactions.length} 笔交易，手续费 ${solText(sim.fee)}`,
+      table(['代币', '收到'], sim.received.map((r) => [r.symbol, amount(r.formatted)]), [1]),
+    ),
+  }
+})
+
+bind('runClaimSend', 'claim', async () => {
+  if (!lastClaim?.positions.length) throw new Error('请先“预览”，模拟 / 领取处理最近一次预览出的全部仓位')
+  const c = await walletForSend()
+  if (c.address !== lastClaim.owner) throw new Error(`钱包是 ${c.address}，预览的是 ${lastClaim.owner}：请用钱包地址重新预览`)
+  const done = await claimAll(liquidityClient(), walletSigner(c), lastClaim.positions)
+  return {
+    data: done,
+    view: note('已发送', table(['#', '协议', '仓位', '状态', '交易签名'], done.results.map((r, i) => [i + 1, r.protocol, addr(r.positionMint), statusTag(r.status, r.error), r.signature ? link(r.signature) : null]))),
   }
 })
 
@@ -1072,5 +1210,120 @@ bind('runTrade', 'trade', async () => {
       ]),
       [2],
     ),
+  }
+})
+
+// ---- 交易模拟（子路径 /simulate） ----
+
+bind('runSim', 'sim', async () => {
+  const owner = actingAddress()
+  const raw = $<HTMLTextAreaElement>('simTx').value.trim() || undefined
+  const input = raw ?? (await getSwapQuote(owner, { tokenIn: NATIVE_MINT, tokenOut: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amountInFormatted: '0.1' }, nodeOptions()))
+  const sim = await getSimulation(input, { ...nodeOptions(), owner, prices: true })
+  return {
+    data: { ...sim, logs: undefined },
+    view: note(
+      `${sim.success ? '成功' : `失败：${sim.error}`} · ${sim.decoded.summary} · 计算单元 ${sim.gasUsed} · 手续费 ${sim.fee} lamports`,
+      table(
+        ['类型', '资产', '变化', '美元'],
+        [
+          ...sim.balanceChanges.map((c) => ['余额', c.symbol, c.formatted, c.usd == null ? null : c.usd.toFixed(2)]),
+          ...sim.approvalChanges.map((c) => [tag(c.kind, 'bad'), shorten(c.account), c.delegate ? shorten(c.delegate) : (c.authorityType ?? ''), null]),
+          ...sim.warnings.map((w) => [tag(w.severity, w.severity === 'info' ? '' : 'bad'), w.code, w.message, null]),
+        ],
+        [2, 3],
+      ),
+    ),
+  }
+})
+
+// ---- 交易历史（子路径 /history） ----
+
+let historyCursor: string | undefined
+/** 游标属于哪次查询（地址、类型、条数）：换了之后“下一页”不能接着用旧游标 */
+let historyFor = ''
+const historyKey = () => [owner(), $<HTMLSelectElement>('histType').value, $<HTMLInputElement>('histLimit').value].join('|')
+
+function historyView(items: Activity[]): Node {
+  return table(
+    ['时间', '类型', '说明', '变化', '状态'],
+    items.map((a) => [
+      new Date(a.time * 1000).toLocaleString(),
+      a.type,
+      a.label ?? '',
+      a.changes.map((c) => `${c.formatted} ${c.symbol}`).join(' / '),
+      a.status === 'failed' ? tag('失败', 'bad') : tag('成功', 'ok'),
+    ]),
+  )
+}
+
+async function runHistory(cursor: string | undefined) {
+  // 发请求前记下这次查询的条件：等待期间改了表单，游标也只属于发出去的那次查询
+  const key = historyKey()
+  const limit = Number(text($<HTMLInputElement>('histLimit')) ?? '10')
+  const type = $<HTMLSelectElement>('histType').value as Activity['type'] | ''
+  const page = await getHistory(owner(), { ...nodeOptions(), limit, cursor, types: type ? [type] : undefined })
+  historyCursor = page.nextCursor
+  historyFor = key
+  return { data: page, view: note(page.nextCursor ? `还有更多，点“下一页”（游标 ${shorten(page.nextCursor)}）` : '没有更多了', historyView(page.items)) }
+}
+
+bind('runHist', 'hist', () => runHistory(undefined))
+bind('runHistMore', 'hist', () => {
+  if (!historyCursor) throw new Error('没有下一页')
+  if (historyFor !== historyKey()) throw new Error('地址或筛选条件变了：请重新点“查询”')
+  return runHistory(historyCursor)
+})
+
+// ---- 批量转账（子路径 /write） ----
+
+const bt = { recipients: $<HTMLTextAreaElement>('btRecipients'), token: $<HTMLInputElement>('btToken'), dry: $<HTMLInputElement>('btDry') }
+
+bind('runBt', 'bt', async () => {
+  const rows = bt.recipients.value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [to, formatted] = l.split(/[\s,]+/)
+      if (!to || !formatted) throw new Error(`格式不对：${l}（每行“地址 数量”）`)
+      return { to, formatted }
+    })
+  if (!rows.length) throw new Error('请填收款地址和数量')
+  if (rows.length > 200) throw new Error('demo 一次最多 200 个收款人')
+  const dryRun = bt.dry.checked
+  const token = bt.token.value.trim()
+  const c = await walletForSend()
+  if (!dryRun && !confirm(`用 ${c.address} 向 ${rows.length} 个地址转${token ? `（${token}）` : ' SOL'}，确认发送？`)) throw new Error('已取消')
+  const progress = $('btStats')
+  const results = await batchTransfer(liquidityClient(), walletSigner(c), rows, {
+    ...(token ? { token } : {}),
+    dryRun,
+    onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 项：${r.status}`),
+  })
+  return {
+    data: results,
+    view: table(
+      ['#', '收款', '数量', '状态', '交易'],
+      results.map((r, i) => [i + 1, addr(r.to), r.formatted ?? r.amount, tag(r.status + (r.error ? `：${r.error}` : ''), r.status === 'confirmed' || r.status === 'simulated' ? 'ok' : r.status === 'failed' || r.status === 'reverted' ? 'bad' : ''), r.signature ? link(r.signature) : null]),
+      [2],
+    ),
+  }
+})
+
+// 仓位下拉框的内容来自 LP 查询：这里直接调用同一个查询（同一个地址），不用切页
+$('liqLoad').addEventListener('click', async () => {
+  const status = $('liqLoadStatus')
+  const button = $<HTMLButtonElement>('liqLoad')
+  button.disabled = true
+  status.textContent = '查询中…'
+  try {
+    await queryLp()
+    const count = Array.from($<HTMLSelectElement>('liqPosition').options).filter((o) => o.value).length
+    status.textContent = `找到 ${count} 个仓位`
+  } catch (err) {
+    status.textContent = `查询失败：${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    button.disabled = false
   }
 })

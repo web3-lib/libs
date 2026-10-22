@@ -1,6 +1,6 @@
 # @w3lib/solana-batch-call
 
-Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT、[LP 仓位](#lp-仓位)（子路径 `/lp`）、[价格和资产总值](#价格)（子路径 `/price`）、[手续费估算](#手续费估算)（子路径 `/fees`）、[SNS 域名解析](#域名解析)（子路径 `/names`）、[授权管理](#授权管理)（子路径 `/approvals`）、[代币风险检查](#代币风险)（子路径 `/risk`）；[添加 / 移除流动性](#添加--移除流动性)（子路径 `/liquidity`）、[兑换](#兑换)（子路径 `/swap`）；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
+Solana 批量读取库：余额（SOL / SPL Token / Token-2022）、代币详情、NFT、[LP 仓位](#lp-仓位)（子路径 `/lp`）、[价格和资产总值](#价格)（子路径 `/price`）、[手续费估算](#手续费估算)（子路径 `/fees`）、[SNS 域名解析](#域名解析)（子路径 `/names`）、[授权管理](#授权管理)（子路径 `/approvals`）、[代币风险检查](#代币风险)（子路径 `/risk`）；[交易模拟](#交易模拟)（子路径 `/simulate`）、[交易历史](#交易历史)（子路径 `/history`）；[添加 / 移除流动性](#添加--移除流动性)（子路径 `/liquidity`）、[兑换](#兑换)（子路径 `/swap`）；以及[批量写操作](#批量写操作)（一对多转账、多钱包归集、批量调用程序，子路径 `/write`）。不依赖 Solana SDK，直接发 JSON-RPC。
 
 ```bash
 pnpm add @w3lib/solana-batch-call
@@ -387,6 +387,62 @@ await closeTokenAccounts(client, key, list.filter((a) => a.amount === '0'))   //
 
 打包：在已经用到 `SolanaClient` 的基础上，`getApprovals` 约增加 6KB（minify，gzip 约 2KB），加上撤销 / 关闭约 7KB（gzip 约 3KB）；发送的代码（`/write`，约 21KB，gzip 约 8KB）按需加载，只查授权时不会加载。
 
+## 账户回收
+
+子路径 `@w3lib/solana-batch-call/reclaim`：扫描钱包里关闭后能退回租金（SOL）的账户，给出每项和合计能拿回多少 lamports，批量关闭。
+
+```ts
+import { getReclaimable, reclaim } from '@w3lib/solana-batch-call/reclaim'
+
+const r = await getReclaimable(owner, { provider: 'https://my-rpc…' })   // 全部代币账户：需要支持 getTokenAccountsByOwner 的节点；免费节点传 mints 只看指定代币的 ATA
+r.totalLamports                                  // 全部能拿回的 lamports；r.selectedLamports 是建议勾选的
+// r.items: [{ kind: 'empty-token', account, mint, lamports: '2039280', selected: true, reasons: ['empty'] },
+//           { kind: 'junk-token', symbol: 'claim-rewards.xyz', amount: '777', lamports: '2039280', selected: false, reasons: ['no-price', 'spam-name'] },
+//           { kind: 'wrapped-sol', amount: '5000000', lamports: '7039280', rentLamports: '2039280' },
+//           { kind: 'orca-position', position: { protocol: 'orca-whirlpool', positionMint, pool }, lamports: '4433520' }, …]
+// r.blocked: [{ kind: 'empty-token', blocker: 'frozen', … }, { kind: 'raydium-position', blocker: 'owed', … }]
+
+const { simulation, results } = await reclaim(client, key, r.items.filter((i) => i.selected), { destination: coldWallet, dryRun: true })
+simulation.lamports          // 预计退回的 lamports（模拟里的 SOL 变化，不含手续费）
+await reclaim(client, key, r.items.filter((i) => i.selected))   // 构建 → 模拟 → 签名发送
+```
+
+- **种类**（`kind`）：`empty-token`（空的 SPL Token / Token-2022 账户，有暂存转账手续费的先收到 mint 上）、`junk-token`（垃圾币：销毁后关闭）、`wrapped-sol`（关闭即解包，`lamports` 含包装的 SOL，`rentLamports` 只是租金）、`orca-position` / `raydium-position`（流动性、手续费、奖励都为 0 的集中流动性仓位：关闭仓位账户、销毁 NFT；Token-2022 的 NFT 连 mint 一起退回）。`blocked` 里是暂时关不掉的：`frozen`（冻结的账户，保守起见不尝试）、`close-authority`、`confidential-balance`、`paused` / `permissioned-burn`（销毁不了）、`owed`（仓位还有没领的手续费 / 奖励，先用 `/claim` 领取）
+- **垃圾币的判断很保守**：有价格且价值超过 `maxJunkUsd`（默认 0.01 美元）的、NFT（精度 0 余额 1）、仓位 NFT 一律不列。列出的垃圾币只有“有把握”的 `selected: true`：有价格但价值不超过 `maxJunkUsd` 的尘埃（`dust`）、`/risk` 标记为不可转让 / 转账手续费很高 / 已暂停（`risk:*`）。名字可疑（链接 / 域名 / claim / airdrop，`spam-name`）只作提示、不会单独触发勾选（名字谁都能起）；没有价格也没有其他依据的只列出（`reasons: ['no-price']` / `['no-price', 'spam-name']`），由应用决定（可用 `isJunk` 勾选）。价格服务出错或 `prices: false` 时不勾选任何垃圾币（`warnings` 里有说明）。`isJunk({ account, price, usd, risk })` 返回 `true` 一定算垃圾币并勾选，`false` 一定排除，`undefined` 用默认判断（NFT 和仓位 NFT 不受它影响）；`prices` 可以传自己的价格源（如 `combinePrices([defillamaPrices(), onchainPrices()])`，默认只用 DefiLlama：链上价格每个代币要读约 190 个池子地址）
+- **安全**：`buildReclaim` 发送前重新读取每个账户并核对 owner、mint、余额、冻结、关闭权限、仓位是否仍是空的，变了的不构建、列在 `plan.skipped`（带原因）。不会关闭有余额的账户：空账户余额不为 0 时跳过；垃圾币只销毁和扫描时一致的余额（有人又转入了就跳过）；只有 Wrapped SOL 带余额关闭。账户的 owner 必须是签名者，每个账户一个调用（垃圾币：销毁 → 关闭，原子执行），多个账户打包进同一笔交易，`feePayer` 可以替 owner 付手续费
+- **模拟**：`simulateReclaim(client, plan)` 用 `/simulate` 逐笔模拟，`failed` 列出会失败的账户（整笔失败时逐个重新模拟找出来）；`lamports` 是预计退回的 SOL：收款地址就是付款人时取模拟里的真实变化（`lamportsSource: 'simulation'`），否则按账户余额估算。`reclaim` 默认先模拟、失败的账户不发送；`dryRun: true` 只构建和模拟
+- **destination**：退回的 SOL 给谁，默认 owner。Raydium CLMM 的仓位账户租金程序固定退给 owner，不能指定（`plan.warnings` 有提示）
+- 限制：只处理上面这些；质押 / 锁仓的仓位、Orca 的仓位组合（Position Bundle）不在 owner 名下；冻结的账户不关闭（`/approvals` 的 `closable` 不检查冻结）；价格只用于判断，不保证没有误判，发送前请展示列表给用户确认
+
+主网核对（只模拟，不发送）：找到有大量空仓位的真实钱包（Orca SPL NFT、Raydium SPL NFT、Raydium Token-2022 NFT 各有），其中一个 249 个账户（空代币账户、尘埃币销毁 + 关闭、136 个 Raydium 仓位、69 个 Orca 仓位）分 32 笔交易模拟全部通过，模拟的 SOL 变化与预计的 1068283440 lamports 逐位一致；Token-2022 NFT 的仓位关闭时 mint 一起退回（每个约 0.0042 SOL），预计值据此修正。
+
+## 批量领取
+
+子路径 `@w3lib/solana-batch-call/claim`：Orca Whirlpool、Raydium CLMM 仓位的未领取手续费和挖矿奖励（Orca 的奖励 slot、Raydium 的农场奖励）。先只读预览，再把全部（或选中的）仓位的领取打包成交易。指令来自 `/liquidity` 的 `collectFees`（手续费 + 全部奖励，SOL 自动解包，缺少的代币账户自动创建），这里只做批量和打包。
+
+```ts
+import { claimAll, getClaimable } from '@w3lib/solana-batch-call/claim'
+
+const c = await getClaimable(owner, { provider: 'https://my-rpc…' })   // 只读预览，不发交易；免费节点传 mints（仓位 NFT）只看指定仓位
+c.totalUsd                                                             // 手续费 + 奖励的美元价值；c.tokens 按代币汇总；c.incomplete 为 true 时有仓位的数量读不到（tick 数据），该代币行带 incomplete: true，数量偏低、usd 为 null
+// c.positions: [{ protocol: 'raydium-clmm', positionMint, pool, token0, token1, inRange, totalUsd: 11.54,
+//                 fees: [{ symbol: 'SOL', formatted: '0.0606', usd: 6.45 }, { symbol: 'USDC', formatted: '5.011', usd: 5.01 }],
+//                 rewards: [{ index: 0, mint: RAY, symbol: 'RAY', formatted: '0.042698', usd: 0.083 }] }]
+
+const plan = await buildClaimAll(client, owner, c.positions)            // 只构建：每个仓位一个调用
+const sim = await simulateClaim(client, plan)                           // 模拟：sim.received 是收到的各代币合计（usd 是合计数量的美元价值），sim.failed 是会失败的仓位
+await claimAll(client, key, c.positions, { minUsd: 0.5 })              // 构建 → 模拟 → 签名发送（positions 不传时领取全部）；dryRun: true 只模拟
+```
+
+- **奖励的数量照搬程序结算**：池子的奖励增长按时间摊给当前流动性（Δt × 每秒排放 / 流动性，Raydium 到 `end_time` 为止），再按仓位区间内的增长（全局 − 下方 − 上方，u128 回绕）计算，加上已记账的。`getLpPositions(owner, { rewards: true })` 也可以直接拿到每个仓位的 `rewards`（`/lp` 的新选项，`now` 指定结算时刻）；读不到两端的 tick 数据时数量为 `null`
+- 没有可领的东西（手续费和奖励都是 0）的仓位不列；流动性为 0 但还有没领的手续费 / 奖励的仓位照常列出。领完的空仓位可以用 `/reclaim` 关闭回收租金
+- `claimAll` 默认先模拟，失败的仓位不发送（`results[i].status: 'failed'`），一个仓位失败不影响其他的；钱包和选项同 `batchCall`（`feePayer`、`priorityFee` 等）。新建代币账户（如还没有的奖励代币的账户）的租金由 owner 付，owner 没有 SOL 时模拟会报 createIdempotent 失败
+- 限制：手续费和奖励都领到 owner 自己的代币账户（不能指定收款地址）；带转账手续费的 Token-2022 池子不支持（构建失败，列在 `plan.failed`）；预览是读取时刻的数量，发送时会继续累积
+
+主网核对（只模拟，不发送）：Raydium CLMM SOL-USDC 池（奖励 RAY）里真实仓位的预览与模拟时程序实际转出的数量一致（手续费相差几秒的累积，RAY 奖励 0.042698 逐位一致）。Orca 的奖励结算只有单元测试（主网上没有找到有奖励排放的 Orca 仓位），公式与 Raydium 相同；Orca 的手续费沿用 `/lp` 已核对的结果。
+
+打包（minify，含 `SolanaClient`，发送和模拟的代码按需加载）：`/reclaim` 约 124KB，`/claim` 约 143KB（含 `/liquidity` 的指令构建）；主入口不变。
+
 ## 代币风险
 
 子路径 `@w3lib/solana-batch-call/risk`：买入前检查代币的权限和 Token-2022 扩展里会影响持有人的设置。
@@ -431,6 +487,60 @@ const [trade] = await getTradeChecks([mint], { owner: myAddress, amountFormatted
 - 2026-10-20 主网：USDC 来回损失 0.02%、JUP 0.10%，BERN（转账手续费 2.69%）能买能卖
 
 打包：在已经用到 `SolanaClient` 的基础上，`getTokenRisks` 约增加 5KB（minify，gzip 约 1.5KB）；`tradeChecks` 用到 `/swap`，一起约 43KB（gzip 约 16KB）。
+
+## 交易模拟
+
+子路径 `@w3lib/solana-batch-call/simulate`：发送前在主网模拟一笔交易（`simulateTransaction`，不验签名、换最新 blockhash，不需要私钥、不会上链），给出余额变化、授权变化、指令说明、程序错误、手续费和警告。
+
+```ts
+import { getSwapQuote } from '@w3lib/solana-batch-call/swap'
+import { getSimulation } from '@w3lib/solana-batch-call/simulate'
+
+const plan = await getSwapQuote(owner, { tokenIn: NATIVE_MINT, tokenOut: USDC, amountInFormatted: '0.1' })
+const sim = await getSimulation(plan, { prices: true })        // 也可以是 base64 的交易：getSimulation(base64Tx, { owner })
+// { success: true, gasUsed: '112394', fee: '5000',
+//   balanceChanges: [{ address: owner, asset: 'native', symbol: 'SOL', delta: '-100000000', formatted: '-0.1', usd: -10.68 }, { asset: USDC, symbol: 'USDC', delta: '10677005', … }],
+//   approvalChanges: [], decoded: { type: 'swap', protocol: 'Orca', summary: 'Swap 0.1 SOL for 10.677005 USDC on Orca', instructions: [...] }, warnings: [], logs, signers, version: 'legacy' }
+if (!sim.success || sim.warnings.some((w) => w.severity === 'danger')) throw new Error(sim.error ?? sim.warnings[0].message)
+```
+
+- **输入**：base64 / 字节的交易（legacy 和 v0，v0 的地址查找表自动读取；v1 格式报错）；本库构建器的输出：`buildSwap` / `buildAddLiquidity` 等的计划（多步合并成一笔，放不下时用 `step` 选一步）、`{ owner, instructions }`（如 `/write` 的指令工具）、`buildRevokes` / `buildCloses` 的结果
+- **余额变化**：站在 `owner`（默认第一个签名者）的角度；SOL 不含手续费（手续费在 `fee`），Wrapped SOL 账户的变化并入 SOL（`asset: 'native'`），代币按模拟前后的代币账户算；`watch` 可以加看别的地址；`prices: true` 加美元价值
+- **授权变化**（`approvalChanges`）：按模拟前后的账户状态比较，CPI 里发生的也看得到：`delegate-set` / `delegate-changed` / `delegate-revoked`（带额度，接近 u64 上限为 `unlimited`）、`authority-changed`（账户 owner、关闭权限、mint 的增发 / 冻结权限被改）、`account-closed`。模拟失败时只能按指令判断
+- **指令解码**：System、SPL Token / Token-2022、关联代币账户、计算预算、Memo、升级程序加载器，Jupiter、Raydium（AMM v4 / CLMM / CPMM）、Orca、Meteora、Pump.fun 等程序的协议和指令名（Anchor 程序按 discriminator），`decoded.type` 为 `transfer | swap | approve | liquidity | mint | contract | unknown`；程序不认识时，按钱包“一个资产减少、另一个增加”推断为 `swap`（`decoded.inferred: true`）
+- **错误**：`error` 带失败的指令、程序名和错误名（Anchor 日志里的错误名优先；System、Token、Jupiter v6 等按错误码查表），如 `instruction 2 (SPL Token transferChecked) failed: InsufficientFunds (0x1)`
+- **警告**（`{ code, severity: 'info' | 'warn' | 'danger', message, address? }`）：`unlimited-delegate`（danger）/ `delegate-approved`、`authority-changed`（账户 owner / 关闭权限为 danger）、`assign-owner`、`program-upgrade`、`close-to-other`、`unknown-program`、`new-recipient`（收款地址从没有过 SOL / 没有这个代币的账户）、`unexpected-signer`（交易还需要别人签名，`signers` 可以列出预期的）、`high-fee`、`drains-balance`、`simulation-failed`；`risk: true` 时按 `/risk` 检查变化的代币（懒加载），永久授权、转账 hook、高转账手续费等加进 `warnings`，`risks` 里是全部标记
+- 公共节点：publicnode 的 `simulateTransaction` 一次最多返回 10 个账户，先读前状态只留和钱包有关的账户（钱包、新建的账户、钱包的代币账户、mint），多于上限时自动分批模拟
+
+主网核对（publicnode）：热钱包转 SOL / USDC（新地址警告、自动建 ATA）、余额不够的错误说明、`buildSwap` 的兑换（SOL → USDC，Orca，美元价值）、无限额度 Approve、Jupiter 最近的一笔真实 v0 交易（地址查找表，余额变化和协议都读对）。
+
+打包：在已经用到 `SolanaClient` 的基础上，`/simulate` 约增加 45KB（minify，gzip 约 16KB；价格、风险按需加载）。
+
+## 交易历史
+
+子路径 `@w3lib/solana-batch-call/history`：地址的交易整理成统一的 `Activity`，数据源可换，游标是最后一条签名。
+
+```ts
+import { getHistory, heliusHistory, rpcHistory } from '@w3lib/solana-batch-call/history'
+
+const page = await getHistory(address, { limit: 20 })
+// { items: [{ hash, time, block, status: 'success', type: 'swap', label: 'Swap 2.57 SOL for 274.47 USDC on Jupiter', protocol: 'Jupiter',
+//             changes: [{ asset: 'native', symbol: 'SOL', delta: '-2569401878', formatted: '-2.569401878' }, { asset: USDC, … }], fee: '5000' }, …],
+//   nextCursor: '4jNtY56m…' }
+const next = await getHistory(address, { cursor: page.nextCursor, types: ['swap', 'transfer'] })
+await getHistory(address, { source: [heliusHistory({ apiKey }), rpcHistory()] })   // Helius 失败时用节点
+```
+
+- `Activity`：`type` 为 `transfer | swap | approve | liquidity | mint | contract | other`，`direction`（`in | out | self`，转账等只有一个方向时）、`counterparty`、`label`、`changes`（这个地址的资产变化，SOL 不含手续费、Wrapped SOL 并入 SOL，symbol 自动补全）、`fee`（这个地址付的手续费）、`protocol`；失败的交易 `status: 'failed'`、没有资产变化、只有手续费
+- 选项：`limit`（默认 20，最多 100）、`cursor`、`before` / `after`（区块时间，unix 秒，按签名里的 blockTime 先过滤、不多取详情）、`types`（不够 `limit` 时往后多找，最多看 `limit × 5` 笔，`nextCursor` 接着往后）、`source`、`symbols: false`（不补全代币符号）
+- **默认数据源 `rpcHistory()`**：`getSignaturesForAddress`（`before` 翻页）+ `getTransaction`（逐笔，`concurrency` 默认 6，限频由节点层退避重试和换节点）。类型按指令（认得的协议 / 转账 / 授权 / 铸造）加余额变化判断：流动性 > 兑换 > 授权 > 铸造；只有转账指令是转账；有不认得的程序时一减一增推断为兑换，否则是 `contract`
+- **`heliusHistory({ apiKey })`**：Helius 增强交易（`/v0/addresses/{address}/transactions`），按 `accountData` 的余额变化整理成同样的 `Activity`；apiKey 由应用传入。传多个数据源时按顺序尝试，前一个失败换下一个，游标通用
+- 主网已经有 v1 格式的交易（2026-10 约三成），`getTransaction` 要传 `maxSupportedTransactionVersion: 1`（只传 0 时遇到它们整个请求报 -32015），本库已处理
+- 限制：免费节点不支持按时间 / 区块直接定位，`before` / `after` 只能从最新往后翻到目标；每页的请求数 ≈ `limit + 1`；Helius 数据源按文档的返回格式写，单元测试用样例数据，没有用真实 key 核对
+
+主网核对：热钱包翻两页（游标衔接、没有重复）、USDC / SOL 转账的方向和对手方、从 Raydium CLMM 池子最近的一笔交易里找到交易者并按 `types: ['swap']` 过滤、`after` 时间范围。
+
+打包：在已经用到 `SolanaClient` 的基础上，`/history` 约增加 21KB（minify，gzip 约 8KB），`heliusHistory` 约 3KB。
 
 ## 余额的三种模式
 
@@ -694,6 +804,8 @@ pnpm test:live:lp          # LP 仓位连主网核对
 pnpm test:live:liquidity   # 加减流动性在主网上模拟（simulateTransaction，不发送）
 pnpm test:live:swap        # 兑换：本地报价和主网模拟逐位核对（RECORD=1 时更新 test/fixtures/swap-mainnet.json.gz）
 pnpm test:live:risk        # 代币风险和买入 / 卖出模拟连主网
+pnpm test:live:simulate    # 交易模拟连主网（自己构建的交易、Jupiter 的 v0 交易）
+pnpm test:live:history     # 交易历史连主网（翻页、类型过滤、时间范围）
 pnpm demo        # 本地运行 demo（demo/，直接用 src 的源码）
 pnpm build
 ```

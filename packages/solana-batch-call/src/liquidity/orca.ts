@@ -223,6 +223,20 @@ export async function orcaAdd(ctx: Ctx, params: SolanaIncreaseLiquidityParams | 
   })
 }
 
+/**
+ * 关闭已清空的仓位（流动性、手续费、奖励都为 0）：销毁仓位 NFT、关闭仓位账户和 NFT 的代币账户（nftAccount，默认 owner 的 ATA），租金退给 receiver。
+ * NFT 是 Token-2022（带元数据扩展）时连 mint 一起关闭，否则（Metaplex 时代的 SPL Token NFT）mint 留着
+ */
+export function orcaClosePosition(owner: string, receiver: string, positionMint: string, nftProgram: string, nftAccount = getAssociatedTokenAddress(owner, positionMint, nftProgram)): Instruction {
+  const position = positionAddress(positionMint)
+  const token2022 = nftProgram === TOKEN_2022_PROGRAM_ID
+  return {
+    programId: PROGRAM,
+    keys: [r(owner, true), w(receiver), w(position), w(positionMint), w(nftAccount), r(nftProgram)],
+    data: anchorIx(token2022 ? 'close_position_with_token_extensions' : 'close_position'),
+  }
+}
+
 /** 移除（decrease + 领取手续费和奖励）/ 只领取（collectOnly） */
 export async function orcaRemove(ctx: Ctx, params: SolanaRemoveLiquidityParams, collectOnly = false): Promise<SolanaLiquidityPlan> {
   const mint = refMint(params.position)
@@ -304,11 +318,7 @@ export async function orcaRemove(ctx: Ctx, params: SolanaRemoveLiquidityParams, 
     })
   })
   if (burn) {
-    main.push(
-      nftProgram === TOKEN_2022_PROGRAM_ID
-        ? { programId: PROGRAM, keys: [r(ctx.owner, true), w(ctx.owner), w(positionAccount), w(mint), w(nftAccount), r(TOKEN_2022_PROGRAM_ID)], data: anchorIx('close_position_with_token_extensions') }
-        : { programId: PROGRAM, keys: [r(ctx.owner, true), w(ctx.owner), w(positionAccount), w(mint), w(nftAccount), r(TOKEN_PROGRAM_ID)], data: anchorIx('close_position') },
-    )
+    main.push(orcaClosePosition(ctx.owner, ctx.owner, mint, nftProgram))
   }
   return makePlan(ctx, {
     action: collectOnly ? 'collect' : 'remove',

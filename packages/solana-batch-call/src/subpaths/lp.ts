@@ -25,6 +25,7 @@ export {
   type SolanaLpClmmPosition,
   type SolanaLpPosition,
   type SolanaLpProtocol,
+  type SolanaLpReward,
   type SolanaLpToken,
   type SolanaPriceSource,
 } from '../lp.js'
@@ -38,15 +39,18 @@ export {
   getMaxAmounts,
   getMinAmounts,
   getMintAmounts,
+  getRewardGrowthInside,
   nearestUsableTick,
   orcaSqrtPriceAtTick,
   priceToTick,
   raydiumSqrtPriceAtTick,
+  rewardGrowthGlobal,
   sqrtPriceAtTick,
   sqrtPriceToPrice,
   tickAtSqrtPrice,
   tickToPrice,
   type ClmmProgram,
+  type RewardEmission,
   type TickFeeData,
 } from '../lpMath.js'
 
@@ -66,6 +70,6 @@ export interface GetLpPositionsOptions extends LpPositionsOptions, ShortcutOptio
  */
 export function getLpPositions(owner: string, options: GetLpPositionsOptions = {}): Promise<SolanaLpPosition[]> {
   // fetch 同时给节点请求（客户端配置）和查价用，与其他快捷函数一致
-  const { client, own } = resolve(options, ['protocols', 'mints', 'pools', 'includeClosed', 'prices', 'onPriceError', 'signal'])
+  const { client, own } = resolve(options, ['protocols', 'mints', 'pools', 'includeClosed', 'rewards', 'now', 'prices', 'onPriceError', 'signal'])
   return lpPositions(client, owner, { ...own, ...(options.fetch ? { fetch: options.fetch } : {}) })
 }
