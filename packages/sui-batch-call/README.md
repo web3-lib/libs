@@ -447,6 +447,56 @@ const [usdc, cetus] = await getCoinRisks([USDC, CETUS], { address: owner })   //
 
 打包（esbuild、minify，对比只用 `SuiClient`）：约增加 24KB（gzip 约 9KB）；检查能不能卖时按需加载兑换的代码（约 62KB，gzip 约 23KB）。
 
+## 模拟交易
+
+子路径 `@w3lib/sui-batch-call/simulate`：不签名、不上链，用节点的 `SimulateTransaction`（检查开启）看一笔交易会发生什么。可以直接传本库构建器（`buildSwap`、`buildAddLiquidity`…）的结果，模拟通过再发送。
+
+```ts
+import { simulate } from '@w3lib/sui-batch-call/simulate'
+
+const plan = await getSwapQuote(owner, { tokenIn: SUI_COIN_TYPE, tokenOut: USDC, amountInFormatted: '1' })
+const sim = await simulate(plan, { sender: owner })          // 构建器的结果 / TransactionKind 要传 sender
+const sim2 = await simulate(txBytesOrBase64)                 // 完整的 TransactionData（发送者在里面）
+// { success: true, gasUsed: '…', fee: '…',
+//   balanceChanges: [{ address, asset, symbol: 'SUI', decimals: 9, delta: '-1000000000', formatted: '-1', usd: -3.2 }, …],
+//   objectChanges: [{ objectId, type, kind: 'created' | 'deleted' | 'transferred' | 'mutated', from, to, coin }],
+//   decoded: { type: 'swap', protocol: 'dipcoin', method: 'router::swap', summary: 'Swap 1 SUI for 1.03 USDC on DipCoin', args: { calls } },
+//   warnings: [], approvalChanges: [] }
+```
+
+- `balanceChanges`：所有地址的币变化（含对方）；SUI 不含 gas（手续费在 `fee`：计算 + 存储 − 返还，可以是负数——只传命令时节点自动选 gas 币，会合并一批 Coin 拿到存储返还；要看接近真实的手续费传完整的 TransactionData）。`usd` 用 `/price` 按需加载（`prices: false` 关闭，查不到为 null）
+- `error` / `errorInfo`：失败原因。Move abort 给出函数、码和（新式错误的）常量名，系统包（`balance`、`coin`、`transfer`）常见码给出名字；余额不足、gas 不够等给可读说明。本库构建的兑换 / 移除用 SplitCoins 检查最少收到的数量，数量不够时会提示是滑点
+- `decoded`：Move 调用解码。认得本库支持的 12 个协议（调用里的包是升级后的 storage id，用 `ListPackageVersions` 的第一个版本对照原始 id，结果缓存）；类型 `transfer` / `swap` / `liquidity` / `mint` / `contract`；不认得的合约里发送者付出一种币、收到另一种币的当作兑换
+- `warnings`（`code`、`severity`、`message`）：`failed`、`publish`、`upgrade`、`unknown-package`（调用了不认得的包）、`object-transfer`（把非 Coin 对象转给别的地址）、`unknown-recipient`（`trustedRecipients` 传了白名单时，转给白名单之外的地址）、`high-gas-budget`（完整交易里的 gas 上限超过 `maxGasBudget`，默认 0.5 SUI）、`risky-token`（`risk: true` 时对收到的代币用 `/risk`（不模拟卖出）检查，按需加载）
+- Sui 没有授权，`approvalChanges` 总是 `[]`
+
+主网核对（2026-10，`test/simulate-live.test.ts`）：转账（余额变化不含 gas、收款人、新建的 Coin）、`0x2::pay::split` 超额的 Move abort 解码、`buildSwap` 的结果（识别出协议，余额变化 ≥ `amountOutMin`，美元价值）。
+
+**局限**：没有构建一对多转账的函数（`batchTransfer` 用 `dryRun` 模拟），其他的传 `kind`；只传命令时 gas 币由节点选；没有按协议的错误码表（新式错误的常量名由节点给）。
+
+## 交易历史
+
+子路径 `@w3lib/sui-batch-call/history`：地址的交易历史，整理成 `Activity`（转账、兑换、流动性、铸造、合约调用、失败的），游标翻页，新的在前。
+
+```ts
+import { getHistory } from '@w3lib/sui-batch-call/history'
+
+const page = await getHistory(address, { limit: 20, types: ['swap', 'transfer'] })
+// items: [{ hash, time, block, status: 'success', type: 'swap', protocol, label: 'Swap 1 SUI for 1.03 USDC on DipCoin',
+//           changes: [{ asset, symbol, decimals, delta, formatted }], direction, counterparty, fee, objects? }]
+const older = await getHistory(address, { cursor: page.nextCursor })
+```
+
+- 数据源：gRPC 里没有“某个地址的交易”的接口，JSON-RPC 的 `suix_queryTransactionBlocks` 在公共节点上已下线（返回 `Method not found`）。默认依次用 **GraphQL**（`graphql.mainnet.sui.io`，`transactions(filter: { affectedAddress })`，完整历史）和 **节点的 gRPC `ListTransactions`**（`affected_address` 过滤；公共节点只保留最近几周，`x-sui-lowest-available-checkpoint` 之前的被裁掉）。前面的出错换后面的；两个数据源整理出的 `Activity` 一致
+- 换数据源：`adapters: [graphqlHistory({ url, headers }), grpcHistory(transport), myIndexer]`。`HistoryAdapter` 是 `{ name, list(address, { limit, cursor, afterBlock, beforeBlock, signal }) → { txs: RawTx[], nextCursor } }`，带 Key 的索引服务实现它即可
+- 游标跟着数据源走（`数据源:checkpoint:原始游标`）：下一页优先用同一个；它出错时换下一个，从游标里的 checkpoint 接着取（这个 checkpoint 里的交易可能重复，按 `hash` 去重）
+- `fromBlock` / `toBlock`（checkpoint，含）限定范围；`types` 在取回后筛选，没取够 `limit` 时再取下一页（最多 5 页）；`limit` 默认 20，最多 50（GraphQL 每笔交易的响应约十几 KB）
+- 站在这个地址的角度：`changes` 是它自己的币变化（SUI 不含 gas，`fee` 只在它付 gas 时有）；别人发起、对它只是收到东西的交易记为 `transfer`（`direction: 'in'`）；`objects` 是收到 / 送出的非 Coin 对象（NFT）；失败的交易 `status: 'failed'`，`error` 是 abort 码 / 原因
+
+主网核对（2026-10，`test/simulate-live.test.ts`）：GraphQL 用游标往前翻页、时间递减且不重复；同一个地址 gRPC 与 GraphQL 整理出的 `Activity` 逐项相同；GraphQL 不可用时切到 gRPC。
+
+打包（esbuild、minify）：`/history` 约 35KB，`/simulate` 入口约 22KB（加上共用的客户端，`/price`、`/risk` 按需加载）。
+
 ## 节点
 
 - 节点是 gRPC-web 的 URL（如 `https://fullnode.mainnet.sui.io`），或自己实现的 `GrpcTransport`（`unary(method, request)`）；数组时依次故障切换

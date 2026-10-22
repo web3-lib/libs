@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@w3lib/sui-batch-call demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M16 6c4 5 7 8.5 7 12a7 7 0 0 1-14 0c0-3.5 3-7 7-12z' fill='%23fff'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header class="top">
@@ -14,7 +13,7 @@
     </header>
 
     <main>
-      <section class="card">
+      <section class="card" data-role="settings">
         <h2>设置</h2>
         <div class="row">
           <label for="node">节点</label>
@@ -27,11 +26,28 @@
             <button id="sample">示例地址</button>
           </div>
         </div>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（只读查询不需要钱包）</span>
+            <button id="connectWallet">连接钱包</button>
+          </div>
+        </div>
         <p class="hint">内置的公共全节点限频严，频繁查询时请填自己的节点或服务商的 gRPC-web 地址。设置保存在本地浏览器。</p>
       </section>
 
-      <section class="card">
-        <h2>余额 <small class="muted">getBalances：留空时 ListBalances 返回全部代币；指定代币时每个一次 GetBalance，并发发出</small></h2>
+      <section class="card" data-group="资产查询" data-key="balances" data-title="余额" data-mode="read" data-desc="查地址持有的全部代币余额，或指定代币。">
+        <h2>余额<small class="muted">getBalances：留空时 ListBalances 返回全部代币；指定代币时每个一次 GetBalance，并发发出</small></h2>
+        <script type="text/plain" data-usage>
+          import { SUI_COIN_TYPE, getBalances } from '@w3lib/sui-batch-call'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 不传 coinTypes：持有的全部代币（ListBalances，余额为 0 的不返回）；节点默认主网公共全节点（也可以传 provider）
+          const all = await getBalances(owner, { symbol: true })
+          // 指定代币：每个一次 GetBalance，并发发出
+          const list = await getBalances(owner, { coinTypes: [SUI_COIN_TYPE, USDC], symbol: true })
+          // [{ token: '0x000…002::sui::SUI', native: true, balance: '1500000000', decimals: 9, formatted: '1.5', symbol: 'SUI', success: true }, …]
+        </script>
         <div class="row">
           <label for="balanceCoins">代币</label>
           <textarea id="balanceCoins" placeholder="代币类型，每行一个（如 0x2::sui::SUI；留空：返回持有的全部代币）" spellcheck="false"></textarea>
@@ -43,8 +59,16 @@
         <div class="result" id="balancesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币信息 <small class="muted">getCoins：名称 / symbol / 精度 / 总供应量（GetCoinInfo）</small></h2>
+      <section class="card" data-group="资产查询" data-key="tokens" data-title="代币信息" data-mode="read" data-desc="读代币的名称、符号、精度和总供应量。">
+        <h2>代币信息<small class="muted">getCoins：名称 / symbol / 精度 / 总供应量（GetCoinInfo）</small></h2>
+        <script type="text/plain" data-usage>
+          import { SUI_COIN_TYPE, getCoins } from '@w3lib/sui-batch-call'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 每个代币一次 GetCoinInfo（进程内缓存）；类型可以写短格式，结果里是规范化的完整格式
+          const list = await getCoins([SUI_COIN_TYPE, USDC])
+          // [{ token: '0x000…002::sui::SUI', decimals: 9, name: 'Sui', symbol: 'SUI', description, iconUrl, totalSupply: '10000000000000000000', success: true }, …]
+        </script>
         <div class="row">
           <label for="coinTypes">代币</label>
           <textarea id="coinTypes" placeholder="代币类型，每行一个" spellcheck="false"></textarea>
@@ -56,8 +80,19 @@
         <div class="result" id="coinsResult"></div>
       </section>
 
-      <section class="card">
-        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：Cetus、Bluefin、Momentum、Turbos、Magma、FlowX、Kriya 的 CLMM 仓位和 Cetus DLMM 仓位（数量、手续费、奖励由合约在只读调用里算出），DipCoin、FlowX V2、Kriya 的 AMM LP，Aftermath 的多币池 LP</small></h2>
+      <section class="card" data-group="流动性" data-key="lp" data-title="LP 仓位" data-mode="read" data-desc="列出各 DEX 的 CLMM / DLMM / AMM / 多币池仓位，含数量、待领手续费和奖励。">
+        <h2>LP 仓位<small class="muted">getLpPositions（子路径 /lp）：Cetus、Bluefin、Momentum、Turbos、Magma、FlowX、Kriya 的 CLMM 仓位和 Cetus DLMM 仓位（数量、手续费、奖励由合约在只读调用里算出），DipCoin、FlowX V2、Kriya 的 AMM LP，Aftermath 的多币池 LP</small></h2>
+        <script type="text/plain" data-usage>
+          import { getLpPositions } from '@w3lib/sui-batch-call/lp'
+
+          // 扫描地址拥有的仓位对象和 LP 代币（12 个协议），手续费、奖励由合约在只读调用里算出；prices: true 用 DefiLlama 算美元价值
+          const list = await getLpPositions(owner, { prices: true })
+          // 只看指定的仓位对象（按类型认出协议）
+          const one = await getLpPositions(owner, { positions: ['0xfffa73532099a5b655d5d0c3a7827780718c9df98625edc19d61ed4ef617c215'] })
+          // [{ type: 'clmm', protocol: 'cetus', protocolName: 'Cetus', pool, position, token0: { coinType, symbol, decimals }, token1,
+          //    amount0Formatted, amount1Formatted, tickLower, tickUpper, inRange, fees0Formatted, fees1Formatted,
+          //    rewards: [{ coinType, symbol, decimals, amount, formatted, valueUsd }], valueUsd, feesUsd, rewardsUsd }, …]
+        </script>
         <div class="row">
           <label for="lpPositions">仓位</label>
           <textarea id="lpPositions" placeholder="仓位对象 ID，每行一个（可选；留空时扫描地址拥有的仓位对象）" spellcheck="false"></textarea>
@@ -73,15 +108,39 @@
         <div class="result" id="lpResult"></div>
       </section>
 
-      <section class="card">
-        <h2>添加 / 移除流动性 <small class="muted">子路径 /liquidity：build* 只构建（报价 + 交易内容），连接钱包后可以直接发送</small></h2>
-        <div class="row">
-          <label>钱包</label>
-          <div class="inline">
-            <span class="wallet-info" id="walletInfo">未连接（只构建时用上面“地址”栏的地址）</span>
-            <button id="connectWallet">连接钱包</button>
-          </div>
-        </div>
+      <section class="card" data-group="流动性" data-key="liquidity" data-title="添加 / 移除流动性" data-mode="mixed" data-wallet data-desc="新建、追加、移除仓位或领取：先报价并构建交易，确认后用钱包发送。">
+        <h2>添加 / 移除流动性<small class="muted">子路径 /liquidity：build* 只构建（报价 + 交易内容），连接钱包后可以直接发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { SuiClient } from '@w3lib/sui-batch-call'
+          import { buildAddLiquidity, buildCollectFees, buildRemoveLiquidity } from '@w3lib/sui-batch-call/liquidity'
+          import { lpPositions } from '@w3lib/sui-batch-call/lp'
+
+          const sui = new SuiClient()
+          const POOL = '0x51e883ba7c0b566a26cbc8a94cd33eb0abd418a77cc1e60ad22fd9b1f29cd2ab' // Cetus USDC / SUI
+          // 新建仓位：价格区间（token1 / token0；或 fullRange: true）+ 一边的数量；只读取、不签名
+          const plan = await buildAddLiquidity(sui, owner, { pool: POOL, priceLower: 0.1, priceUpper: 10, amount0Formatted: '1', slippage: 0.005 })
+          // 已有仓位（lpPositions 的结果或仓位对象 ID）：追加 / 按比例移除（burn: true 全部移除并关闭）/ 领取
+          const [position] = await lpPositions(sui, owner)
+          const remove = await buildRemoveLiquidity(sui, owner, { position: position!, percent: 50 })
+          const collect = await buildCollectFees(sui, owner, { position: position! })
+          // 多币池（Aftermath）：{ pool, coin: USDC, amountFormatted: '100', single: true }；只取回一种币：{ position, percent: 50, outCoin: USDC }
+          // { action: 'add', protocol: 'cetus', position: null, tickLower, tickUpper, liquidity, amount0, amount1, fixed: 'token0',
+          //   amount0Max, amount1Max, amount0Min, amount1Min, kind, gasSpend, … }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { SuiClient } from '@w3lib/sui-batch-call'
+          import { addLiquidity, removeLiquidity } from '@w3lib/sui-batch-call/liquidity'
+
+          const sui = new SuiClient()
+          const POOL = '0x51e883ba7c0b566a26cbc8a94cd33eb0abd418a77cc1e60ad22fd9b1f29cd2ab' // Cetus USDC / SUI
+          // 浏览器钱包（@w3lib/wallet 连接的 Wallet Standard 钱包）；也可以直接传私钥 'suiprivkey1…'
+          const c = wallet.getConnection('sui')!
+          const signer = { wallet: c.provider as never, account: c.address }
+          // 报价后签名发送（dryRun: true 只模拟，不请求签名）
+          const r = await addLiquidity(sui, signer, { pool: POOL, fullRange: true, amount1Formatted: '1', slippage: 0.005 })
+          await removeLiquidity(sui, signer, { position: '0xfffa73532099a5b655d5d0c3a7827780718c9df98625edc19d61ed4ef617c215', burn: true })
+          // r：{ status: 'confirmed', digest: '9wYi…', fee: '1000099', checkpoint, error: null, plan }，plan.kind 是实际发出的交易
+        </script>
         <div class="row">
           <label for="liqAction">操作</label>
           <select id="liqAction">
@@ -111,7 +170,7 @@
         <div id="liqExisting" hidden>
           <div class="row">
             <label for="liqPosition">仓位</label>
-            <select id="liqPosition"><option value="">先在上面“LP 仓位”里查询</option></select>
+            <div class="inline"><select id="liqPosition"><option value="">点右边“加载我的仓位”，或在“LP 仓位”页查询</option></select><button id="liqLoad" type="button">加载我的仓位</button><span class="stats" id="liqLoadStatus"></span></div>
           </div>
           <div class="row" id="liqOutCoinRow" hidden>
             <label for="liqOutCoin">取回</label>
@@ -143,7 +202,7 @@
         <div class="actions">
           <span class="checks"><label>滑点 <input id="liqSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <button class="primary" id="runLiqBuild">报价（只构建）</button>
-          <button class="primary" id="runLiqSend">发送（钱包确认）</button>
+          <button class="primary send" id="runLiqSend">发送（钱包确认）</button>
           <span class="stats" id="liqStats"></span>
         </div>
         <p class="hint">
@@ -153,8 +212,22 @@
         <div class="result" id="liqResult"></div>
       </section>
 
-      <section class="card">
-        <h2>价格 / 资产总值 <small class="muted">子路径 /price：tokenPrices（DefiLlama，没收录的从 Cetus、Turbos、FlowX 的池子算）、portfolio（持有的全部代币 × 价格，可选加上 LP 仓位）</small></h2>
+      <section class="card" data-group="资产查询" data-key="price" data-title="价格 / 资产总值" data-mode="read" data-desc="查代币美元价格，或算整个地址的资产总值。">
+        <h2>价格 / 资产总值<small class="muted">子路径 /price：tokenPrices（DefiLlama，没收录的从 Cetus、Turbos、FlowX 的池子算）、portfolio（持有的全部代币 × 价格，可选加上 LP 仓位）</small></h2>
+        <script type="text/plain" data-usage>
+          import { SUI_COIN_TYPE } from '@w3lib/sui-batch-call'
+          import { defillamaPrices, getPortfolio, getTokenPrices } from '@w3lib/sui-batch-call/price'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 默认先 DefiLlama，没收录的从 Cetus / Turbos / FlowX 的池子算
+          const prices = await getTokenPrices([SUI_COIN_TYPE, USDC])
+          // [{ token: '0x000…002::sui::SUI', native: true, price: 3.21, source: 'defillama' }, …]
+          // 历史价格：DefiLlama 的 at（unix 秒或 Date）
+          const old = await getTokenPrices([SUI_COIN_TYPE], { sources: [defillamaPrices({ at: new Date('2026-01-01') })] })
+          // 资产总值：持有的全部代币 × 价格，lp: true 加上 LP 仓位；minUsd 只影响列出的代币，不影响合计
+          const p = await getPortfolio(owner, { lp: true, minUsd: 1 })
+          // p.totalUsd 是合计；p.tokens 按价值排序，p.lp 是 LP 仓位
+        </script>
         <div class="row">
           <label for="priceCoins">代币</label>
           <textarea id="priceCoins" placeholder="代币类型，每行一个（价格查询用；资产总值用“地址”栏的地址，代币留空时算持有的全部）" spellcheck="false"></textarea>
@@ -177,8 +250,18 @@
         <div class="result" id="priceResult"></div>
       </section>
 
-      <section class="card">
-        <h2>域名 <small class="muted">子路径 /names：SuiNS，名字 → 地址（resolveNames），地址 → 默认名字（lookupAddresses，正查核对过）</small></h2>
+      <section class="card" data-group="工具" data-key="names" data-title="域名" data-mode="read" data-desc="SuiNS 名字和地址互相解析。">
+        <h2>域名<small class="muted">子路径 /names：SuiNS，名字 → 地址（resolveNames），地址 → 默认名字（lookupAddresses，正查核对过）</small></h2>
+        <script type="text/plain" data-usage>
+          import { getAddressNames, getNameAddresses } from '@w3lib/sui-batch-call/names'
+
+          // 名字 → 地址：点分格式或 @ 格式，大小写不限；过期、没设地址的为 null
+          const list = await getNameAddresses(['example.sui', '@adeniyi'])
+          // [{ name: 'example.sui', normalized: 'example.sui', address: '0x214a…9db0', expiresAt: 1912952738221 }, …]
+          // 地址 → 默认名字：读反查记录后再正查核对
+          const names = await getAddressNames([owner])
+          // [{ address: '0x1eb7…e0b1', name: 'adeniyi.sui' }]
+        </script>
         <div class="row">
           <label for="nameList">名字</label>
           <textarea id="nameList" placeholder="SuiNS 名字，每行一个（example.sui、@example、sub.example.sui、sub@example）" spellcheck="false"></textarea>
@@ -189,7 +272,7 @@
         </div>
         <div class="row">
           <label for="nameAddresses">地址</label>
-          <textarea id="nameAddresses" placeholder="地址，每行一个（留空用上面“地址”栏的地址）" spellcheck="false"></textarea>
+          <textarea id="nameAddresses" placeholder="地址，每行一个（留空用顶部的地址）" spellcheck="false"></textarea>
         </div>
         <div class="actions">
           <button class="primary" id="runAddressNames">地址 → 名字</button>
@@ -200,8 +283,22 @@
         <div class="result" id="addressNamesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>手续费 <small class="muted">子路径 /fees：estimateFees（当前参考 gas 价格），estimateCost（一笔交易模拟执行，不发送）</small></h2>
+      <section class="card" data-group="工具" data-key="fees" data-title="手续费 / gas" data-mode="read" data-desc="查当前参考 gas 价格，或模拟一笔交易估算花费。">
+        <h2>手续费<small class="muted">子路径 /fees：estimateFees（当前参考 gas 价格），estimateCost（一笔交易模拟执行，不发送）</small></h2>
+        <script type="text/plain" data-usage>
+          import { getCostEstimate, getFeeEstimate } from '@w3lib/sui-batch-call/fees'
+          import { PtbBuilder, pure } from '@w3lib/sui-batch-call/write'
+
+          // 当前 epoch 的参考 gas 价格（epoch 内不变）
+          const fee = await getFeeEstimate()   // { epoch: '1285', referenceGasPrice: '100' }
+          // 一笔交易的花费：转 0.001 SUI（从 gas 币拆出），模拟执行，不签名、不发送
+          const ptb = new PtbBuilder()
+          const coin = ptb.command({ kind: 'splitCoins', coin: ptb.gas, amounts: [ptb.pure(pure.u64(1_000_000n))] })
+          ptb.command({ kind: 'transferObjects', objects: [ptb.nested(coin, 0)], address: ptb.pure(pure.address(owner)) })
+          const cost = await getCostEstimate({ from: owner, kind: ptb.build() })
+          // { gasPrice: '100', computationCost, storageCost, storageRebate, total: '1088099', totalFormatted: '0.001088099',
+          //   gasBudget: '2491200', gasBudgetFormatted: '0.0024912', symbol: 'SUI' }
+        </script>
         <div class="actions">
           <button class="primary" id="runGasPrice">参考 gas 价格</button>
           <span class="stats" id="gasPriceStats"></span>
@@ -219,18 +316,40 @@
           <span class="stats" id="costStats"></span>
         </div>
         <p class="hint">
-          估算一笔“从 gas 币拆出这些 SUI 转给接收地址”的交易，发送者是上面“地址”栏的地址，要持有 SUI（只模拟，不需要私钥，不会发送）。
+          估算一笔“从 gas 币拆出这些 SUI 转给接收地址”的交易，发送者是顶部的地址，要持有 SUI（只模拟，不需要私钥，不会发送）。
           Sui 的 gas 价格每个 epoch 才定一次，没有分档；gas 上限是发送时给的上限，实际花费是净花费。
         </p>
         <div class="result" id="costResult"></div>
       </section>
 
-      <section class="card">
-        <h2>兑换 <small class="muted">子路径 /swap：在 12 个协议里找最好的路线（直接或经过 SUI / USDC 两跳），每条路线用只读调用报价；连接钱包后可以发送</small></h2>
+      <section class="card" data-group="交易" data-key="swap" data-title="兑换" data-mode="mixed" data-wallet data-desc="在 12 个协议里找最好的路线并报价，确认后用钱包发送。">
+        <h2>兑换<small class="muted">子路径 /swap：在 12 个协议里找最好的路线（直接或经过 SUI / USDC 两跳），每条路线用只读调用报价；连接钱包后可以发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { SUI_COIN_TYPE } from '@w3lib/sui-batch-call'
+          import { getSwapQuote } from '@w3lib/sui-batch-call/swap'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 12 个协议里找最好的路线（直接或经过 SUI / USDC 两跳），每条路线一次只读调用报价；pools 加上没有登记表的 DEX 的池子
+          const plan = await getSwapQuote(owner, { tokenIn: SUI_COIN_TYPE, tokenOut: USDC, amountInFormatted: '1' }, { slippage: 0.005 })
+          // { amountOut: '9936693', amountOutFormatted: '9.936693', amountOutMin: '9887009', price: 0.9937, priceImpact: 0.00001,
+          //   route: { path: [SUI, USDC], hops: [{ protocol: 'dipcoin', pool: '0x7fbd…', tokenIn, tokenOut, fee: 3000 }], amountOut }, routes: [...], kind, gasSpend }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { SUI_COIN_TYPE, SuiClient } from '@w3lib/sui-batch-call'
+          import { swap } from '@w3lib/sui-batch-call/swap'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 浏览器钱包（@w3lib/wallet 连接的 Wallet Standard 钱包）；也可以直接传私钥 'suiprivkey1…'
+          const c = wallet.getConnection('sui')!
+          const signer = { wallet: c.provider as never, account: c.address }
+          // 发送时按最新的 Coin 重新构建（路线和 amountOutMin 不变）；dryRun: true 只模拟
+          const r = await swap(new SuiClient(), signer, { tokenIn: SUI_COIN_TYPE, tokenOut: USDC, amountInFormatted: '1' }, { slippage: 0.005 })
+          // r.status：'confirmed'；r.plan 是实际发出的交易和报价
+        </script>
         <div class="row">
           <label>钱包</label>
           <div class="inline">
-            <span class="wallet-info" id="swapWalletInfo">未连接（只报价时用上面“地址”栏的地址）</span>
+            <span class="wallet-info" id="swapWalletInfo">未连接（只报价时用顶部的地址）</span>
             <button id="swapConnect">连接钱包</button>
           </div>
         </div>
@@ -252,7 +371,7 @@
         <div class="actions">
           <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <button class="primary" id="runSwapQuote">报价（只构建）</button>
-          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <button class="primary send" id="runSwapSend">发送（钱包确认）</button>
           <span class="stats" id="swapStats"></span>
         </div>
         <p class="hint">
@@ -262,8 +381,53 @@
         <div class="result" id="swapResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币风险 <small class="muted">子路径 /risk：监管币（能否冻结地址、全局暂停）、增发权限（TreasuryCap 在谁手里）、元数据能否修改，可选模拟买入再卖出</small></h2>
+      <section class="card" data-group="交易" data-key="batch-transfer" data-title="批量转账" data-mode="write" data-wallet data-desc="用连接的钱包一次转给多个地址（SUI 或某个代币），默认只模拟不发送。">
+        <h2>批量转账 <small class="muted">子路径 /write：batchTransfer：所有收款人打包进同一笔可编程交易</small></h2>
+        <script type="text/plain" data-usage>
+          import { SuiClient } from '@w3lib/sui-batch-call'
+          import { batchTransfer } from '@w3lib/sui-batch-call/write'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          // 浏览器钱包（@w3lib/wallet 连接的 Wallet Standard 钱包）；也可以直接传私钥 'suiprivkey1…'
+          const c = wallet.getConnection('sui')!
+          const signer = { wallet: c.provider as never, account: c.address }
+          // 所有收款人打包进同一笔可编程交易；不传 token 时转 SUI；dryRun: true 只模拟、不请求签名
+          const results = await batchTransfer(new SuiClient(), signer, [
+            { to: '0xffd4f043057226453aeba59732d41c6093516f54823ebc3a16d17f8a77d2f0ad', formatted: '1.5' },
+            { to: '0x9f63425709069336fec108bd4ba69a8f3d23e8ab237311f3ce58ae2bb0ed4d7f', formatted: '20' },
+          ], { token: USDC, dryRun: true })
+          // [{ index: 0, from, to, token, amount, formatted, status: 'simulated', digest, fee, checkpoint, error: null }, …]
+        </script>
+        <div class="row">
+          <label for="btRecipients">收款</label>
+          <textarea id="btRecipients" placeholder="每行一个：地址 数量（按代币单位，如 0xabc… 1.5）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="btToken">代币</label>
+          <input id="btToken" placeholder="代币类型（留空：转 SUI）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="btDry" checked /> 只模拟，不发送</label></span>
+          <button class="primary send" id="runBt">执行</button>
+          <span class="stats" id="btStats"></span>
+        </div>
+        <p class="hint">所有收款人打包进同一笔可编程交易，SUI 和代币可以混在一起。取消勾选“只模拟”后会弹出确认再发送，钱包里还要再确认。归集（多个钱包 → 一个地址）和通用批量调用要多个钱包的私钥，不放进浏览器 demo，用法见 README 的“批量写操作”。</p>
+        <div class="result" id="btResult"></div>
+      </section>
+
+      <section class="card" data-group="安全" data-key="risk" data-title="代币风险" data-mode="read" data-desc="检查监管币、增发权限、元数据可改性，可选模拟买入再卖出。">
+        <h2>代币风险<small class="muted">子路径 /risk：监管币（能否冻结地址、全局暂停）、增发权限（TreasuryCap 在谁手里）、元数据能否修改，可选模拟买入再卖出</small></h2>
+        <script type="text/plain" data-usage>
+          import { getCoinRisks } from '@w3lib/sui-batch-call/risk'
+
+          const USDC = '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'
+          const CETUS = '0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS'
+          // 监管币、增发权限、元数据能否修改；sell 用 amount（MIST）模拟买入再卖出；address 查这个地址有没有被冻结
+          const [usdc, cetus] = await getCoinRisks([USDC, CETUS], { sell: true, amount: 100_000_000n, address: owner })
+          // usdc：{ regulated: true, allowGlobalPause: true, paused: false, denied: false, supply: 'mintable', metadataMutable: true,
+          //         sell: { stage: 'ok', route: [{ protocol: 'cetus', pool: '0x51e8…' }], roundTripLoss: 0.0002 }, honeypot: false,
+          //         flags: ['regulated', 'global-pause', 'mintable', 'mutable-metadata'] }
+        </script>
         <div class="row">
           <label for="riskCoins">代币</label>
           <textarea id="riskCoins" placeholder="代币类型，每行一个" spellcheck="false"></textarea>
@@ -282,8 +446,65 @@
         <div class="result" id="riskResult"></div>
       </section>
 
-      <section class="card">
+      <section class="card" data-group="安全" data-key="simulate" data-title="交易模拟" data-mode="read" data-desc="发送前预演一笔交易：余额 / 对象变化、gas、失败原因和提醒。">
+        <h2>模拟交易<small class="muted">子路径 /simulate：不签名，看余额变化、对象变化、gas、失败原因、提醒；这里模拟“地址”栏的地址转出 SUI</small></h2>
+        <script type="text/plain" data-usage>
+          import { simulate } from '@w3lib/sui-batch-call/simulate'
+          import { PtbBuilder, pure } from '@w3lib/sui-batch-call/write'
+
+          const to = '0x9f63425709069336fec108bd4ba69a8f3d23e8ab237311f3ce58ae2bb0ed4d7f'
+          // 转出 0.001 SUI（从 gas 币拆出）；buildSwap / buildAddLiquidity 等构建器的结果也可以直接传
+          const ptb = new PtbBuilder()
+          const coin = ptb.command({ kind: 'splitCoins', coin: ptb.gas, amounts: [ptb.pure(pure.u64(1_000_000n))] })
+          ptb.command({ kind: 'transferObjects', objects: [ptb.nested(coin, 0)], address: ptb.pure(pure.address(to)) })
+          // 不签名；只传命令时要给 sender
+          const sim = await simulate({ kind: ptb.build() }, { sender: owner })
+          // { success: true, gasUsed: '…', fee: '…', balanceChanges: [{ address, asset, symbol: 'SUI', decimals: 9, delta: '-1000000', formatted: '-0.001', usd }, …],
+          //   objectChanges: [{ objectId, type, kind: 'created', from, to, coin }], decoded: { type: 'transfer', summary }, warnings: [], approvalChanges: [] }
+        </script>
+        <div class="row">
+          <label for="simTo">收款地址</label>
+          <input id="simTo" placeholder="0x…" spellcheck="false" />
+          <label for="simAmount">数量 (SUI)</label>
+          <input id="simAmount" class="small" value="0.001" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runSim">模拟</button>
+          <span class="stats" id="simStats"></span>
+        </div>
+        <p class="hint">发送者要持有足够的 SUI（模拟检查输入对象和余额）；本库构建器（兑换、流动性）的结果也可以直接传给 <code>simulate</code>。</p>
+        <div class="result" id="simResult"></div>
+      </section>
+
+      <section class="card" data-group="工具" data-key="history" data-title="历史记录" data-mode="read" data-desc="查地址的转账、兑换、流动性、铸造等历史。">
+        <h2>交易历史<small class="muted">子路径 /history：GraphQL（完整历史）+ 节点 gRPC（最近几周）备用，整理成转账 / 兑换 / 流动性 / 铸造 / 失败</small></h2>
+        <script type="text/plain" data-usage>
+          import { getHistory } from '@w3lib/sui-batch-call/history'
+
+          // 默认 GraphQL（完整历史），出错换节点 gRPC（最近几周）；新的在前，limit 最多 50
+          const page = await getHistory(owner, { limit: 20 })
+          const older = await getHistory(owner, { limit: 20, cursor: page.nextCursor })   // 下一页
+          // items: [{ hash, time, block, status: 'success', type: 'swap', protocol, label: 'Swap 1 SUI for 1.03 USDC on DipCoin',
+          //           changes: [{ asset, symbol, decimals, delta, formatted }], direction, counterparty, fee, objects? }]
+        </script>
+        <div class="actions">
+          <label>每页 <input id="histLimit" class="small" value="20" spellcheck="false" /> 笔</label>
+          <button class="primary" id="runHistory">查询</button>
+          <button class="primary" id="runHistoryMore" disabled>下一页</button>
+          <span class="stats" id="histStats"></span>
+        </div>
+        <div class="result" id="histResult"></div>
+      </section>
+
+      <section class="card" data-group="资产查询" data-key="nft" data-title="NFT" data-mode="read" data-desc="列出地址拥有的 NFT（名称、图片取自 Display）。">
         <h2>NFT<small class="muted">getNfts：地址拥有的 NFT，名称、图片取自节点渲染的 Display</small></h2>
+        <script type="text/plain" data-usage>
+          import { getNfts } from '@w3lib/sui-batch-call'
+
+          // 地址拥有的 NFT：名称、图片取自节点渲染的 Display；type 只看某个类型或前缀（如 '0x…::suins_registration::SuinsRegistration'）
+          const list = await getNfts(owner, { limit: 100 })
+          // [{ objectId, type, name, description, imageUrl, link, projectUrl, creator, display }, …]
+        </script>
         <div class="row">
           <label for="nftType">类型</label>
           <input id="nftType" placeholder="只看这个类型或前缀（可选，如 0x…::suins_registration::SuinsRegistration）" spellcheck="false" />
@@ -295,8 +516,15 @@
         <div class="result" id="nftResult"></div>
       </section>
 
-      <section class="card">
-        <h2>对象 <small class="muted">getObjects：按 ID 读对象（BatchGetObjects，每次 50 个），不存在的为 null</small></h2>
+      <section class="card" data-group="资产查询" data-key="objects" data-title="对象" data-mode="read" data-desc="按 ID 批量读取链上对象。">
+        <h2>对象<small class="muted">getObjects：按 ID 读对象（BatchGetObjects，每次 50 个），不存在的为 null</small></h2>
+        <script type="text/plain" data-usage>
+          import { getObjects } from '@w3lib/sui-batch-call'
+
+          // BatchGetObjects，每次 50 个自动分批；不存在的为 null
+          const list = await getObjects(['0x6', '0x51e883ba7c0b566a26cbc8a94cd33eb0abd418a77cc1e60ad22fd9b1f29cd2ab'], { fields: ['type', 'owner', 'json'] })
+          // [{ objectId: '0x000…006', version, digest, type: '0x2::clock::Clock', owner: { kind: 'shared', address: null, initialSharedVersion: 1n }, json: { … } }, …]
+        </script>
         <div class="row">
           <label for="objectIds">对象</label>
           <textarea id="objectIds" placeholder="对象 ID，每行一个" spellcheck="false"></textarea>

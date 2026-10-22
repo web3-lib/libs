@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- 模拟交易，子路径 `@w3lib/sui-batch-call/simulate`：`simulate` / `simulateTx`（`SimulateTransaction`，不签名）：所有地址的余额变化（不含 gas，可选美元价值）、对象变化（新建 / 删除 / 换所有者）、gas 明细和手续费、失败原因解码（Move abort 的函数 / 码 / 常量名，系统包常见码）、Move 调用解码（本库认得的 12 个协议，按原始包 id 对照）、提醒（失败、发布 / 升级包、不认得的包、把对象转给别的地址、收款人白名单、过高的 gas 上限、可选的代币风险）；接受完整的 TransactionData（字节 / base64）或构建器的结果（`buildSwap`、`buildAddLiquidity`… 的 `kind`，传 `sender`）
+- 交易历史，子路径 `@w3lib/sui-batch-call/history`：`getHistory` / `getHistoryOf`：整理成 `Activity`（转账 / 兑换 / 流动性 / 铸造 / 合约调用，失败的、方向、对方、币变化、手续费、收到 / 送出的对象），游标翻页；数据源 GraphQL（完整历史，默认）和节点的 gRPC `ListTransactions`（最近几周），前面的出错换后面的，可以传自己的 `HistoryAdapter`（`graphqlHistory`、`grpcHistory`）
+- `GrpcResponse.frames`：服务端流式方法（如 `ListTransactions`）的全部数据帧
+
 ## 0.2.0
 
 ### 新功能

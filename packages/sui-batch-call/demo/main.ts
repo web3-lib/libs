@@ -1,5 +1,7 @@
+import { mountShell } from '../../demo-shared/shell'
 import { SUI_COIN_TYPE, SuiClient, formatUnits, normalizeSuiAddress, parseUnits, type NftDetails } from '@w3lib/sui-batch-call'
 import { estimateCost, estimateFees } from '@w3lib/sui-batch-call/fees'
+import { getHistoryOf, graphqlHistory, grpcHistory, type Activity } from '@w3lib/sui-batch-call/history'
 import {
   addLiquidity,
   buildAddLiquidity,
@@ -17,11 +19,15 @@ import { SUI_LP_PROTOCOLS, lpPositions, type SuiLpPosition, type SuiLpProtocol }
 import { lookupAddresses, resolveNames } from '@w3lib/sui-batch-call/names'
 import { defillamaPrices, portfolio, tokenPrices } from '@w3lib/sui-batch-call/price'
 import { coinRisks, type CapHolder } from '@w3lib/sui-batch-call/risk'
+import { simulateTx } from '@w3lib/sui-batch-call/simulate'
 import { buildSwap, swap, type SwapOptions, type SwapParams, type SwapPlan, type SwapResult } from '@w3lib/sui-batch-call/swap'
-import { PtbBuilder, pure } from '@w3lib/sui-batch-call/write'
+import { PtbBuilder, batchTransfer, pure } from '@w3lib/sui-batch-call/write'
 import { createWallet } from '@w3lib/wallet'
 import { sui } from '@w3lib/wallet/sui'
 import { createWalletModal } from '@w3lib/wallet/ui'
+
+// 外壳：侧边分组导航 + 设置 / 连接面板（见 packages/demo-shared/shell.ts）
+mountShell()
 
 // ---- 示例数据 ----
 
@@ -179,8 +185,9 @@ const lines = (text: string) =>
     .filter(Boolean)
 
 function owner(): string {
-  const value = ownerInput.value.trim()
-  if (!value) throw new Error('请先填写地址（或点“示例地址”）')
+  // 没填地址时用已连接钱包的地址
+  const value = ownerInput.value.trim() || connection()?.address || ''
+  if (!value) throw new Error('请先在顶部“地址”里填写地址（或点“示例地址”，或连接钱包）')
   return value
 }
 
@@ -342,7 +349,8 @@ bind('runCoins', 'coins', async () => {
   }
 })
 
-bind('runLp', 'lp', async () => {
+/** LP 查询（“LP 仓位”页的按钮和“加载我的仓位”共用） */
+async function queryLp() {
   const positions = lines($<HTMLTextAreaElement>('lpPositions').value)
   const prices = $<HTMLInputElement>('lpPrices').checked
   let priceError: unknown = null
@@ -408,7 +416,8 @@ bind('runLp', 'lp', async () => {
     }),
   )
   return { data: list, view: withWarnings(view, [...(priceError === null ? [] : [`价格服务出错，这次没有美元价值：${errorText(priceError)}`]), ...protocolErrors.map((e) => `读取出错，跳过了这个协议的仓位：${e}`)]) }
-})
+}
+bind('runLp', 'lp', queryLp)
 
 function wrapWith(text: string, node: Node): Node {
   const span = document.createElement('span')
@@ -491,10 +500,15 @@ const connection = () => wallet.getConnection('sui')
 
 function renderWallet() {
   const c = connection()
-  $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只构建时用上面“地址”栏的地址）'
+  // 连上钱包、地址栏还空着：填上钱包地址（查询默认查自己的钱包）
+  if (c && !ownerInput.value.trim()) {
+    ownerInput.value = c.address
+    ownerInput.dispatchEvent(new Event('change'))
+  }
+  $('walletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只读查询不需要钱包）'
   $('connectWallet').textContent = c ? '切换 / 断开' : '连接钱包'
   // 兑换区块里的钱包行
-  $('swapWalletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只报价时用上面“地址”栏的地址）'
+  $('swapWalletInfo').textContent = c ? `${c.walletName} · ${c.address}` : '未连接（只报价时用顶部的地址）'
   $('swapConnect').textContent = c ? '切换 / 断开' : '连接钱包'
 }
 wallet.subscribe(() => renderWallet())
@@ -517,7 +531,7 @@ function setPositions(list: SuiLpPosition[], of: string) {
     const id = p.type === 'clmm' || p.type === 'dlmm' ? `仓位 ${p.position.slice(0, 6)}…${p.position.slice(-4)}` : shareText(p.share)
     return new Option(`${p.protocolName} · ${pair} · ${id}`, String(i))
   })
-  liq.position.replaceChildren(...(options.length ? options : [new Option('先在上面“LP 仓位”里查询（用同一个地址）', '')]))
+  liq.position.replaceChildren(...(options.length ? options : [new Option('没有仓位：点右边“加载我的仓位”，或在“LP 仓位”页查询', '')]))
   applyAction()
 }
 
@@ -1019,5 +1033,119 @@ bind('runRisk', 'risk', async () => {
         return [wrapWith(r.symbol ?? '?', addr(r.token)), regulated, supply, holder(r.treasuryCap), metadata, canSell, r.flags.join('、') || '无']
       }),
     ),
+  }
+})
+
+// ---- 模拟交易（子路径 /simulate） ----
+
+bind('runSim', 'sim', async () => {
+  const to = normalizeSuiAddress($<HTMLInputElement>('simTo').value.trim())
+  const amount = parseUnits($<HTMLInputElement>('simAmount').value, 9)
+  const from = normalizeSuiAddress(owner())
+  const ptb = new PtbBuilder()
+  const coin = ptb.command({ kind: 'splitCoins', coin: { kind: 'gas' }, amounts: [ptb.pure(pure.u64(amount))] })
+  ptb.command({ kind: 'transferObjects', objects: [ptb.nested(coin, 0)], address: ptb.pure(pure.address(to)) })
+  const sim = await simulateTx(client(), { kind: ptb.build() }, { sender: from })
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.textContent = `${sim.success ? '会成功' : '会失败'}：${sim.decoded.summary}${sim.error ? `（${sim.error}）` : ''} · gas 用量 ${formatUnits(BigInt(sim.gasUsed), 9)} SUI`
+  view.append(
+    note,
+    table(
+      ['地址', '代币', '变化', '美元'],
+      sim.balanceChanges.map((c) => [addr(c.address), c.symbol ?? c.asset, c.formatted, c.usd == null ? null : c.usd.toFixed(4)]),
+      [2, 3],
+    ),
+    table(['提醒', '说明'], sim.warnings.map((w) => [tag(w.code, w.severity === 'info' ? '' : 'bad'), w.message])),
+  )
+  return { data: sim, view }
+})
+
+// ---- 交易历史（子路径 /history） ----
+
+let historyCursor: string | undefined
+/** 游标属于哪次查询（地址、网络）：换了之后“下一页”不能接着用旧游标 */
+let historyFor = ''
+const historyKey = () => [owner(), network()].join('|')
+function historyRows(items: Activity[]): Cell[][] {
+  return items.map((a) => [
+    new Date(a.time * 1000).toLocaleString(),
+    tag(a.status === 'failed' ? `${a.type} · 失败` : a.type, a.status === 'failed' ? 'bad' : ''),
+    a.label,
+    a.changes.map((c) => `${c.formatted} ${c.symbol ?? ''}`).join('、'),
+    a.counterparty ? addr(a.counterparty) : null,
+    wrapWith(a.hash.slice(0, 10) + '…', addr(a.hash)),
+  ])
+}
+async function runHistory(more: boolean) {
+  // “下一页”按钮的禁用状态会被 bind 在查询结束时恢复，不能只靠它：这里再检查一次
+  if (more && !historyCursor) throw new Error('没有下一页：请先点“查询”')
+  if (more && historyFor !== historyKey()) throw new Error('地址或网络变了：请重新点“查询”')
+  // 发请求前记下这次查询的条件：等待期间改了表单，游标也只属于发出去的那次查询
+  const key = historyKey()
+  const limit = Math.max(1, Math.min(50, Number($<HTMLInputElement>('histLimit').value) || 20))
+  const page = await getHistoryOf(client(), normalizeSuiAddress(owner()), {
+    limit,
+    ...(more && historyCursor ? { cursor: historyCursor } : {}),
+    adapters: [graphqlHistory({ network: network(), fetch: countingFetch }), grpcHistory(client().transport)],
+  })
+  historyCursor = page.nextCursor
+  historyFor = key
+  $<HTMLButtonElement>('runHistoryMore').disabled = !historyCursor
+  return { data: page, view: table(['时间', '类型', '说明', '币变化', '对方', '交易'], historyRows(page.items)) }
+}
+bind('runHistory', 'hist', () => runHistory(false))
+bind('runHistoryMore', 'hist', () => runHistory(true))
+
+// ---- 批量转账（子路径 /write） ----
+
+const bt = { recipients: $<HTMLTextAreaElement>('btRecipients'), token: $<HTMLInputElement>('btToken'), dry: $<HTMLInputElement>('btDry') }
+
+bind('runBt', 'bt', async () => {
+  const rows = bt.recipients.value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [to, formatted] = l.split(/[\s,]+/)
+      if (!to || !formatted) throw new Error(`格式不对：${l}（每行“地址 数量”）`)
+      return { to, formatted }
+    })
+  if (!rows.length) throw new Error('请填收款地址和数量')
+  if (rows.length > 200) throw new Error('demo 一次最多 200 个收款人')
+  const dryRun = bt.dry.checked
+  const token = bt.token.value.trim()
+  const c = await walletForSend()
+  if (!dryRun && !confirm(`用 ${c.address} 向 ${rows.length} 个地址转${token ? `（${token}）` : ' SUI'}，确认发送？`)) throw new Error('已取消')
+  const progress = $('btStats')
+  const results = await batchTransfer(client(), { wallet: c.provider, account: c.address } as never, rows, {
+    ...(token ? { token } : {}),
+    dryRun,
+    onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 项：${r.status}`),
+  })
+  return {
+    data: results,
+    view: table(
+      ['#', '收款', '数量', '状态', '交易'],
+      results.map((r, i) => [i + 1, addr(r.to), r.formatted ?? r.amount, tag(r.status + (r.error ? `：${r.error}` : ''), r.status === 'confirmed' || r.status === 'simulated' ? 'ok' : r.status === 'failed' || r.status === 'reverted' ? 'bad' : ''), r.digest ? link(r.digest, network()) : null]),
+      [2],
+    ),
+  }
+})
+
+// 仓位下拉框的内容来自 LP 查询：这里直接调用同一个查询（同一个地址），不用切页
+$('liqLoad').addEventListener('click', async () => {
+  const status = $('liqLoadStatus')
+  const button = $<HTMLButtonElement>('liqLoad')
+  button.disabled = true
+  status.textContent = '查询中…'
+  try {
+    await queryLp()
+    const count = Array.from($<HTMLSelectElement>('liqPosition').options).filter((o) => o.value).length
+    status.textContent = `找到 ${count} 个仓位`
+  } catch (err) {
+    status.textContent = `查询失败：${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    button.disabled = false
   }
 })

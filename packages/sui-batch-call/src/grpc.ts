@@ -90,6 +90,8 @@ export interface CallOptions {
 /** 一次调用的结果：响应消息，以及节点在响应头里报告的高度和网络 */
 export interface GrpcResponse {
   message: ProtoMessage
+  /** 服务端流式方法（如 ListTransactions）的全部数据帧，按到达顺序；message 是最后一帧。普通方法没有这个字段 */
+  frames?: ProtoMessage[]
   /** x-sui-checkpoint-height；节点没给时为 null */
   checkpoint: number | null
   /** x-sui-chain（'mainnet' / 'testnet' …）；节点没给时为 null */
@@ -233,7 +235,7 @@ export class GrpcWebTransport implements GrpcTransport {
       }
       throw new HttpError(`HTTP ${res.status} from ${this.label}`, res.status)
     }
-    let data: Uint8Array | null = null
+    const frames: Uint8Array[] = []
     let trailers: Map<string, string> | null = null
     for (let o = 0; o + 5 <= buf.length; ) {
       const flag = buf[o] as number
@@ -241,7 +243,7 @@ export class GrpcWebTransport implements GrpcTransport {
       const frame = buf.subarray(o + 5, o + 5 + length)
       if (frame.length < length) throw new HttpError(`Truncated gRPC-web response from ${this.label}`)
       if (flag & 0x80) trailers = parseTrailers(new TextDecoder().decode(frame))
-      else data = frame
+      else frames.push(frame)
       o += 5 + length
     }
     const status = trailers?.get('grpc-status') ?? headerStatus
@@ -251,7 +253,8 @@ export class GrpcWebTransport implements GrpcTransport {
     if (status !== '0') {
       throw new GrpcError(Number(status), decodeGrpcMessage(trailers?.get('grpc-message') ?? res.headers.get('grpc-message')), this.label)
     }
-    return { message: ProtoMessage.decode(data ?? new Uint8Array()), checkpoint, chain }
+    const messages = frames.map((f) => ProtoMessage.decode(f))
+    return { message: messages.at(-1) ?? ProtoMessage.decode(new Uint8Array()), ...(messages.length > 1 ? { frames: messages } : {}), checkpoint, chain }
   }
 }
 
