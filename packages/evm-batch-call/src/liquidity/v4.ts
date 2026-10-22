@@ -20,7 +20,7 @@ import {
 } from './common.js'
 import type { IncreaseLiquidityParams, LiquidityPlan, NewPositionParams, PositionRef, RemoveLiquidityParams } from './types.js'
 
-const pmInterface = new Interface([
+export const pmInterface = new Interface([
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function getApproved(uint256 tokenId) view returns (address)',
   'function isApprovedForAll(address owner, address operator) view returns (bool)',
@@ -37,12 +37,13 @@ const stateViewInterface = new Interface([
 ])
 
 /** v4-periphery 的 Actions */
-const Actions = {
+export const Actions = {
   INCREASE_LIQUIDITY: 0x00,
   DECREASE_LIQUIDITY: 0x01,
   MINT_POSITION: 0x02,
   BURN_POSITION: 0x03,
   SETTLE_PAIR: 0x0d,
+  TAKE: 0x0e,
   TAKE_PAIR: 0x11,
   CLOSE_CURRENCY: 0x12,
   SWEEP: 0x14,
@@ -65,7 +66,7 @@ interface PoolKey {
 const keyTuple = (k: PoolKey) => [k.currency0, k.currency1, k.fee, k.tickSpacing, k.hooks]
 
 /** 依次执行的 action 列表 → modifyLiquidities 的 unlockData */
-class Planner {
+export class Planner {
   readonly actions: number[] = []
   readonly params: string[] = []
 

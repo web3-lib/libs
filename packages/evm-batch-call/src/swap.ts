@@ -3,13 +3,14 @@
  * 批量报价（V2 用 Router 的 getAmountsOut，V3 用 QuoterV2，按 gas 分成几次并发的 eth_call），选输出最多的；按滑点算最少收到的数量，
  * 构建授权 + 兑换的交易（V2 走 Router 的 swapExact…SupportingFeeOnTransferTokens，V3 走 SwapRouter02 / PancakeSwap SmartRouter 的 multicall）
  */
-import { Interface, type BigNumberish } from 'ethers'
+import { Interface, getAddress, type BigNumberish } from 'ethers'
 
 import { approvals, createCtx, evm, fmt, isNative, minus, out, parseAmount, same, tokenInfo, type Ctx } from './liquidity/common.js'
 import type { LiquidityTxResult } from './liquidity/types.js'
 import { LP_PROTOCOLS, LP_QUOTE_TOKENS, type LpProtocol, type LpToken } from './lp.js'
 import type { BlockTag } from './aggregate.js'
 import type { Provider } from './provider.js'
+import type { SignedPermit } from './permit.js'
 import type { BatchCallOptions } from './write/batch.js'
 import type { SignerInput } from './write/signer.js'
 
@@ -42,6 +43,7 @@ const v2RouterInterface = new Interface([
   'function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable',
   'function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)',
 ])
+const permitInterface = new Interface(['function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)'])
 const v3FactoryInterface = new Interface(['function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)'])
 const v3PoolInterface = new Interface(['function liquidity() view returns (uint128)'])
 /** QuoterV2 很费 gas（池子很薄时一次可达上千万）：每次 eth_call 只放几个报价，多个 eth_call 并发，避免超过节点的 gas 上限后被悄悄截掉 */
@@ -56,6 +58,7 @@ const swapRouterInterface = new Interface([
   'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
   'function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256 amountOut)',
   'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',
+  'function selfPermitIfNecessary(address token, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) payable',
   'function multicall(uint256 deadline, bytes[] data) payable returns (bytes[] results)',
 ])
 
@@ -75,8 +78,20 @@ export interface SwapOptions {
   deadline?: number
   /** 收到代币的地址，默认 owner */
   recipient?: string
-  /** 授权额度：'exact'（默认，本次卖出的数量）或 'max' */
-  approve?: 'exact' | 'max'
+  /**
+   * 授权方式：
+   * - 'exact'（默认）：授权本次卖出的数量；'max'：无限额度
+   * - 'permit'：用 EIP-2612 签名代替授权交易（要代币支持，见 /permit 的 detectPermit）。V3 路线（SwapRouter02 / SmartRouter）把 selfPermit 放进同一笔 multicall，
+   *   一次签名、一笔交易；V2 路线的 Router 没有 selfPermit，只有 `atomic` 批量（7702 / 4337 / 5792）发送时才用 permit，否则仍然是普通授权
+   * - 'permit2'：内置的 V2 / V3 路由都不使用 Permit2（它们直接 transferFrom），所以会退回普通的 'exact' 授权；结果的 plan.approval 里有说明
+   * - 'auto'：能用 permit 就用，否则普通授权
+   * 退回普通授权时 plan.approval.method 为 'approve'，reason 写明原因
+   */
+  approve?: 'exact' | 'max' | 'permit' | 'permit2' | 'auto'
+  /** 交易会在一笔原子批量里发送（`swap` 的 mode 为 7702 / 4337 / 5792 时自动为 true）：V2 路线才能把 permit 和兑换放进同一笔 */
+  atomic?: boolean
+  /** 已签名的 permit（`swap` 内部使用）：V3 路线嵌入 multicall 的 selfPermit，V2 路线放在兑换前；不再生成授权交易 */
+  signedPermit?: SignedPermit
   /**
    * 代币的转账税（比例，0.05 = 5%），默认 0。V2 报价（getAmountsOut）不含转账税，带税的代币
    * 实际收到的比报价少，最少收到按 (1 − slippage) × (1 − tax) 算，否则会因 INSUFFICIENT_OUTPUT_AMOUNT 回滚。
@@ -106,8 +121,8 @@ export interface SwapRoute {
 }
 
 export interface SwapTx {
-  /** approve：卖出的代币授权给 Router；swap：兑换 */
-  kind: 'approve' | 'swap'
+  /** approve：卖出的代币授权给 Router；permit：提交 EIP-2612 签名（V2 路线批量发送时）；swap：兑换 */
+  kind: 'approve' | 'permit' | 'swap'
   to: string
   data: string
   /** 附带的主币（最小单位）：卖出主币时为卖出的数量 */
@@ -136,6 +151,19 @@ export interface SwapPlan {
   routes: SwapRoute[]
   /** 按顺序发送的交易（授权在前） */
   transactions: SwapTx[]
+  /** 请求了 permit / permit2 / auto 时：实际采用的授权方式和原因 */
+  approval?: SwapApproval
+}
+
+export interface SwapApproval {
+  requested: 'permit' | 'permit2' | 'auto'
+  /** 'permit'：用签名；'approve'：退回普通授权交易（reason 说明）；'none'：不需要授权（卖出主币 / 额度已够） */
+  method: 'permit' | 'approve' | 'none'
+  /** permit 的提交方式：selfPermit（V3 的 multicall 内）/ batch（和兑换放在同一笔原子批量） */
+  via?: 'selfPermit' | 'batch'
+  reason?: string
+  /** 要签的 permit（owner 授权 spender 精确的卖出数量，签名有效期与兑换的 deadline 相同） */
+  permit?: { token: string; spender: string; value: string; deadline: number }
 }
 
 interface Candidate {
@@ -264,7 +292,7 @@ function amountOf(c: Candidate, result: unknown): bigint {
  */
 export async function buildSwap(provider: Provider, owner: string, params: SwapParams, options: SwapOptions = {}): Promise<SwapPlan> {
   const { slippage, deadline, recipient, approve } = options
-  const ctx = await createCtx(provider, owner, { slippage, deadline, recipient, approve })
+  const ctx = await createCtx(provider, owner, { slippage, deadline, recipient, approve: approve === 'max' ? 'max' : 'exact' })
   const wrapped = LP_QUOTE_TOKENS[ctx.chainId]?.[0]
   const nativeIn = isNative(ctx, params.tokenIn)
   const nativeOut = isNative(ctx, params.tokenOut)
@@ -298,7 +326,16 @@ export async function buildSwap(provider: Provider, owner: string, params: SwapP
   // approvals 只会返回 kind 为 'approve' 的交易
   // Router 在 Tron 上是 T 地址：授权的 ABI 参数要用 0x 格式
   const transactions = (nativeIn ? [] : await approvals(ctx, [{ token: tokenIn, spender: evm(best.router), amount: amountIn }])) as SwapTx[]
-  transactions.push(swapTx(ctx, best, amountIn, amountOutMin, nativeIn, nativeOut))
+  let approval: SwapApproval | undefined
+  const requested = options.approve
+  if (requested === 'permit' || requested === 'permit2' || requested === 'auto') {
+    approval = await decideApproval(ctx, requested, best, tokenIn, amountIn, nativeIn, transactions.some((t) => t.kind === 'approve'), options)
+  }
+  let permitCall: string | undefined
+  if (options.signedPermit && approval?.method === 'permit') {
+    permitCall = applySignedPermit(options.signedPermit, approval, ctx, transactions)
+  }
+  transactions.push(swapTx(ctx, best, amountIn, amountOutMin, nativeIn, nativeOut, permitCall))
 
   const route = (c: Candidate & { amountOut: bigint }): SwapRoute => ({
     protocol: c.protocol.id,
@@ -323,10 +360,49 @@ export async function buildSwap(provider: Provider, owner: string, params: SwapP
     route: route(best),
     routes: routes.map(route),
     transactions,
+    ...(approval ? { approval } : {}),
   }
 }
 
-function swapTx(ctx: Ctx, c: Candidate, amountIn: bigint, amountOutMin: bigint, nativeIn: boolean, nativeOut: boolean): SwapTx {
+/** permit / permit2 / auto：判断这条路线和这个代币能不能用签名代替授权交易，不能的退回普通授权并写明原因 */
+async function decideApproval(ctx: Ctx, requested: SwapApproval['requested'], best: Candidate, tokenIn: string, amountIn: bigint, nativeIn: boolean, needsApprove: boolean, options: SwapOptions): Promise<SwapApproval> {
+  if (nativeIn || !needsApprove) return { requested, method: 'none' }
+  const fallback = (reason: string): SwapApproval => ({ requested, method: 'approve', reason })
+  if (requested === 'permit2') {
+    return fallback('The built-in V2 / V3 routers pull tokens with transferFrom and do not consume Permit2 signatures; used a normal exact approve')
+  }
+  if (ctx.tron) return fallback('permit is not available on Tron; used a normal approve')
+  const { detectPermit } = await import('./permit.js')
+  const support = await detectPermit(ctx.provider, tokenIn)
+  if (!support.kind) return fallback(`${support.reason}; used a normal approve`)
+  if (support.kind === 'dai') return fallback('A DAI-style permit can only grant an unlimited allowance; used a normal exact approve')
+  const via = best.version === 'v3' ? 'selfPermit' : 'batch'
+  if (via === 'batch' && !options.atomic) {
+    return fallback("V2 routers have no selfPermit, so a separate permit() transaction saves nothing; use mode '7702' / '4337' / '5792' to send the permit and the swap atomically. Used a normal approve")
+  }
+  return { requested, method: 'permit', via, permit: { token: tokenIn, spender: evm(best.router), value: amountIn.toString(), deadline: ctx.deadline } }
+}
+
+/** 已签名的 permit 放进交易：V3 返回 selfPermit 的 calldata（嵌进 multicall），V2 往 transactions 里加一笔 permit 交易 */
+function applySignedPermit(signed: SignedPermit, approval: SwapApproval, ctx: Ctx, transactions: SwapTx[]): string | undefined {
+  const want = approval.permit as NonNullable<SwapApproval['permit']>
+  const p = signed.permit
+  if (p.kind !== 'eip2612' || getAddress(p.tokens[0] as string) !== getAddress(want.token) || getAddress(p.spender) !== getAddress(want.spender) || p.owner !== ctx.owner || BigInt(p.amounts[0] as string) !== BigInt(want.value)) {
+    throw new Error('The signed permit does not match the swap (token / spender / owner / amount)')
+  }
+  // 授权交易换成 permit
+  const at = transactions.findIndex((t) => t.kind === 'approve')
+  transactions.splice(at, transactions.length)
+  if (approval.via === 'selfPermit') {
+    return swapRouterInterface.encodeFunctionData('selfPermitIfNecessary', [want.token, want.value, p.deadline, signed.v, signed.r, signed.s])
+  }
+  const m = p.typedData.message
+  const data = permitInterface.encodeFunctionData('permit', [m.owner, m.spender, m.value, m.deadline, signed.v, signed.r, signed.s])
+  transactions.push({ kind: 'permit', to: out(ctx, want.token), data, value: '0', token: out(ctx, want.token), spender: out(ctx, want.spender), amount: want.value })
+  return undefined
+}
+
+function swapTx(ctx: Ctx, c: Candidate, amountIn: bigint, amountOutMin: bigint, nativeIn: boolean, nativeOut: boolean, selfPermit?: string): SwapTx {
   const value = nativeIn ? amountIn.toString() : '0'
   if (c.version === 'v2') {
     const data = nativeIn
@@ -344,7 +420,7 @@ function swapTx(ctx: Ctx, c: Candidate, amountIn: bigint, amountOutMin: bigint, 
           { tokenIn: c.path[0], tokenOut: c.path[1], fee: c.fees[0], recipient, amountIn, amountOutMinimum: amountOutMin, sqrtPriceLimitX96: 0n },
         ])
       : swapRouterInterface.encodeFunctionData('exactInput', [{ path: encodePath(c.path, c.fees), recipient, amountIn, amountOutMinimum: amountOutMin }])
-  const calls = nativeOut ? [swap, swapRouterInterface.encodeFunctionData('unwrapWETH9', [amountOutMin, ctx.recipient])] : [swap]
+  const calls = [...(selfPermit ? [selfPermit] : []), swap, ...(nativeOut ? [swapRouterInterface.encodeFunctionData('unwrapWETH9', [amountOutMin, ctx.recipient])] : [])]
   return { kind: 'swap', to: out(ctx, c.router), data: swapRouterInterface.encodeFunctionData('multicall', [ctx.deadline, calls]), value }
 }
 
@@ -352,14 +428,21 @@ export type SwapTxResult = Omit<LiquidityTxResult, 'kind'> & { kind: SwapTx['kin
 
 export interface SwapResult {
   plan: SwapPlan
-  /** 每笔交易的结果（授权、兑换） */
+  /** 每笔交易的结果（授权 / permit、兑换） */
   results: SwapTxResult[]
   /** 兑换那一笔的状态和哈希 */
   status: LiquidityTxResult['status']
   hash: string | null
+  /** 请求 permit / permit2 / auto 时：实际采用的授权方式（同 plan.approval，退回普通授权时有原因） */
+  approval?: SwapApproval
 }
 
 export interface SwapSendOptions extends SwapOptions, Omit<BatchCallOptions, 'mode' | 'continueOnError' | 'onUpdate'> {
+  /**
+   * 发送方式：'tx'（默认，授权和兑换分别发，授权确认后重新报价）；
+   * '7702' / '4337' / '5792'：授权（或 permit）和兑换放进同一笔原子批量，见 BatchCallOptions.mode
+   */
+  mode?: 'tx' | '7702' | '4337' | '5792'
   onUpdate?: (result: SwapTxResult) => void
 }
 
@@ -370,21 +453,55 @@ export interface SwapSendOptions extends SwapOptions, Omit<BatchCallOptions, 'mo
  * ```ts
  * const r = await swap(provider, key, { tokenIn: USDT, tokenOut: NATIVE_TOKEN, amountInFormatted: '100' }, { slippage: 0.01 })
  * r.status   // 'confirmed'
+ *
+ * // 用 EIP-2612 签名代替授权交易（V3 路线一笔交易完成；不支持时退回普通授权，r.approval.reason 说明原因）
+ * await swap(provider, signer, params, { approve: 'auto' })
  * ```
  */
 export async function swap(provider: Provider, from: SignerInput, params: SwapParams, options: SwapSendOptions = {}): Promise<SwapResult> {
   const [{ batchCall, tronModule }, { resolveSigner }, { emptyOutcome, toWriteResult }] = await Promise.all([import('./write/batch.js'), import('./write/signer.js'), import('./write/send.js')])
   const tron = await tronModule(provider)
-  const owner = tron ? await tron.tronSignerAddress(from) : (await resolveSigner(from)).address
-  let plan = await buildSwap(provider, owner, params, options)
-  const send = async (txs: SwapTx[]): Promise<SwapTxResult[]> =>
+  const resolved = tron ? null : await resolveSigner(from)
+  const owner = tron ? await tron.tronSignerAddress(from) : (resolved as NonNullable<typeof resolved>).address
+  const mode = options.mode ?? 'tx'
+  const atomic = mode !== 'tx'
+  // 4337 的 SimpleAccount：资产在账户地址里，兑换的 owner 是账户（合约账户不能签 EIP-2612，不用 permit）
+  let holder = owner
+  let smartHolder = false
+  if (mode === '4337' && (options.smartAccount?.account ?? 'simple') === 'simple') {
+    const [{ resolveSimpleAccount }, { WriteRpc }] = await Promise.all([import('./smartAccount/account.js'), import('./write/rpc.js')])
+    const sa = options.smartAccount
+    holder = (await resolveSimpleAccount(await WriteRpc.from(provider), owner, sa?.entryPoint ?? '0.7', sa?.salt, sa?.factory)).address
+    smartHolder = true
+  }
+  const wantsPermit = options.approve === 'permit' || options.approve === 'permit2' || options.approve === 'auto'
+  let plan = await buildSwap(provider, holder, params, { ...options, atomic, ...(smartHolder && wantsPermit ? { approve: 'exact' as const } : {}) })
+  if (smartHolder && wantsPermit && plan.transactions.length > 1) {
+    plan.approval = { requested: options.approve as 'permit', method: 'approve', reason: 'The 4337 smart account is a contract and cannot sign EIP-2612 permits; used a normal approve' }
+  }
+  if (plan.approval?.method === 'permit' && resolved) {
+    // 签 permit：精确的卖出数量、有效期与兑换的 deadline 相同；用户拒绝签名就整体中止（不悄悄改成发授权交易）
+    const { buildPermit, signPermit } = await import('./permit.js')
+    const want = plan.approval.permit as NonNullable<SwapApproval['permit']>
+    const permit = await buildPermit(provider, { token: want.token, owner: holder, spender: want.spender, value: want.value }, { deadlineAt: want.deadline })
+    const signed = await signPermit(resolved.signer as Parameters<typeof signPermit>[0], permit, { chainId: await provider.getChainId() })
+    try {
+      plan = await buildSwap(provider, holder, params, { ...options, atomic, signedPermit: signed })
+    } catch (err) {
+      // 签名后重新报价，最优路线变了（路由 / 版本 / 数量不同），签名对不上：改用普通授权，不让已经签过的请求白白中止
+      if (!/signed permit does not match/.test(err instanceof Error ? err.message : String(err))) throw err
+      plan = await buildSwap(provider, holder, params, { ...options, atomic, approve: 'exact' })
+      if (plan.approval) plan.approval = { ...plan.approval, requested: options.approve as 'permit', method: 'approve', reason: 'The best route changed after the permit was signed; used a normal approve' }
+    }
+  }
+  const send = async (txs: SwapTx[], asMode: 'tx' | 'atomic' = 'tx'): Promise<SwapTxResult[]> =>
     (
       await batchCall(
         provider,
         txs.map((tx) => ({ from, to: tx.to, data: tx.data, value: BigInt(tx.value) })),
         {
           ...options,
-          mode: 'tx',
+          mode: asMode === 'atomic' ? mode : 'tx',
           continueOnError: false,
           onUpdate: options.onUpdate ? (r) => options.onUpdate?.({ ...r, kind: (txs[r.index] as SwapTx).kind }) : undefined,
         },
@@ -392,15 +509,20 @@ export async function swap(provider: Provider, from: SignerInput, params: SwapPa
     ).map((r, i) => ({ ...r, kind: (txs[i] as SwapTx).kind }))
   const txs = plan.transactions
   let results: SwapTxResult[]
-  if (txs.length === 1) {
+  if (atomic) {
+    // 授权 / permit 和兑换在同一笔原子批量里：要么都成功，要么都不生效
+    results = await send(txs, 'atomic')
+  } else if (txs.length === 1) {
     results = await send(txs)
   } else {
     // 有授权时先发授权：确认后重新报价再发兑换，deadline 和最少收到从发兑换那一刻算，
     // 不会因为授权等得久而过期或按旧价成交
     const approved = await send(txs.slice(0, -1))
     const last = txs[txs.length - 1] as SwapTx
+    const approval = plan.approval
     if (approved.every((r) => r.status === 'confirmed')) {
-      plan = await buildSwap(provider, owner, params, options)
+      plan = await buildSwap(provider, holder, params, { ...options, approve: options.approve === 'max' ? 'max' : 'exact' })
+      if (approval) plan.approval = approval // 重新报价时额度已够：保留最初的选择和原因
       const fresh = plan.transactions[plan.transactions.length - 1] as SwapTx
       results = [...approved, ...(await send([fresh])).map((r) => ({ ...r, index: txs.length - 1 }))]
     } else {
@@ -408,6 +530,5 @@ export async function swap(provider: Provider, from: SignerInput, params: SwapPa
     }
   }
   const main = results[results.length - 1] as SwapTxResult
-  return { plan, results, status: main.status, hash: main.hash }
+  return { plan, results, status: main.status, hash: main.hash, ...(plan.approval ? { approval: plan.approval } : {}) }
 }
-

@@ -36,6 +36,14 @@
       "types": "./dist/subpaths/liquidity.d.ts",
       "import": "./dist/subpaths/liquidity.js"
     },
+    "./rewards": {
+      "types": "./dist/subpaths/rewards.d.ts",
+      "import": "./dist/subpaths/rewards.js"
+    },
+    "./dividends": {
+      "types": "./dist/subpaths/dividends.d.ts",
+      "import": "./dist/subpaths/dividends.js"
+    },
     "./approvals": {
       "types": "./dist/subpaths/approvals.d.ts",
       "import": "./dist/subpaths/approvals.js"
@@ -64,6 +72,22 @@
       "types": "./dist/subpaths/swap.d.ts",
       "import": "./dist/subpaths/swap.js"
     },
+    "./permit": {
+      "types": "./dist/subpaths/permit.d.ts",
+      "import": "./dist/subpaths/permit.js"
+    },
+    "./smart-account": {
+      "types": "./dist/subpaths/smart-account.d.ts",
+      "import": "./dist/subpaths/smart-account.js"
+    },
+    "./history": {
+      "types": "./dist/subpaths/history.d.ts",
+      "import": "./dist/subpaths/history.js"
+    },
+    "./simulate": {
+      "types": "./dist/subpaths/simulate.d.ts",
+      "import": "./dist/subpaths/simulate.js"
+    },
     "./write": {
       "types": "./dist/subpaths/write.d.ts",
       "import": "./dist/subpaths/write.js"
@@ -89,6 +113,16 @@
     "test:live:lp": "LIVE=1 vitest run test/lp-live.test.ts",
     "test:live:liquidity": "LIVE=1 vitest run test/liquidity-tron-live.test.ts",
     "test:fork": "vitest run test/liquidity-fork.test.ts",
+    "test:live:simulate": "LIVE=1 vitest run test/simulate-live.test.ts",
+    "test:live:history": "LIVE=1 vitest run test/history-live.test.ts",
+    "test:live:smart-account": "LIVE=1 vitest run test/smart-account-live.test.ts",
+    "test:live:rewards": "LIVE=1 vitest run test/rewards-live.test.ts",
+    "test:live:dividends": "LIVE=1 vitest run test/dividends-live.test.ts",
+    "test:fork:simulate": "vitest run test/simulate-fork.test.ts",
+    "test:fork:smart-account": "vitest run test/smart-account-fork.test.ts",
+    "test:fork:permit": "vitest run test/permit-fork.test.ts",
+    "test:fork:rewards": "vitest run test/rewards-fork.test.ts",
+    "test:fork:dividends": "vitest run test/dividends-fork.test.ts",
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build",
     "build:contracts": "node scripts/build-contracts.mjs",
     "check:rpc": "node scripts/check-rpc-nodes.mjs",

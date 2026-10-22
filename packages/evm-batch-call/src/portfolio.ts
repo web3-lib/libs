@@ -4,6 +4,7 @@
 import { lpPositions, type LpPosition, type LpPositionsOptions } from './lp.js'
 import { combinePrices, defillamaPrices, onchainPrices, tokenPrices, type PriceSource } from './price.js'
 import type { Provider } from './provider.js'
+import { withSignal } from './util.js'
 
 export interface PortfolioOptions {
   /** 要计入的代币（含主币：NATIVE_TOKEN），余额用 multicall 一次读出 */
@@ -17,6 +18,8 @@ export interface PortfolioOptions {
   /** 某个价格源出错时调用 */
   onPriceError?: (err: unknown) => void
   fetch?: typeof fetch
+  /** 取消：余额、LP 的节点请求随之中止，查价格的步骤立即以 signal.reason 失败 */
+  signal?: AbortSignal
 }
 
 export interface PortfolioToken {
@@ -55,14 +58,18 @@ export interface Portfolio {
  * ```
  */
 export async function portfolio(provider: Provider, owner: string, options: PortfolioOptions): Promise<Portfolio> {
-  const { tokens, sources = [defillamaPrices(), onchainPrices()], lp, minUsd = 0, onPriceError, fetch: fetchFn } = options
+  const { tokens, sources = [defillamaPrices(), onchainPrices()], lp, minUsd = 0, onPriceError, fetch: fetchFn, signal } = options
+  signal?.throwIfAborted()
   const onError = onPriceError ? (_: PriceSource, err: unknown) => onPriceError(err) : undefined
+  const sig = signal ? { signal } : {}
   const [balances, positions] = await Promise.all([
-    tokens.length ? provider.balances(owner, tokens, { symbol: true }) : Promise.resolve([]),
-    lp ? lpPositions(provider, owner, { ...(lp === true ? {} : lp), prices: combinePrices(sources, { onError }), ...(fetchFn ? { fetch: fetchFn } : {}), ...(onPriceError ? { onPriceError } : {}) }) : Promise.resolve([]),
+    tokens.length ? provider.balances(owner, tokens, { symbol: true, ...sig }) : Promise.resolve([]),
+    lp ? lpPositions(provider, owner, { ...(lp === true ? {} : lp), prices: combinePrices(sources, { onError }), ...(fetchFn ? { fetch: fetchFn } : {}), ...(onPriceError ? { onPriceError } : {}), ...sig }) : Promise.resolve([]),
   ])
   const held = balances.filter((b) => b.success && BigInt(b.balance) > 0n)
-  const prices = held.length ? await tokenPrices(provider, held.map((b) => b.token), { sources, ...(onError ? { onError } : {}), ...(fetchFn ? { fetch: fetchFn } : {}) }) : []
+  const prices = held.length
+    ? await withSignal(signal, () => tokenPrices(provider, held.map((b) => b.token), { sources, ...(onError ? { onError } : {}), ...(fetchFn ? { fetch: fetchFn } : {}) }))
+    : []
   const list: PortfolioToken[] = held.map((b, i) => {
     const p = prices[i]
     const price = p?.price ?? null

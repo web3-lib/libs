@@ -467,7 +467,6 @@ async function v2Positions(provider: Provider, owner: string, protocols: LpProto
 }
 
 async function v3Positions(provider: Provider, owner: string, protocols: LpProtocol[], options: LpPositionsOptions): Promise<RawConcentrated[]> {
-  const { includeClosed = false } = options
   const maxPositions = Math.floor(options.maxPositions ?? 500)
   const overrides = callOverrides(options)
   if (!protocols.length || !(maxPositions > 0)) {
@@ -495,7 +494,16 @@ async function v3Positions(provider: Provider, owner: string, protocols: LpProto
   }
   const tokenIds = await provider.tryAll<bigint>(indexCalls, overrides)
   const ids = tokenIds.flatMap((id, i) => (id === null ? [] : [{ protocol: indexOwners[i] as LpProtocol, tokenId: id }]))
+  return v3Details(provider, ids, options)
+}
 
+/** 已知 tokenId 的 V3 仓位：读仓位信息、池子状态、算数量和未领取的手续费（不看 NFT 现在在谁手里，如质押在挖矿合约里的仓位） */
+async function v3Details(provider: Provider, ids: ReadonlyArray<{ protocol: LpProtocol; tokenId: bigint }>, options: LpPositionsOptions): Promise<RawConcentrated[]> {
+  const { includeClosed = false } = options
+  const overrides = callOverrides(options)
+  if (!ids.length) {
+    return []
+  }
   // 仓位详情
   type PositionData = { token0: string; token1: string; fee: bigint; tickLower: bigint; tickUpper: bigint; liquidity: bigint; feeGrowthInside0LastX128: bigint; feeGrowthInside1LastX128: bigint; tokensOwed0: bigint; tokensOwed1: bigint }
   const positions = await provider.tryAll<PositionData>(
@@ -721,6 +729,15 @@ async function finalize(provider: Provider, chainId: number, raw: RawPosition[],
 export function lpPositions(provider: Provider, owner: string, options: LpPositionsOptions = {}): Promise<LpPosition[]> {
   // 取消时立即 reject（扫描 / 价格等进行中的请求不中断，结果丢弃）
   return withSignal(options.signal, () => queryLpPositions(provider, owner, options))
+}
+
+/**
+ * 按 tokenId 查 V3 仓位（不要求持有者是谁），返回与 lpPositions 相同的结果（含美元价值）。
+ * 给 `/rewards` 读质押在挖矿合约里的仓位用
+ */
+export async function lpPositionsByIds(provider: Provider, ids: ReadonlyArray<{ protocol: LpProtocol; tokenId: bigint }>, options: LpPositionsOptions = {}): Promise<LpPosition[]> {
+  const chainId = await provider.getChainId()
+  return finalize(provider, chainId, await v3Details(provider, ids, options), options)
 }
 
 async function queryLpPositions(provider: Provider, owner: string, options: LpPositionsOptions): Promise<LpPosition[]> {

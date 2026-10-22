@@ -21,7 +21,7 @@ import {
 } from './common.js'
 import type { IncreaseLiquidityParams, LiquidityPlan, LiquidityTx, NewPositionParams, PositionRef, RemoveLiquidityParams } from './types.js'
 
-const npmInterface = new Interface([
+export const npmInterface = new Interface([
   'function WETH9() view returns (address)',
   'function factory() view returns (address)',
   'function ownerOf(uint256 tokenId) view returns (address)',

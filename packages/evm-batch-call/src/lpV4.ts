@@ -94,6 +94,10 @@ export interface V4ScanProgress {
   done: boolean
   /** 节点不开放 getLogs 时暂停到这个时间（毫秒时间戳），之前的调用不再扫描 */
   pausedUntil?: number
+  /** 地址没有持有这个仓位合约的 NFT（balanceOf 为 0）：没有扫描，done 为 true */
+  skipped?: true
+  /** 地址当前持有这个仓位合约的 NFT 个数（balanceOf；查不到时没有这个字段） */
+  held?: number
 }
 
 export interface LpV4Options {
@@ -113,6 +117,7 @@ const DYNAMIC_FEE_FLAG = 0x800000
 
 const POSITION_MANAGER_ABI = [
   'function ownerOf(uint256 tokenId) view returns (address)',
+  'function balanceOf(address owner) view returns (uint256)',
   'function getPoolAndPositionInfo(uint256 tokenId) view returns ((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) poolKey, uint256 info)',
   'function getPositionLiquidity(uint256 tokenId) view returns (uint128)',
 ]
@@ -164,6 +169,7 @@ async function scanTokenIds(
   owner: string,
   options: V4ScanOptions,
   signal: AbortSignal | undefined,
+  held: number | undefined,
 ): Promise<{ ids: string[]; cursor: number; prune(ids: readonly string[]): Promise<void> }> {
   const storage = options.storage ?? defaultStorage
   const key = `${chainId}:${(protocol.positionManager as string).toLowerCase()}:${owner.toLowerCase()}`
@@ -188,6 +194,7 @@ async function scanTokenIds(
         target,
         done: target !== null && state.cursor >= target,
         ...(state.pausedUntil ? { pausedUntil: state.pausedUntil } : {}),
+        ...(held === undefined ? {} : { held }),
       })
     } catch {
       // 回调出错不影响扫描和保存进度
@@ -284,10 +291,33 @@ export async function v4Positions(
     return []
   }
 
+  // 先查持有几个仓位 NFT：一个都没有就不用扫描（最常见的情况；扫描在公共节点上要很久）。查不到时照常扫描
+  let held: unknown[] = []
+  if (scanOptions) {
+    try {
+      held = await provider.tryAll(
+        protocols.map((p) => provider.contract(p.positionManager as string, POSITION_MANAGER_ABI).balanceOf(owner)),
+        overrides,
+      )
+    } catch (err) {
+      if (overrides.signal?.aborted) throw err
+      // 节点出错 / 限频：不影响查询，照常扫描
+    }
+  }
+  const skip = (protocol: V4Protocol) => {
+    try {
+      scanOptions?.onProgress?.({ chainId, positionManager: protocol.positionManager as string, startBlock: -1, cursor: -1, target: null, done: true, skipped: true, held: 0 })
+    } catch {
+      // 回调出错不影响查询
+    }
+    return null
+  }
+
   // 每个协议的候选 tokenId：太多时只核对最大的 maxPositions 个（tokenId 递增，越大越新）
   const candidates = await Promise.all(
-    protocols.map(async (protocol) => {
-      const scan = scanOptions ? await scanTokenIds(provider, chainId, protocol, owner, scanOptions, overrides.signal) : null
+    protocols.map(async (protocol, i) => {
+      const count = typeof held[i] === 'bigint' ? Number(held[i]) : undefined
+      const scan = !scanOptions ? null : count === 0 ? skip(protocol) : await scanTokenIds(provider, chainId, protocol, owner, scanOptions, overrides.signal, count)
       const ids = [...new Set([...explicit, ...(scan?.ids ?? [])])].map(BigInt).sort((a, b) => (a < b ? 1 : a > b ? -1 : 0))
       return { protocol, ids: ids.slice(0, limit), scan }
     }),

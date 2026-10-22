@@ -14,7 +14,7 @@ export default defineConfig({
     alias: [
       { find: /^@w3lib\/wallet\/(\w+)$/, replacement: wallet('$1/index.ts') },
       { find: /^@w3lib\/wallet$/, replacement: wallet('index.ts') },
-      { find: /^@w3lib\/evm-batch-call\/(\w+)$/, replacement: src('subpaths/$1.ts') },
+      { find: /^@w3lib\/evm-batch-call\/([\w-]+)$/, replacement: src('subpaths/$1.ts') },
       { find: /^@w3lib\/evm-batch-call$/, replacement: src('index.ts') },
     ],
   },

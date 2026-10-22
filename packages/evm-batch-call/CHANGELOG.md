@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### 新功能
+
+- Flap 分红，子路径 `@w3lib/evm-batch-call/dividends`（只支持 BSC）：`getDividends` / `dividends`（持有人在 Flap 税收代币上的余额、可领取 / 已领取数量、分红资产（WBNB 按 BNB 领取）和美元价值；`tokens` 或 `discover`（扫描收到过的 Transfer，只收 `7777` / `8888` 后缀的地址，卖光后累计的分红也能发现））、`buildClaimDividends`、`claimDividends`（每个代币一笔 `withdrawDividendsFor(owner)`，任何人可代领、款项直接到持有人；支持 `mode: '7702' | '4337' | '5792'` 原子一笔，`simulate` 默认 true，先模拟剔除会 revert 的项；发送前在链上核对 `dividendContract`；分红资产精度读不到时标 `decimalsUnknown`、不算美元价值）
+  - 合约来自 docs.flap.sh 和链上核实（Portal、TaxTokenHelper、每个代币的 Dividend 合约）；Dividend 合约实现没有验证源码，函数靠文档 + 选择器 + 链上调用核对。已在 BSC 主网分叉上对真实持有人核实 Tax Token V3：分红资产为 ERC20 和 WBNB 两种，到账等于预览，与 `TaxTokenHelper.getDividendInfo` 一致；Tax Token V2 没有找到链上实例，识别不了的合约放进 `unsupported`，不猜函数
+- 一键领取手续费和挖矿奖励，子路径 `@w3lib/evm-batch-call/rewards`：`getClaimable` / `claimable`（每个仓位能领什么：V3 / V4 手续费、PancakeSwap V3 MasterChef 的 CAKE 和质押仓位的手续费、Aerodrome / Velodrome Slipstream gauge 的奖励，数量 + 美元价值）、`buildClaimAll`（合并成尽量少的交易：V3 `multicall`、V4 一次 `modifyLiquidities`、MasterChef `multicall`，先用 `/simulate` 模拟、剔除会失败的项）、`claimAll`（签名发送，支持 `mode: '7702' | '4337' | '5792'` 原子一笔；每笔独立，`continueOnError` 默认 true）
+  - 质押在 MasterChef 里的仓位也能读到（NFT 在合约里）：CAKE 用所有者身份预执行 `harvest` 得到真正会发的数量（`pendingCake` 偏少）
+  - 模拟只有合并后的那一笔失败（单项都通过）时对半拆开重新模拟；取消（`signal`）时抛出；`claimAll({ dryRun: true })` 返回 `status: 'simulated'`、`claimed: []`、预估通过的项在 `simulated`；`minUsd` 不跳过有币没价格的项；harvest 预执行分批发出，失败退回 `pendingCake` 的项标 `approximate: true`；gauge 列表缓存不再受第一个调用方的 signal / blockTag 影响
+  - `/lp` 新增内部函数 `lpPositionsByIds`（按 tokenId 读 V3 仓位，不看 NFT 现在在谁手里）
+- 交易模拟，子路径 `@w3lib/evm-batch-call/simulate`：`getSimulation` / `simulate`（一笔）、`getBatchSimulation` / `simulateBatch`（一串依赖的交易，如 approve + swap，同一个区块里依次执行、状态延续），可以直接传 `buildSwap` / `buildRevokes` / 流动性构建的交易
+  - EVM 用 `eth_simulateV1`（`traceTransfers`），按日志算资产变化（ERC20 / 721 / 1155、WETH Deposit / Withdrawal、主币）和授权变化（Approval、ApprovalForAll、Permit2）；不支持的节点退回 `eth_call` + `estimateGas`（只有成败 / gas / revert 原因）；支持 `stateOverrides`、`watch`、`usd`（美元价值）、`risk`（收到的代币做风险检查，按需加载）
+  - calldata 解码（ERC20 / 721 / 1155、WETH、Uniswap V2 / V3 Router、V3 仓位合约、Universal Router、Permit2、Multicall3、Disperse，Router 按内置协议表标协议名，multicall 解出子调用；`decodeCalldata`）、revert 原因解码（Error / Panic / 常见自定义错误；`decodeRevert`）
+  - `warnings`：无限授权、被授权方不在 `knownSpenders()`、授权给普通地址、调用没有代码的地址、转出大部分余额、代币风险；`assertSimulation` 一行守卫
+  - Tron：`triggerconstantcontract`（能量、TRC20 日志），TRX 只有 `call_value`
+- 历史记录，子路径 `@w3lib/evm-batch-call/history`：`getHistory` / `history` 返回统一的 `Activity`（类型 transfer / swap / approve / liquidity / mint / contract / other、方向、对方、描述、资产变化、手续费、协议 / 方法），`nextCursor` 分页（按区块，各来源通用），`types` / `before` / `after` 过滤
+  - 可替换、可故障切换的数据来源（`source: [a, b]`）：Blockscout（免 Key，各链实例表，用其 Etherscan 兼容接口）、Etherscan v2（`apiKey`，一个 Key 覆盖多条链）、纯 RPC 日志（ERC20 / 721 / 1155 Transfer，没有主币转账）、Tron 的 TronGrid；也可以自己实现适配器（`blockscoutSource` / `etherscanSource` / `rpcSource` / `trongridSource` / `explorerSource`）
+- 智能账户批量，子路径 `@w3lib/evm-batch-call/smart-account`，并接入 `/write` 的 `batchCall` / `batchTransfer`（`batchCollect`、`swap` 同样支持代付 / 原子模式）的新 `mode`：
+  - `'4337'`：ERC-4337（EntryPoint v0.7 / v0.8）UserOperation 的手写打包 / 哈希 / 签名；账户 `SimpleAccount`（工厂 initCode，部署前即可算出地址）和 `Simple7702Account`；bundler 客户端（`BundlerClient`）、ERC-7677 paymaster 客户端（`PaymasterClient`，也可传自定义函数）；`selfBundle` 自己发 `EntryPoint.handleOps`，不需要 bundler
+  - `'7702'` + `sponsor`：代付 gas 的 7702，用户只签授权和 UserOperation，不需要主币
+  - `'5792'`：浏览器钱包 EIP-5792（`wallet_getCapabilities` / `wallet_sendCalls` / `wallet_getCallsStatus`），不支持原子批量时退回逐笔发送
+  - `batchCollect` 新增 `sponsor`：代付 gas 归集，子钱包不用补 gas，主币全额转走
+  - `WriteResult` 新增可选的 `userOpHash`、`atomic`
+  - 这些代码按需加载，不用时 `/write` 的体积不变
+- 免 gas 授权，子路径 `@w3lib/evm-batch-call/permit`：EIP-2612 permit（含 DAI 风格、USDC v2）、Permit2 的 PermitSingle / PermitBatch / permitTransferFrom；`detectPermit`、`buildPermit*`、`signPermit`（签名前核对，签完本地验签）、`verifyPermitSignature`、calldata 编码；默认精确额度、30 分钟有效期
+- `swap` / `buildSwap` 的 `approve` 增加 `'permit'` / `'permit2'` / `'auto'`（V3 路线用 `selfPermitIfNecessary` 一笔交易完成；V2 路线在原子批量里才用 permit；`'permit2'` 内置 Router 不支持，退回普通授权），`plan.approval` / `result.approval` 说明实际方式和退回原因；`swap` 新增 `mode: '7702' | '4337' | '5792'`，授权 / permit 和兑换放进同一笔原子批量
+- `WriteSigner` 新增可选的 `signTypedData` / `signMessage`
+- `portfolio` / `getPortfolio`（`/price`）支持 `signal`：余额、LP 的节点请求随之中止，查价格的步骤立即以 `signal.reason` 失败（之前 `getPortfolio` 的 `signal` 被丢掉，不起作用）
+- `/lp` V4 扫描（`v4.scan`）先查仓位合约的 `balanceOf`：地址没有持有仓位 NFT 时不扫描（`V4ScanProgress.skipped`），公共节点上不再白扫几千万个区块
+
 ## 0.7.0
 
 ### 新功能

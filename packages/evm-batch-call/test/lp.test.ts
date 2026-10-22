@@ -74,6 +74,7 @@ const v3Pool = new Interface([
 ])
 const pmIface = new Interface([
   'function ownerOf(uint256) view returns (address)',
+  'function balanceOf(address) view returns (uint256)',
   'function getPoolAndPositionInfo(uint256) view returns ((address, address, uint24, int24, address), uint256)',
   'function getPositionLiquidity(uint256) view returns (uint128)',
 ])
@@ -260,10 +261,11 @@ describe('V4', () => {
   // PositionInfo：poolId 高 200 位 | tickUpper 600 | tickLower -600 | 无订阅
   const INFO = ((BigInt(POOL_ID) >> 56n) << 56n) | (600n << 32n) | ((-600n & 0xffffffn) << 8n)
 
-  function setupV4(owners: Record<string, string> = { '7': USER, '8': OTHER }) {
+  function setupV4(owners: Record<string, string> = { '7': USER, '8': OTHER }, balance?: bigint) {
     return setup({
       [PM]: handler(pmIface, {
         ownerOf: (id: bigint) => (owners[id.toString()] ? [owners[id.toString()]] : null),
+        balanceOf: () => (balance === undefined ? null : [balance]),
         getPoolAndPositionInfo: () => [[KEY.currency0, KEY.currency1, KEY.fee, KEY.tickSpacing, KEY.hooks], INFO],
         getPositionLiquidity: () => [10n ** 15n],
       }),
@@ -325,6 +327,17 @@ describe('V4', () => {
     const { multi, mock } = setupV4()
     expect(await lpPositions(multi, USER, { versions: ['v4'] })).toEqual([])
     expect(mock.calls).toHaveLength(0)
+  })
+
+  it('一个仓位 NFT 都没有（balanceOf 为 0）：不扫描', async () => {
+    const { mock } = setupV4({}, 0n)
+    let logs = 0
+    Object.assign(mock, { getBlockNumber: async () => (UNI_V4.deployBlock as number) + 25_000, getLogs: async () => (logs++, []) })
+    const progress: unknown[] = []
+    const list = await lpPositions(new Provider(1, mock), USER, { versions: ['v4'], v4: { scan: { storage: memoryLpScanStorage(), onProgress: (p) => progress.push(p) } } })
+    expect(list).toEqual([])
+    expect(logs).toBe(0)
+    expect(progress).toEqual([{ chainId: 1, positionManager: PM, startBlock: -1, cursor: -1, target: null, done: true, skipped: true, held: 0 }])
   })
 
   it('扫描仓位合约发给 owner 的 NFT：从部署区块开始，进度存下来；扫到但已转走的不返回', async () => {

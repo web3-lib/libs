@@ -284,7 +284,7 @@ await getLpPositions(user, { chainId: 1, v4: { scan: { storage } } })        // 
 | --- | --- | --- |
 | **V3**（仓位 NFT） | 能 | 仓位合约可以按地址列出 NFT：`balanceOf` → `tokenOfOwnerByIndex` → `positions`，再读池子的价格和手续费增长。仓位很多的地址只核对按持有顺序最后的 `maxPositions` 个（默认 500，大致是最近的） |
 | **V2**（LP 代币） | **尽量** | 链上没有“地址持有哪些代币”的索引。默认用计价币之间的组合（WETH/USDT、WBNB/USDT…）在各工厂里找池子；`tokens` 传入更多代币（如资产列表里的）一起组合；`pools` 直接传池子地址；`source: alchemy({ apiKey })` 用代币来源列出地址持有的全部 ERC20（包括 LP 代币，见[资产列表](#资产列表)）。找到的 LP 代币按 `token0` / `token1` / `factory` 识别池子和协议，工厂不在协议表里的显示为 `Unknown V2` |
-| **V4**（仓位 NFT） | **需要配置** | V4 的仓位合约不能按地址列出 NFT。`v4.tokenIds` 传已知的仓位；`v4.scan` 扫描仓位合约发给该地址的 NFT（`Transfer` 事件），扫到的再核对是否仍归这个地址（已转走 / 销毁的从进度里去掉）。两个都不传时不查 V4；候选太多时只核对 tokenId 最大的 `maxPositions` 个 |
+| **V4**（仓位 NFT） | **需要配置** | V4 的仓位合约不能按地址列出 NFT。`v4.tokenIds` 传已知的仓位；`v4.scan` 扫描仓位合约发给该地址的 NFT（`Transfer` 事件），扫到的再核对是否仍归这个地址（已转走 / 销毁的从进度里去掉）。扫描前先查 `balanceOf`：地址一个仓位 NFT 都没有时直接跳过扫描（`onProgress` 收到 `skipped: true`）。两个都不传时不查 V4；候选太多时只核对 tokenId 最大的 `maxPositions` 个 |
 
 **V4 扫描**（`v4: { scan: true }` 或传选项）：每次调用从上次的位置往后扫，进度默认在内存里，`storage: keyValueLpScanStorage(localStorage)` 可以跨页面刷新接着扫。`fromBlock`：`'deployment'`（默认，从仓位合约部署的区块开始扫全部历史；自定义协议没传 `deployBlock` 时等同于 `'latest'`）、`'latest'`（只发现之后的新仓位）或区块号。只查仓位合约的事件，单次范围默认 10000 个区块，节点有上限时自动缩小，限频 / 超时自动退避（与[增量扫描](#增量扫描可选)相同）。扫全部历史在公共节点上很慢（BSC 公共节点每次只能查几百个区块），每次调用只推进 `maxRequests` 个请求 / `timeBudget` 时间，建议用自己的节点或把进度存起来。**没扫到最新区块之前 V4 的结果不完整**（从旧往新扫，最近铸造的仓位最后才扫到）：`onProgress: ({ cursor, target, done, pausedUntil }) => …` 可以拿到进度，没扫完时提示用户或再调用几次（节点不开放 getLogs 时会暂停一段时间：触发暂停的那次带 `pausedUntil`，暂停期间的调用 `target` 为 null；拿不到最新区块时 `target` 也为 null）。`confirmations`（默认 5）不要设为 0：刚出的区块可能被重组。已转走 / 销毁的仓位只在节点跟上扫描进度时才从进度里去掉，节点落后时照常返回结果、这次不清理。改 `fromBlock` 只对还没有进度的地址生效（进度按链 + 仓位合约 + 地址保存）。
 
@@ -371,6 +371,74 @@ await collectFees(multi, privateKey, { position })                              
 打包：在已经用到 `Provider` 的基础上，只用 `build*` 约增加 40KB（minify，gzip 约 13KB），加上发送约 77KB（gzip 约 26KB，其中大部分是 `/write` 的发送代码），均不含 ethers。
 
 
+## 领取手续费和挖矿奖励
+
+子路径 `@w3lib/evm-batch-call/rewards`：一键领取 V3 / V4 仓位未领取的手续费，以及质押在农场里的挖矿奖励。
+
+- `getClaimable(owner, { chainId })` / `claimable(provider, owner)`：只读，列出每个仓位能领什么（数量按精度换算，`prices: true` 时带美元价值，按价值排序），来源出错只记进 `errors`
+- `buildClaimAll(provider, owner, options)`：合并成尽量少的交易，先模拟、剔除会失败的项，只读取、不签名
+- `claimAll(provider, from, options)`：构建后签名发送，`from` 与 `/write` 的 `batchCall` 相同；`mode: '7702' | '4337' | '5792'` 合成一笔原子交易
+
+```ts
+import { claimAll, getClaimable } from '@w3lib/evm-batch-call/rewards'
+
+const c = await getClaimable(user, { chainId: 56, prices: true })
+// c.items: [{ id: 'farm:pancakeswap-v3:7682136', kind: 'farm', staked: true, amounts: [{ token: CAKE, formatted: '0.046', usd: 0.03 }], usd: 0.03 },
+//           { id: 'fees:pancakeswap-v3:7682136', kind: 'fees', staked: true, amounts: [token0, token1], … }, …]
+// c.totals / c.usd：按代币汇总 / 合计
+
+const { status, claimed, failed, plan } = await claimAll(multi, privateKey, { minUsd: 1 })   // 价值低于 1 美元的项跳过
+await claimAll(multi, privateKey, { mode: '7702' })                // 一笔交易领完（要求钱包能本地签名）
+await claimAll(multi, privateKey, { items: c.items.filter((i) => i.kind === 'fees') })   // 只领挑出来的
+```
+
+| 来源 | 链 | 读取 | 领取 |
+| --- | --- | --- | --- |
+| V3 手续费（Uniswap V3、PancakeSwap V3、SunSwap V3） | 内置协议表 | 与 `/lp` 相同（仓位 NFT + 池子的手续费增长） | 仓位合约 `multicall([collect…])`，一笔合并多个仓位 |
+| V4 手续费（Uniswap V4） | 内置协议表 | `v4: { tokenIds }` 或 `v4: { scan: true }`（同 `/lp`，V4 不能按地址列出 NFT） | 一次 `modifyLiquidities`：每个仓位 `DECREASE_LIQUIDITY(0)`，每个币 `TAKE` 一次 |
+| PancakeSwap V3 农场（CAKE + 质押仓位的手续费） | BSC、Ethereum、Base、Arbitrum（MasterChefV3） | `balanceOf` / `tokenOfOwnerByIndex` 列出质押的仓位，以所有者身份预执行 `harvest` 得到真正会发的 CAKE（`pendingCake` 比实际少，只作备用） | MasterChef `multicall([harvest, collectTo…])` |
+| Aerodrome / Velodrome Slipstream gauge | Base、Optimism | 经 Voter 枚举 gauge（缓存 1 小时，也可以传 `gauges`），`stakedValues` + `earned` | 每个仓位一笔 `getReward(tokenId)`（合约只能领一个） |
+
+- `protocols`：只查某些协议（LP 协议 id 或挖矿协议 id；`'pancakeswap-v3'` 同时含它的农场）；`fees` / `rewards`：只查手续费或只查奖励；`farms`：自己的 `FarmProtocol`；`maxPositions`：每个协议最多核对多少个仓位（默认 500）
+- `recipient`：领到的代币发给哪个地址（默认 owner）；gauge 的奖励只能发给 owner，传了别的地址时这些项被跳过
+- `simulate`（默认 true，用 `/simulate`，按需加载）：某一笔失败时逐项再试，失败的项放进 `plan.skipped`（带原因），其余照常；每笔交易带 `simulation`（资产变化就是实际会收到的数量）。原子模式下一个仓位失败会让整笔回滚，所以先剔除
+- `minUsd`：低于这个美元价值的项跳过（有任何一个币没有价格的项算价值未知，不跳过）；`batchSize`：一笔最多合并多少个仓位，默认 20
+- `claimAll` 的 `continueOnError` 默认 true（每笔独立，不像 `batchCall` 默认遇错停）；结果的 `claimed` / `failed` 是已确认 / 未确认的项
+
+核对：BSC 主网分叉（anvil）上，以真实质押用户的身份核对手续费与 `MasterChef.collectTo` 的预执行结果逐位一致、CAKE 与 `harvest` 一致，`claimAll` 的实际到账等于预览；再用随机钱包持有从真实持有者转来的 PancakeSwap V3 / Uniswap V3 / Uniswap V4 仓位并质押一个到 MasterChef，分别用逐笔和 `'7702'`（一笔原子交易）领取，每个代币到账数量与预览逐位一致，转走一个仓位后它被模拟剔除、其余照常。Base 分叉上以真实用户的身份领取 Aerodrome gauge 奖励（到账与预览一致，只多出几秒的累计）；Base 主网（公共节点）枚举 Voter 的全部 gauge 读到质押的仓位和 AERO（带美元价值），Tron 主网读 SunSwap V3 真实用户的手续费并用 `triggerconstantcontract` 预执行领取交易。
+
+**局限**：手续费 / 奖励随时间增加，预览是查询那一刻的数量；V4 要给 `tokenIds` 或开启扫描；Uniswap V3 的 UniswapV3Staker 激励按 `IncentiveKey` 领取、不能按用户列出，没有支持；Slipstream 的未质押仓位用了不同的 NonfungiblePositionManager（`tickSpacing` 代替 `fee`），不在 `/lp` 表里，手续费不查（质押后手续费归投票人，质押人只有奖励）；V3 手续费收到的是代币本身（包装币不自动换成主币）。
+
+## Flap 分红
+
+子路径 `@w3lib/evm-batch-call/dividends`：查并领取 [Flap](https://flap.sh)（BNB Chain 发币平台）税收代币的分红。只支持 BSC（chainId 56）。
+
+```ts
+import { claimDividends, getDividends } from '@w3lib/evm-batch-call/dividends'
+
+const { items, unsupported } = await getDividends(user, { chainId: 56, tokens: [flapToken], discover: true })
+// items: [{ token, symbol, balance, claimable: '194002826213118', claimableFormatted, claimed, asset: 'native', assetSymbol: 'BNB', usd: 0.12, accruing, dividendContract, … }]
+await claimDividends(multi, privateKey, items)                                   // 每个代币一笔
+await claimDividends(multi, privateKey, items, { mode: '7702' })                  // 一笔原子交易，默认先模拟、剔除会失败的项
+```
+
+- `tokens`：要查的 Flap 代币；`discover`：从持有人收到过的 `Transfer` 事件里发现（只收地址后缀 `7777` / `8888` 的代币，再逐个核对；卖光的代币上已累计的分红仍可领取，所以不能只看当前余额）。传对象可配置 `lookbackBlocks`（默认 5000）、`fromBlock`、`progress`（结果 `scan.progress`，下次接着扫）、`blockRange`、`maxRequests`、`timeBudget`。`eth_getLogs` 不带地址时，公共 BSC 节点只允许很小的区块范围（25 / 50 个区块）或直接拒绝（publicnode 要求带地址），所以 `discover` 在公共节点上只能扫最近几百个区块；要完整发现请用自己的节点，或把已知的代币传给 `tokens`
+- `prices`（默认 true）：分红资产的美元价值；`includeZero`：也返回没有可领取分红的代币。一次最多检查 200 个代币
+- `claimDividends`：每个代币一笔 `withdrawDividendsFor(owner)` 发给它的 Dividend 合约，`from` 与 `batchCall` 相同，`mode: '7702' | '4337' | '5792'` 合成一笔原子交易；`simulate`（默认 true，用 `/simulate`，按需加载）先模拟每一笔，会 revert 的不发；发送前还会在链上核对每项的 `dividendContract` 是代币自己的 Dividend 合约，不一致的跳过（`status: 'skipped'`，`error` 是原因）；`dryRun` 只预估 gas。`buildClaimDividends(items)` 只构建、不签名
+- **任何人都可以替持有人领取，款项直接到持有人地址**，所以 `from` 可以是别的钱包（如代付 gas），一批里也可以混多个持有人的项
+
+### 合约和核实范围
+
+资料来源：docs.flap.sh（Tax Token V2 / V3、Inspect A Tax Token、已部署地址）和链上调用。BSC 主网：Portal `0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0`、TaxTokenHelper `0x53841c73217735F37BC1775538b03b23feFD8346`、SwapRegistry `0x644A8f560138418bAD4EdEFC7c17878a3c2fBEB6`。
+
+- 每个税收代币有自己的 Dividend 合约（EIP-1167 克隆，实现 `0xd67447C29908Cb901374b658cfD3CB261a375905`，**Sourcify / BscScan 上没有验证源码**；函数名靠官方文档、实现字节码里的函数选择器和链上调用核对）。代币的 `dividendContract()` 给出它；读 `dividendToken()`、`weth()`、`minimumShareBalance()`、`withdrawableDividends(user)`、`withdrawnDividends(user)`；领取 `withdrawDividendsFor(user)`
+- 分红资产就是 Dividend 合约里的 `dividendToken()`：可以是 WBNB（领取时解包成 **BNB**，结果里 `asset: 'native'`）、代币自己、或任意 ERC20（BTCB、DOGE、FXIon 等，按 Flap 的 SwapRegistry 换成）。持有人要持有至少 `minimumShareBalance`（实测 10000 枚）才继续累计新分红（`accruing`）；已累计的不受影响，卖光后仍可领取
+- Flap 的触发机器人也会调 `distributeDividend` 自动给大额持有人发放，所以 `claimable` 为 0 不代表没领过（看 `claimed`）
+- 只有一种合约形态，所以只有一个适配器（`adapter: 'flap'`）：Tax Token V3（`TOKEN_TAXED_V3`，主网上目前绝大多数）已在主网和分叉上核实。Tax Token V2（`dividendBps > 0` 时才部署 Dividend 合约，文档说明函数相同）**没有找到链上实例核实**，能读到 `dividendContract()` 且函数齐全才会识别，否则放进 `unsupported`（带原因）；V1 没有分红。不认识的合约不会猜函数
+- 核对：BSC 主网分叉（anvil，Prague）上用随机钱包代领真实持有人的分红：分红资产为 ERC20（FXIon）和 WBNB（解包成 BNB）两种，持有人到账数量等于预览的 `claimable`，与官方 `TaxTokenHelper.getDividendInfo` 的 `(claimed, pending)` 一致，领完后 `claimable` 为 0、`claimed` 增加；`mode: '7702'` 把两个持有人的领取合成一笔原子交易；`simulate: true` 剔除会 revert 的项。另有连主网的读取 / 发现测试（`LIVE=1`）
+
+**局限**：只有 BSC（Flap 在 Base、X Layer 等链上也有部署，没有核实）；`claimable` 是查询那一刻的数量，之后还会增加；`usd` 依赖价格服务，没有价格时为 null；代币地址不是 `7777` / `8888` 后缀的不会被 `discover` 发现（传 `tokens` 即可）；官方文档中 `MAGIC_DIVIDEND_COMPUTED` 的 LP / 篮子代币（如 Stocks Vault）作为分红资产时，领取到的是篮子代币解包后的底层资产，`assetSymbol` / `usd` 反映的是篮子代币，不一定等于实际收到的资产。
+
 ## 兑换
 
 子路径 `@w3lib/evm-batch-call/swap`：在内置协议表的 V2 / V3 池子里找最好的路线，报价并构建 / 发送兑换交易（Tron 上是 SunSwap V2）。
@@ -422,6 +490,60 @@ const [risk] = await getTokenRisks([token], { chainId: 56 })
 核对：在 BSC 主网分叉上部署测试代币（买 5% / 卖 8% / 转账 2% 税、卖出时把攒下的税也卖进池子、禁止卖出、卖出税 95%）和 PancakeSwap V2 池子，税率一致、貔貅盘都能识别；主网上 CAKE、USDT、PEPE 等没有税。
 
 打包：探测合约约 3KB 字节码；在已经用到 `Provider` 的基础上 `getTokenRisks` 约增加 19KB（minify，gzip 约 8KB）。
+
+## 交易模拟
+
+子路径 `@w3lib/evm-batch-call/simulate`：发送前先看一笔（或一串依赖的）交易会发生什么，可以直接传 `buildSwap` / `buildRevokes` / 流动性构建的交易。
+
+```ts
+import { getSimulation, getBatchSimulation } from '@w3lib/evm-batch-call/simulate'
+
+const sim = await getSimulation({ to: router, data, value }, { chainId: 1, from: user, usd: true })
+// { success: true, gasUsed: '152345', fee: '…',
+//   balanceChanges: [{ address, asset: 'native', symbol: 'ETH', delta: '-1000…', formatted: '-1', usd: -2400 }, { asset: '0xA0b8…', symbol: 'USDC', formatted: '2395.1', usd: 2395 }],
+//   approvalChanges: [], decoded: { type: 'swap', protocol: 'Uniswap SwapRouter02', method: 'multicall', summary: 'Swap 1 ETH for 2395.1 USDC on Uniswap SwapRouter02' },
+//   warnings: [], transfers: […], mode: 'simulateV1' }
+
+const plan = await getSwapQuote(user, { tokenIn: USDT, tokenOut: NATIVE_TOKEN, amountInFormatted: '1000' }, { chainId: 1 })
+const flow = await getBatchSimulation(plan, { chainId: 1, from: user })   // approve + swap 在同一个区块里依次执行，状态延续
+if (!flow.success) throw new Error(flow.results[flow.failedIndex!].error)
+```
+
+- **EVM**：`eth_simulateV1`（实测 publicnode、drpc、mainnet.base.org、bsc-dataseed 都支持，anvil 也支持；`traceTransfers` 把主币转账变成日志）。资产变化和授权变化从日志里算：ERC20 / 721 / 1155 的 Transfer、WETH 的 Deposit / Withdrawal（WETH9 没有 Transfer 事件）、Approval、ApprovalForAll、Permit2 的 Approval / Permit / Lockdown。没有用 deployless 探测合约：公共节点上日志方案够用，也不需要字节码
+- 不支持 `eth_simulateV1` 的节点自动退回 `eth_call` + `eth_estimateGas`（`mode: 'eth_call'`）：只有成败、gas、revert 原因，资产变化按 calldata 估（主币 value、ERC20 `transfer`），多笔交易之间状态不延续（结果里有 `no-state` 提示）。`debug_traceCall` 没有用（公共节点基本都关了）。`gas` 默认 min(1000 万, 2500 万 / 笔数)：公共节点限制一次模拟的总 gas
+- 选项：`from`、`watch`（另外统计资产变化的地址）、`blockTag`、`stateOverrides`（如给地址加余额）、`usd`（给变化带美元价值，用 `/price`，按需加载）、`risk`（对收到的代币做 `/risk` 检查，按需加载）、`fee`
+- **calldata 解码**（不查网络）：ERC20 / 721 / 1155、WETH、Uniswap V2 / V3 Router、V3 仓位合约、Universal Router（命令列表）、Permit2、Multicall3、Disperse、智能账户的 `executeBatch`；Router 的地址按内置协议表标出协议名；multicall 解出子调用；认不出的选择器是 `type: 'unknown'` 带原始选择器。`decodeCalldata` / `decodeRevert` 也可以单独用
+- **revert 原因**：`Error(string)`、`Panic`（带含义）、常见自定义错误（Universal Router、Permit2、OpenZeppelin；`ExecutionFailed` 里的错误一并解开），认不出的是 `custom error 0x选择器`
+- **warnings**（`{ code, severity: 'info' | 'warn' | 'danger', message, address? }`）：`unlimited-approval`、`unlimited-nft-approval`、`unknown-spender`（不在 `knownSpenders()` 里）、`approve-to-eoa`（被授权方没有合约代码）、`no-code`（带 calldata 调用没有代码的地址）、`large-value`（主币转出超过余额的 90%）、`token-risk`（`risk: true`）、`unknown-method`、`reverted`
+- `assertSimulation(simulate(…))`：失败或有 danger 提示时抛错，一行守卫“模拟通过才发送”
+- **Tron**：`triggerconstantcontract`（能量记在 `gasUsed`、日志里的 TRC20 Transfer / Approval），TRX 的变化只有 `call_value`（内部转账查不到），没有手续费估算（用 `/fees` 的 `getCostEstimate`），每笔按当前状态单独模拟
+
+核对：以太坊主网用公共节点模拟 USDT 转账、revert、无限授权、WETH 存入、`buildSwap` 的 approve + swap（`usd` 价值与报价一致）；在主网分叉（anvil）上先模拟、再真的发出去，USDT 和 ETH 的变化与模拟逐位一致。
+
+## 历史记录
+
+子路径 `@w3lib/evm-batch-call/history`：一个地址的转账 / 兑换 / 授权 / 流动性 / 铸造记录，统一成 `Activity`。
+
+```ts
+import { getHistory } from '@w3lib/evm-batch-call/history'
+
+const page = await getHistory(user, { chainId: 1, limit: 20 })        // 默认 Blockscout，失败换 RPC 日志
+// { items: [{ hash, time, block, status: 'success', type: 'swap', label: 'Swapped 1 ETH for 2395 USDC on Uniswap V2 Router',
+//             changes: [{ asset: 'native', symbol: 'ETH', delta: '-1000…', formatted: '-1' }, …], fee: '…', protocol, method }, …],
+//   nextCursor: 'p:20123456', source: 'blockscout' }
+const more = await getHistory(user, { chainId: 1, cursor: page.nextCursor, types: ['swap'] })
+await getHistory(user, { chainId: 56, source: ['etherscan', 'rpc'], apiKey })   // Etherscan v2：一个 Key 覆盖多条链
+await getHistory(tronAddress, { chainId: 728126428 })                             // TronGrid
+```
+
+- **来源（适配器）**：`'blockscout'`（免 Key，内置各链实例表 `BLOCKSCOUT_APIS`，可用 `blockscoutSource({ [chainId]: url })` 补充）、`'etherscan'`（Etherscan v2，`apiKey`）、`'rpc'`（`eth_getLogs`）、`'trongrid'`；传数组按顺序故障切换（某个来源出错 / 被限流就换下一个，全部失败抛 `HistorySourceError`，带每个来源的错误）；也可以传自己实现的 `{ name, fetch(query) → RawPage }`。默认：有 Blockscout 实例的链 `[blockscout, rpc]`，其他链 `[rpc]`，传了 `apiKey` 时 etherscan 排最前；Tron 是 trongrid
+- **Blockscout 用的是它的 Etherscan 兼容接口**（`/api?module=account&action=txlist | txlistinternal | tokentx | tokennfttx | token1155tx`），没用 v2 REST：数据相同，但 v2 一页 50 条带大量标签约 500KB；这个接口只有必要字段，并且与 Etherscan 系完全相同。公共实例按请求数限流（一页 3~5 个请求，被限流时自动退避重试，仍失败就换下一个来源）；`nft: false` 少 2 个请求
+- **分类**：`approve`（calldata 是 approve / permit / setApprovalForAll…）、`liquidity`（加 / 减流动性、领取手续费）、`mint`（收到来自零地址的 NFT / 代币）、`swap`（calldata 是兑换，或同一笔交易里不同资产一进一出）、`transfer`（其余有资产变化的、或普通转账）、`contract`、`other`；`direction` / `counterparty` / `label` 一并给出；`fee` 只在这个地址是发送者时有（最小单位的主币，Tron 是 sun）；失败的交易 `status: 'failed'`、没有资产变化
+- **分页**：`nextCursor` 是不透明字符串（按区块号 / Tron 的毫秒时间戳），各来源通用，可以中途换来源。`limit` 是“至少返回多少条”：按区块整块取，可能略多；`types` / `before` / `after` 过滤后不够 `limit` 会继续翻页（`maxPages`，默认 5）
+- **rpc 来源的局限**：只有 ERC20 / 721 / 1155 的 Transfer 日志（按 topic 里的地址查），**没有主币转账和内部交易**（顶层 value 只在带代币转账的交易里有）；按区块窗口（`rpcSource({ window, maxWindows })`，默认 2000 块 × 10）往回扫，稀疏的地址一次调用可能一条都没有，拿 `nextCursor` 继续；节点需要支持无合约地址过滤的 `eth_getLogs`（publicnode 的以太坊节点不支持，drpc / 1rpc 可以）
+- **Tron**：TronGrid 的 `/v1/accounts/{address}/transactions` + `/transactions/trc20`（没有 Key 限频较严，传 `apiKey`）；内部的 TRX 转账查不到
+
+核对：以太坊主网上 Blockscout 取一个活跃地址的两页（时间递减、分页不重复），RPC 日志来源取代币转账、识别出 Universal Router 的兑换并分页，TronGrid 取 Binance 热钱包的 TRX / USDT 转账（Blockscout 公共实例限流很严，连续跑测试会被 429 一段时间）；用假的 Etherscan 响应单测了分类、分页不丢不重和故障切换。
 
 ## 手续费估算
 
@@ -498,6 +620,45 @@ await revokeApprovals(provider, key, list.filter((a) => a.type !== 'nft' && a.un
 主网核对：Ethereum 上从最近区块的真实 `Approval` / `Permit` / `ApprovalForAll` 事件取授权，额度和合约一致，`scanApprovals` 能发现，撤销的三种交易都能预估通过；Tron 上读到 SunSwap 的真实授权，撤销能模拟。
 
 打包：在已经用到 `Provider` 的基础上，`getApprovals` 约增加 11KB（minify，gzip 约 5KB），`scanApprovals` 很小（约 4KB gzip，不含 Provider）；发送的代码按需加载，只查授权时不会打包。
+
+## 免 gas 授权（permit）
+
+子路径 `@w3lib/evm-batch-call/permit`：用签名代替 `approve` 交易。EIP-2612 permit（含 DAI 风格）、Permit2 的 `PermitSingle` / `PermitBatch`（AllowanceTransfer）和 `permitTransferFrom`（SignatureTransfer）。构建 EIP-712 数据 → 用 ethers Signer 签名（私钥 Wallet、浏览器钱包的 `JsonRpcSigner` 都行）→ 本地验证 → 生成上链 calldata。
+
+```ts
+import { buildPermit, signPermit, permitCalldata, verifyPermitSignature, buildPermit2Single, permit2Calldata } from '@w3lib/evm-batch-call/permit'
+
+const permit = await buildPermit(provider, { token: USDC, owner, spender: router, value: 100_000_000n }) // 精确额度、30 分钟有效
+const signed = await signPermit(signer, permit)        // 签名前核对，签完本地验签
+verifyPermitSignature(permit, signed.signature)        // true
+permitCalldata(signed)                                 // token.permit(...) 的 calldata：谁都可以提交
+
+const p2 = await buildPermit2Single(provider, { token: USDC, owner, spender: router, amount: 100_000_000n })
+permit2Calldata(await signPermit(signer, p2))          // Permit2.permit(...)
+```
+
+- **检测**：`detectPermit(provider, token)` 读 `nonces` / `DOMAIN_SEPARATOR` / `name` / `version` / `eip712Domain`（EIP-5267），按链 ID 和地址重新算 domain，**与代币的 `DOMAIN_SEPARATOR` 逐位一致**才算支持（USDC v2 的 `version` 是 `'2'`；没有 `version()` 时试 `'1'` / `'2'`）；`PERMIT_TYPEHASH` 识别 DAI 风格。不一致时返回原因，不签
+- **安全默认**：精确额度（`MaxUint256` / `MaxUint160` 要 `allowUnlimited: true`；DAI 风格的 permit 只能无限额度，也要显式允许）；有效期默认 30 分钟，超过 24 小时要 `allowLongDeadline: true`；数量为 0 的空白 permit、零地址 spender 直接拒绝；`signPermit` 签名前核对签名者 = owner、`chainId`、`verifyingContract`（代币本身 / Permit2）、typed data 里的 spender / 数量 / 有效期与 `permit` 摘要一致（防被替换），钱包返回的签名不是 owner 的也报错
+- **Permit2 的 `permitTransferFrom`**：nonce 默认随机（无序位图，不会冲突）；只有签名里的 `spender` 能调用；`permitTransferFromCalldata` 的 `requestedAmount` 不能超过签名的数量
+- 合约账户（ERC-1271）的签名无法本地验证（`verifyPermitSignature` 返回 false），也不能签 EIP-2612（链上要求 EOA 签名）；撤销 Permit2 额度用 `/approvals` 的 `buildRevokes`（lockdown）
+
+**在 `swap` 里用**（`approve: 'permit' | 'permit2' | 'auto'`，实际采用的方式在 `result.approval`）：
+
+| 路线 | 能否用签名代替授权 |
+| --- | --- |
+| V3（Uniswap SwapRouter02 / PancakeSwap SmartRouter） | 能：`selfPermitIfNecessary` 放进同一笔 `multicall`，一次签名、一笔交易；代币要支持 EIP-2612 |
+| V2 Router | Router 没有 `selfPermit`：单独发 `permit()` 交易省不了什么，所以默认退回普通授权；用 `mode: '7702' / '4337' / '5792'` 把 permit 和兑换放进同一笔原子批量时才用 permit |
+| Permit2 | 内置的 V2 / V3 Router 都不读 Permit2（直接 `transferFrom`），`'permit2'` 会退回普通的精确授权，`result.approval.reason` 写明；Universal Router 暂不支持 |
+| DAI 风格 / 不支持 permit 的代币 / Tron / 4337 的合约账户 | 退回普通授权，`reason` 里有原因 |
+
+```ts
+const r = await swap(provider, signer, { tokenIn: USDC, tokenOut: NATIVE_TOKEN, amountInFormatted: '20' }, { approve: 'auto' })
+r.approval   // { requested: 'auto', method: 'permit', via: 'selfPermit' } 或 { method: 'approve', reason: '…' }
+```
+
+permit 的有效期与兑换的 `deadline` 相同，额度是精确的卖出数量；用户拒绝签名时整个 `swap` 中止，不会悄悄改成发授权交易。
+
+主网核对（Base 分叉，anvil Prague）：USDC 的 permit 提交后额度正好是签的数量、重放失败；Permit2 的 PermitSingle 链上验签通过，`permitTransferFrom` 由指定 spender 转走、超额 / 重放 / 他人调用都失败；`swap` 的 `'permit'` 在 Uniswap V3、PancakeSwap V3 上一笔交易完成（额度用完归零），V2 路线 + 7702 代付的 permit + 兑换原子完成。
 
 ## 价格
 
@@ -754,6 +915,50 @@ await batchCollect(tron, [key1, key2], hotWallet, { tokens: [USDT, NATIVE_TOKEN]
 await window.tronLink.request({ method: 'tron_requestAccounts' }) // 先连接（TronLink）
 await batchTransfer(new Provider(window.tronWeb), window.tronWeb, recipients)
 ```
+
+## 智能账户批量（原子执行、代付 gas）
+
+`batchCall` / `batchTransfer`（以及 `batchCollect`、`swap`）的 `mode` 增加三种，同一钱包的调用合成**一笔原子执行**的操作，gas 可以由别人付。底层积木在子路径 `@w3lib/evm-batch-call/smart-account`；这些模式的代码按需加载，不用时 `/write` 的体积不变。
+
+| mode | 谁签什么 | 谁付 gas | 适用钱包 |
+| --- | --- | --- | --- |
+| `'7702'` + `sponsor` | 用户签 EIP-7702 授权（未委托时）+ UserOperation（EIP-712） | `sponsor` 钱包（用户不需要主币） | 能本地签名的钱包（私钥 / Wallet） |
+| `'4337'` | owner 签 UserOperation（v0.7 用 personal_sign，v0.8 用 EIP-712，浏览器钱包也行） | 账户自己 / paymaster / 自己打包的钱包 | 任何能签名的钱包 |
+| `'5792'` | 钱包弹一次确认 | 钱包决定 | 支持 EIP-5792 的浏览器钱包 |
+
+```ts
+// 1) 代付 gas 的 7702：用户没有主币，sponsor 付 gas；一个 UserOperation 里的转账原子执行
+await batchTransfer(multi, userKey, recipients, { token: USDT, mode: '7702', sponsor: sponsorKey })
+await batchCollect(multi, [kid1, kid2], hot, { tokens: [USDT, NATIVE_TOKEN], sponsor: sponsorKey }) // 子钱包不用补 gas，主币全额转走
+
+// 2) ERC-4337：owner 对应的 SimpleAccount（首次使用时部署，资产放在账户地址里）
+import { getSimpleAccount } from '@w3lib/evm-batch-call/smart-account'
+const { address } = await getSimpleAccount(multi, owner)                 // 部署前就能算出
+await batchTransfer(multi, ownerKey, recipients, {
+  mode: '4337',
+  smartAccount: {
+    bundler: 'https://public.pimlico.io/v2/8453/rpc',                       // 或 BundlerClient
+    paymaster: new PaymasterClient(pmUrl, { sponsorshipPolicyId }),         // ERC-7677；或 (op, ctx) => ({ paymaster, paymasterData, … })
+    // account: 'simple7702' 让 UserOperation 的 sender 就是钱包自己（EntryPoint v0.8）；entryPoint: '0.7' | '0.8'
+    // selfBundle: key | true   不用 bundler：自己发 EntryPoint.handleOps 交易
+  },
+})
+
+// 3) 浏览器钱包 EIP-5792：支持原子批量时一次确认，不支持时退回逐笔发送（result.atomic 为 false）
+const signer = await new BrowserProvider(window.ethereum).getSigner()
+await batchCall(multi, calls.map((c) => ({ from: signer, ...c })), { mode: '5792' })      // atomicRequired: true 时不退回、直接失败
+```
+
+- **EntryPoint v0.7 / v0.8**：UserOperation 的打包、哈希（v0.8 是 EIP-712，`userOpTypedData`；7702 账户按 EntryPoint 的规则把 initCode 换成委托合约地址）、签名都是手写的（只依赖 ethers）。账户：`'simple'`（eth-infinitism SimpleAccount，工厂地址在 `SIMPLE_ACCOUNT_FACTORY_V07/V08`）和 `'simple7702'`（`SIMPLE_7702_ACCOUNT`，只能用 v0.8）
+- **代付 7702 的原理**：Simple7702Account 的 `executeBatch` 只允许账户自己或 EntryPoint 调用，sponsor 不能直接调；所以由 sponsor 发 `EntryPoint.handleOps` 交易（带用户的 7702 授权），UserOperation 的 `maxFeePerGas` 为 0，用户不付 gas，sponsor 也拿不到补偿。用户签的 UserOperation 固定了调用内容，sponsor 改不了；用户的 nonce 防重放。委托会保留，可用 `revokeDelegation` 撤销
+- **bundler / paymaster**：`BundlerClient`（`eth_sendUserOperation` / `eth_estimateUserOperationGas` / `eth_getUserOperationReceipt` / `eth_supportedEntryPoints`，轮询 `waitForUserOperation`）、`PaymasterClient`（ERC-7677 的 `pm_getPaymasterStubData` / `pm_getPaymasterData`，URL 和 Key 由应用提供，报错信息不带 URL）；`paymaster` 也可以是自定义函数
+- **结果**：仍是 `WriteResult`，`from` 是账户（sender）地址，多了 `userOpHash` 和 `atomic`；`gasUsed` / `fee` 是 UserOperation 的 `actualGasUsed` / `actualGasCost`（账户或 paymaster 付的，代付时为 0），不含打包交易的其余部分；UserOperation 执行失败（打包交易成功）为 `reverted`，EntryPoint 拒绝（如 `AA24 signature error`）为 `failed`
+- 自己打包时 gas 是本地估算（整批能执行时估整批，否则逐个调用相加 + 余量；可用 `smartAccount.gas` 覆盖）；用 bundler 时由 bundler 估算
+- 同一钱包的多批（超过 `batchSize`）按顺序发，上一批确认后再发下一批；`sponsor` / 自己打包用同一个钱包发时，不同子钱包也按顺序发（避免抢 nonce）
+
+主网核对（Base 分叉，anvil Prague）：`getUserOpHash` 与 `EntryPoint.getUserOpHash` 逐位一致（v0.7、v0.8、含 7702 的 initCode 替换）；未部署的 SimpleAccount（v0.7 / v0.8）首次部署 + 主币 / USDC 批量转账、一个调用 revert 时整批回滚；7702 代付（用户余额为 0）、已委托后再来一批不带授权、代付归集、签名错误被 EntryPoint 拒绝（`AA24`）。公共 bundler（Pimlico 免费端点）：`eth_supportedEntryPoints`、`eth_estimateUserOperationGas` 只读调用通过。EIP-5792 用模拟钱包的单元测试覆盖（没有在真实钱包里试过）。
+
+局限：4337 的账户 `'simple'` 的资产在账户地址里（不是 owner 的地址），合约账户不能签 EIP-2612；7702 的授权需要本地签名，浏览器钱包只能用 `'4337'` 的 SimpleAccount 或 `'5792'`；bundler 路径中带 7702 授权（`eip7702Auth`）的调用只做了请求格式层面的核对，没有在真实 bundler 上提交；Tron 不支持这些模式。
 
 ## 主币余额与 deployless
 

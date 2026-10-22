@@ -69,6 +69,10 @@ export interface WriteResult {
   fee: string | null
   blockNumber: number | null
   error: string | null
+  /** 智能账户模式（'4337' / sponsored '7702'）：UserOperation 哈希；此时 from 是账户地址，gasUsed / fee 是 UserOperation 的 */
+  userOpHash?: string | null
+  /** 智能账户 / EIP-5792 模式：同一批的调用是否在一笔里原子执行（5792 钱包不支持而退回逐笔发送时为 false） */
+  atomic?: boolean
 }
 
 /** 交易层面的结果（一笔交易可能对应多个调用的结果） */

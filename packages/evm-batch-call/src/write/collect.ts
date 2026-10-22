@@ -6,7 +6,7 @@ import { isExecutionError } from '../errors.js'
 import { WriteRpc, failureText, l1Fee } from './rpc.js'
 import { FeeSource, applyGasMultiplier, emptyOutcome, mapPool, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxFees, type TxJob, type TxOutcome, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
-import { tronModule } from './batch.js'
+import { sendByMode, tronModule, type NormalizedCall } from './batch.js'
 import { batchTransfer, type TransferResult } from './transfer.js'
 
 const erc20Interface = new Interface(ERC20_ABI as unknown as string[])
@@ -31,6 +31,15 @@ export interface BatchCollectOptions extends SendOptions, TronSendOptions {
   gasBuffer?: number
   /** 各代币的最小归集数量（最小单位），余额低于它的不归集：`{ [USDT]: 10n ** 6n }` */
   minAmount?: Readonly<Record<string, BigNumberish>>
+  /**
+   * 代付 gas 归集：用这个钱包发交易（EIP-7702 + EntryPoint v0.8，见 BatchCallOptions.sponsor），子钱包不需要主币、不用补 gas，
+   * 每个子钱包的所有代币一个 UserOperation 原子归集；包含主币时全部主币一起转走（没有手续费要留）。
+   * 子钱包会被委托给 delegate（默认 Simple7702Account，委托保留，可用 revokeDelegation 撤销）
+   */
+  sponsor?: SignerInput
+  /** sponsor 模式：委托的合约、是否替换已有委托，见 BatchCallOptions */
+  delegate?: string
+  redelegate?: boolean
 }
 
 /** 单个钱包单个代币的归集结果；from 是子钱包，to 是归集地址 */
@@ -135,6 +144,11 @@ export async function batchCollect(provider: Provider, wallets: readonly SignerI
     options.onUpdate?.(item.result)
   }
   const active = (item: Item) => item.result.error === null
+
+  if (options.sponsor) {
+    await collectSponsored(rpc, items, target, options, balances, nativeAt, results)
+    return { results, topUps: [] }
+  }
 
   // 预估每个钱包的代币归集 gas，算出需要补多少主币。
   // 手续费价格只取这一次，代币归集也按它发：补 gas 等确认期间节点报价上涨，也不会超出补的数量、因余额不足被拒
@@ -289,6 +303,51 @@ export async function batchCollect(provider: Provider, wallets: readonly SignerI
     await sendJobs(rpc, sweepJobs.filter((j): j is TxJob => j !== null), options, FeeSource.fixed(rpc, sweepFee))
   }
   return { results, topUps }
+}
+
+/** 代付 gas 归集：每个子钱包一批（所有代币 + 主币全额）原子转到归集地址 */
+async function collectSponsored(
+  rpc: WriteRpc,
+  items: readonly Item[],
+  target: string,
+  options: BatchCollectOptions,
+  balances: TokenBalance[][],
+  nativeAt: number,
+  results: CollectItemResult[],
+): Promise<void> {
+  const list = items.filter((i) => i.result.error === null)
+  for (const item of list) {
+    if (item.native) {
+      // 没有手续费要留：全部主币
+      const balance = balances[Math.floor(item.index / options.tokens.length)]?.[nativeAt] as TokenBalance
+      item.amount = balance.success ? BigInt(balance.balance) : 0n
+    }
+  }
+  const sendable = list.filter((i) => i.amount > 0n)
+  list.filter((i) => i.amount === 0n).forEach((i) => (results[i.index] = toCollectResult(i, target, emptyOutcome('skipped', 'skipped: zero balance'))))
+  const calls: NormalizedCall[] = sendable.map((i) => ({
+    signer: i.signer,
+    to: i.native ? target : i.token,
+    data: i.native ? '0x' : erc20Interface.encodeFunctionData('transfer', [target, i.amount]),
+    value: i.native ? i.amount : 0n,
+  }))
+  const written = await sendByMode(rpc, calls, {
+    ...sendOptions(options),
+    mode: '7702',
+    sponsor: options.sponsor,
+    delegate: options.delegate,
+    redelegate: options.redelegate,
+    continueOnError: true,
+    onUpdate: (r) => {
+      const item = sendable[r.index] as Item
+      results[item.index] = { ...toCollectResult(item, target, emptyOutcome('skipped')), ...r, index: item.index, to: target }
+      options.onUpdate?.(results[item.index] as CollectItemResult)
+    },
+  })
+  written.forEach((r, k) => {
+    const item = sendable[k] as Item
+    results[item.index] = { ...toCollectResult(item, target, emptyOutcome('skipped')), ...r, index: item.index, to: target }
+  })
 }
 
 /** 只保留发送参数（补 gas 时不带 tokens / onUpdate 等归集参数） */

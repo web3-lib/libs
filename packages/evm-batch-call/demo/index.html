@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@w3lib/evm-batch-call demo</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232563eb'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h14' stroke='%23fff' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <header class="top">
@@ -14,7 +13,7 @@
     </header>
 
     <main>
-      <section class="card">
+      <section class="card" data-role="settings">
         <h2>设置</h2>
         <div class="row">
           <label for="chain">链</label>
@@ -22,7 +21,7 @@
         </div>
         <div class="row">
           <label for="rpc">节点</label>
-          <input id="rpc" placeholder="RPC URL（可选，不填用内置公共节点；Tron 填全节点 HTTP 地址，如 https://api.trongrid.io）" />
+          <input id="rpc" placeholder="RPC URL（可选，不填用钱包的节点或内置公共节点；Tron 填全节点 HTTP 地址，如 https://api.trongrid.io）" />
         </div>
         <div class="row">
           <label for="owner">地址</label>
@@ -31,11 +30,26 @@
             <button id="sample">示例地址</button>
           </div>
         </div>
-        <p class="hint">内置公共节点限频较严，偶尔失败时库会自动换节点；频繁使用请填自己的节点。设置保存在本地浏览器。</p>
+        <div class="row">
+          <label>钱包</label>
+          <div class="inline">
+            <span class="wallet-info" id="walletInfo">未连接（只读查询不需要钱包）</span>
+            <button id="connectWallet">连接钱包</button>
+          </div>
+        </div>
+        <p class="hint">不填时：已连接的钱包正好在当前这条链上，就先用钱包的节点（只读请求，不会弹窗），出错再换内置公共节点；否则直接用内置公共节点。内置公共节点限频较严，偶尔失败时库会自动换节点；频繁使用请填自己的节点。设置保存在本地浏览器。</p>
       </section>
 
-      <section class="card">
-        <h2>余额 <small class="muted">getBalances：主币 + 代币，一次 multicall</small></h2>
+      <section class="card" data-group="资产查询" data-key="balances" data-title="余额" data-mode="read" data-desc="查地址的主币和代币余额，一次 multicall 取回。">
+        <h2>余额<small class="muted">getBalances：主币 + 代币，一次 multicall</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_TOKEN, getBalances } from '@w3lib/evm-batch-call'
+
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          // 主币 + 代币余额，一次 multicall；节点用内置公共节点（也可以传 rpc / provider）
+          const list = await getBalances(owner, [NATIVE_TOKEN, USDT], { chainId: 56 })
+          // [{ token: NATIVE_TOKEN, native: true, balance: '1500000000000000000', decimals: 18, formatted: '1.5', success: true }, …]
+        </script>
         <div class="row">
           <label for="balanceTokens">代币</label>
           <textarea id="balanceTokens" placeholder="代币地址，每行一个（默认是这条链的常用代币）" spellcheck="false"></textarea>
@@ -47,8 +61,16 @@
         <div class="result" id="balancesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币信息 <small class="muted">getTokens：name / symbol / decimals / totalSupply</small></h2>
+      <section class="card" data-group="资产查询" data-key="tokens" data-title="代币信息" data-mode="read" data-desc="读代币的名称、符号、精度和总量。">
+        <h2>代币信息<small class="muted">getTokens：name / symbol / decimals / totalSupply</small></h2>
+        <script type="text/plain" data-usage>
+          import { getTokens } from '@w3lib/evm-batch-call'
+
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          // fields 选要读的字段（默认 name / symbol / decimals），一次 multicall
+          const list = await getTokens([USDT], { chainId: 56, fields: ['name', 'symbol', 'decimals', 'totalSupply'] })
+          // [{ address: USDT, native: false, name: 'Tether USD', symbol: 'USDT', decimals: 18, totalSupply: '…', totalSupplyFormatted: '…', success: true }]
+        </script>
         <div class="row">
           <label for="tokenList">代币</label>
           <textarea id="tokenList" placeholder="代币地址，每行一个" spellcheck="false"></textarea>
@@ -60,8 +82,16 @@
         <div class="result" id="tokensResult"></div>
       </section>
 
-      <section class="card">
-        <h2>资产列表 <small class="muted">getOwnerTokens（子路径 /owner）：从公开代币列表发现代币，链上核对余额</small></h2>
+      <section class="card" data-group="资产查询" data-key="owner-tokens" data-title="资产列表" data-mode="read" data-desc="列出地址持有的全部代币（自动发现，链上核对余额）。">
+        <h2>资产列表<small class="muted">getOwnerTokens（子路径 /owner）：从公开代币列表发现代币，链上核对余额</small></h2>
+        <script type="text/plain" data-usage>
+          import { getOwnerTokens } from '@w3lib/evm-batch-call/owner'
+
+          // 从公开代币列表找候选代币，multicall 核对余额；prices: true 带美元价值（DefiLlama）、按价值排序
+          const list = await getOwnerTokens(owner, { chainId: 56, prices: true })
+          // [{ token: NATIVE_TOKEN, native: true, symbol: 'BNB', formatted: '1.5', price: 600, value: 900, source: 'native', … },
+          //  { token: '0x…', native: false, symbol: 'CAKE', formatted: '120', price: 2, value: 240, source: 'metamask', logo: '…', … }]
+        </script>
         <div class="actions">
           <span class="checks"><label><input type="checkbox" id="ownerPrices" checked /> 美元价值（DefiLlama）</label></span>
           <button class="primary" id="runOwner">查询资产</button>
@@ -71,31 +101,72 @@
         <div class="result" id="ownerResult"></div>
       </section>
 
-      <section class="card">
-        <h2>LP 仓位 <small class="muted">getLpPositions（子路径 /lp）：V2 LP 代币、V3 / V4 仓位 NFT</small></h2>
+      <section class="card" data-group="流动性" data-key="lp" data-title="LP 仓位" data-mode="read" data-desc="列出地址在各 DEX 的 V2 / V3 / V4 流动性仓位、数量、待领手续费和美元价值。">
+        <h2>LP 仓位<small class="muted">getLpPositions（子路径 /lp）：V2 LP 代币、V3 / V4 仓位 NFT</small></h2>
+        <script type="text/plain" data-usage>
+          import { getLpPositions, keyValueLpScanStorage } from '@w3lib/evm-batch-call/lp'
+
+          // 内置协议的 V2 LP 代币、V3 / V4 仓位 NFT；prices 带美元价值，includeClosed 含已清空的仓位
+          const list = await getLpPositions(owner, {
+            chainId: 56, prices: true, includeClosed: false,
+            // V4 不能按地址列出：已知时传 { tokenIds: [12345n] }，否则扫描 Transfer 事件（进度存进 localStorage，分次推进）
+            v4: { scan: { storage: keyValueLpScanStorage(localStorage) } },
+          })
+          // [{ version: 'v3', protocol: 'pancakeswap-v3', pool: '0x…', tokenId: '123', token0: { symbol: 'WBNB', … }, token1: { symbol: 'USDT', … },
+          //    amount0Formatted: '1.2', amount1Formatted: '700', fees0Formatted: '0.003', fees1Formatted: '1.8',
+          //    inRange: true, priceLower: 500, priceUpper: 650, valueUsd: 1400, feesUsd: 3.6, … }, …]
+        </script>
         <div class="row">
           <label for="v4TokenIds">V4 tokenId</label>
-          <input id="v4TokenIds" placeholder="可选：Uniswap V4 仓位的 tokenId，逗号分隔（V4 的仓位合约不能按地址列出 NFT）" spellcheck="false" />
+          <input id="v4TokenIds" placeholder="可选：已知的 V4 仓位 tokenId，逗号分隔（填了就直接查，不用扫描）" spellcheck="false" />
         </div>
         <div class="actions">
           <span class="checks"><label><input type="checkbox" id="lpPrices" checked /> 美元价值（DefiLlama）</label></span>
           <span class="checks"><label><input type="checkbox" id="lpClosed" /> 包含已清空的仓位</label></span>
+          <span class="checks"><label><input type="checkbox" id="lpV4Scan" checked /> 自动发现 V4 仓位（扫描）</label></span>
           <button class="primary" id="runLp">查询 LP</button>
           <span class="stats" id="lpStats"></span>
         </div>
-        <p class="hint">V2 用常用计价币之间的组合找池子，只能尽量查；质押到农场（MasterChef）的仓位 NFT 不在用户名下，查不到。</p>
+        <p class="hint">V2 用常用计价币之间的组合找池子，只能尽量查；质押到农场（MasterChef）的仓位 NFT 不在用户名下，查不到。V4 的仓位合约不能按地址列出 NFT，只能扫描它发给这个地址的 Transfer 事件来发现：每次点“查询 LP”推进一段（约 5 秒），进度存在浏览器里，扫完之前结果不完整，再点一次继续；公共节点扫全部历史很慢，建议在设置里填自己的节点。</p>
+        <p class="hint" id="lpV4Progress"></p>
         <div class="result" id="lpResult"></div>
       </section>
 
-      <section class="card">
-        <h2>添加 / 移除流动性 <small class="muted">子路径 /liquidity：build* 只构建（报价 + 要发送的交易），连接钱包后可以直接发送</small></h2>
-        <div class="row">
-          <label>钱包</label>
-          <div class="inline">
-            <span class="wallet-info" id="walletInfo">未连接（只构建时用上面“地址”栏的地址）</span>
-            <button id="connectWallet">连接钱包</button>
-          </div>
-        </div>
+      <section class="card" data-group="流动性" data-key="liquidity" data-title="添加 / 移除流动性" data-mode="mixed" data-wallet data-desc="新建、追加、移除仓位或领取手续费：先报价并构建交易，确认后用钱包发送。">
+        <h2>添加 / 移除流动性<small class="muted">子路径 /liquidity：build* 只构建（报价 + 要发送的交易），连接钱包后可以直接发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { NATIVE_TOKEN, Provider } from '@w3lib/evm-batch-call'
+          import { buildAddLiquidity, buildCollectFees, buildRemoveLiquidity } from '@w3lib/evm-batch-call/liquidity'
+
+          const multi = new Provider(56)
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          // 新建 V3 仓位：区间是“1 个 tokenA 值多少 tokenB”（不填区间用 fullRange: true），给一边的数量
+          const plan = await buildAddLiquidity(multi, owner, {
+            protocol: 'pancakeswap-v3', tokenA: NATIVE_TOKEN, tokenB: USDT, fee: 500, priceLower: 550, priceUpper: 650, amountAFormatted: '0.01',
+          }, { slippage: 0.005 })
+          // 已有仓位：追加、按比例移除（native: true 包装币换成主币）、只领手续费
+          const position = { protocol: 'pancakeswap-v3', tokenId: 123456 }   // 或直接用 getLpPositions 的结果
+          await buildAddLiquidity(multi, owner, { position, amount0Formatted: '0.1' })
+          await buildRemoveLiquidity(multi, owner, { position, percent: 50 }, { native: true })
+          await buildCollectFees(multi, owner, { position })
+          // { version: 'v3', token0, token1, price, amount0Formatted, amount1Formatted, amount0Max, amount1Max, value: '0',
+          //   transactions: [{ kind: 'approve', to: USDT, data, value: '0', token, spender, amount }, …, { kind: 'add', to: positionManager, data, value }] }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { addLiquidity, collectFees, removeLiquidity } from '@w3lib/evm-batch-call/liquidity'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // 构建后逐笔发送：授权在前，确认后再发主交易；onUpdate 报每笔的进度
+          const result = await addLiquidity(multi, signer, {
+            protocol: 'pancakeswap-v3', tokenA: NATIVE_TOKEN, tokenB: USDT, fee: 500, fullRange: true, amountAFormatted: '0.01',
+          }, { slippage: 0.005, onUpdate: (r) => console.log(r.kind, r.status) })
+          await removeLiquidity(multi, signer, { position, percent: 100, burn: true })   // 全部移除并销毁仓位 NFT
+          await collectFees(multi, signer, { position })
+          // { status: 'confirmed', hash, tokenId: '123', plan, results: [{ kind: 'approve' | 'add', status, hash, … }] }
+        </script>
         <div class="row">
           <label for="liqAction">操作</label>
           <select id="liqAction">
@@ -140,7 +211,7 @@
         <div id="liqExisting" hidden>
           <div class="row">
             <label for="liqPosition">仓位</label>
-            <select id="liqPosition"><option value="">先在上面“LP 仓位”里查询</option></select>
+            <div class="inline"><select id="liqPosition"><option value="">点右边“加载我的仓位”，或在“LP 仓位”页查询</option></select><button id="liqLoad" type="button">加载我的仓位</button><span class="stats" id="liqLoadStatus"></span></div>
           </div>
           <div class="row" id="liqAddAmounts">
             <label>数量</label>
@@ -161,7 +232,7 @@
           <span class="checks"><label>滑点 <input id="liqSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <span class="checks"><label><input type="checkbox" id="liqNative" /> 包装币那一边用主币（V2 / V3）</label></span>
           <button class="primary" id="runLiqBuild">报价（只构建）</button>
-          <button class="primary" id="runLiqSend">发送（钱包确认）</button>
+          <button class="primary send" id="runLiqSend">发送（钱包确认）</button>
           <span class="stats" id="liqStats"></span>
         </div>
         <p class="hint">
@@ -171,8 +242,23 @@
         <div class="result" id="liqResult"></div>
       </section>
 
-      <section class="card">
-        <h2>NFT <small class="muted">子路径 /nft：集合信息、持有人、元数据地址</small></h2>
+      <section class="card" data-group="资产查询" data-key="nft" data-title="NFT" data-mode="read" data-desc="查 NFT 集合信息、持有人和元数据地址。">
+        <h2>NFT<small class="muted">子路径 /nft：集合信息、持有人、元数据地址</small></h2>
+        <script type="text/plain" data-usage>
+          import { getNftCollections, getNftOwners, getNftTokenUris } from '@w3lib/evm-batch-call/nft'
+
+          const BAYC = '0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D'
+          const items = [1, 2, 3].map((tokenId) => ({ contract: BAYC, tokenId }))
+          // 集合信息和持有人同时发出，自动合并成一次 multicall；standard 通过 ERC165 识别
+          const [collections, owners] = await Promise.all([
+            getNftCollections([BAYC], { chainId: 1, fields: ['standard', 'name', 'symbol', 'totalSupply'] }),
+            getNftOwners(items, { chainId: 1 }),
+          ])
+          // 元数据地址：兼容 ERC721 tokenURI / ERC1155 uri，ipfs:// 换成网关地址
+          const uris = await getNftTokenUris(items, { chainId: 1, ipfsGateway: 'https://ipfs.io/ipfs/' })
+          // collections: [{ address: BAYC, standard: 'ERC721', name: 'BoredApeYachtClub', symbol: 'BAYC', totalSupply: '10000', success: true }]
+          // owners: [{ contract: BAYC, tokenId: '1', owner: '0x…', success: true }, …]；uris: [{ contract, tokenId, uri: 'https://ipfs.io/ipfs/…', success }, …]
+        </script>
         <div class="row">
           <label for="nftContract">合约</label>
           <input id="nftContract" placeholder="ERC721 / ERC1155 合约地址" spellcheck="false" />
@@ -188,8 +274,21 @@
         <div class="result" id="nftResult"></div>
       </section>
 
-      <section class="card">
-        <h2>价格 / 资产总值 <small class="muted">子路径 /price：getTokenPrices（DefiLlama，没收录的从链上池子算）、getPortfolio（余额 × 价格）</small></h2>
+      <section class="card" data-group="资产查询" data-key="price" data-title="价格 / 资产总值" data-mode="read" data-desc="查代币美元价格，或算整个地址的资产总值。">
+        <h2>价格 / 资产总值<small class="muted">子路径 /price：getTokenPrices（DefiLlama，没收录的从链上池子算）、getPortfolio（余额 × 价格）</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_TOKEN } from '@w3lib/evm-batch-call'
+          import { getPortfolio, getTokenPrices } from '@w3lib/evm-batch-call/price'
+
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          const CAKE = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82'
+          // 美元价格：DefiLlama 优先，没收录的从链上 V2 / V3 池子算
+          const prices = await getTokenPrices([NATIVE_TOKEN, USDT, CAKE], { chainId: 56 })
+          // [{ token: '0xEeee…', native: true, price: 612.3, source: 'defillama' }, …, { token: newToken, price: 0.0012, source: 'onchain' }]
+          // 资产总值：列出的代币余额 × 价格；lp: true 计入 LP 仓位，minUsd 隐藏小额代币
+          const p = await getPortfolio(owner, { chainId: 56, tokens: [NATIVE_TOKEN, USDT, CAKE], lp: true, minUsd: 1 })
+          // p.totalUsd：代币 + LP 仓位的合计；p.tokens 按价值排序，p.lp 是 LP 仓位
+        </script>
         <div class="row">
           <label for="priceTokens">代币</label>
           <textarea id="priceTokens" placeholder="代币地址，每行一个；主币填 native" spellcheck="false"></textarea>
@@ -198,15 +297,41 @@
           <span class="checks"><label><input type="checkbox" id="priceLp" /> 资产总值计入 LP 仓位</label></span>
           <span class="checks"><label>隐藏价值低于 <input id="priceMinUsd" class="small" value="0" spellcheck="false" /> 美元的代币</label></span>
           <button class="primary" id="runPrices">查询价格</button>
-          <button class="primary" id="runPortfolio">资产总值（上面“地址”）</button>
+          <button class="primary" id="runPortfolio">资产总值（顶部的地址）</button>
           <span class="stats" id="priceStats"></span>
         </div>
         <p class="hint">EVM 不能只靠节点列出持仓，资产总值只计入上面列出的代币（想自动发现用“资产列表”）。</p>
         <div class="result" id="priceResult"></div>
       </section>
 
-      <section class="card">
-        <h2>授权 <small class="muted">子路径 /approvals：批量读 ERC20 / Permit2 / NFT 授权，批量撤销</small></h2>
+      <section class="card" data-group="安全" data-key="approvals" data-title="授权" data-mode="mixed" data-wallet data-desc="批量查看 ERC20 / Permit2 / NFT 授权，勾选后批量撤销。">
+        <h2>授权<small class="muted">子路径 /approvals：批量读 ERC20 / Permit2 / NFT 授权，批量撤销</small></h2>
+        <script type="text/plain" data-usage="查询">
+          import { getApprovals } from '@w3lib/evm-batch-call/approvals'
+
+          const USDT = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
+          const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+          const BAYC = '0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D'
+          // 代币 × 内置的已知被授权方（Router、聚合器、Permit2）；nfts 查 setApprovalForAll；includeZero 含额度为 0 / 已过期的项
+          const list = await getApprovals(owner, { chainId: 1, tokens: [USDT, USDC], nfts: [BAYC], permit2: true, includeZero: false })
+          // [{ type: 'erc20', token: USDT, symbol: 'USDT', spender: '0x1111…', spenderName: '1inch Router v6', amount: '…', unlimited: true },
+          //  { type: 'permit2', token: USDC, spender: '0x66a9…', spenderName: 'Uniswap Universal Router', amount: '…', expiration: 1767225600, expired: false, … }]
+        </script>
+        <script type="text/plain" data-usage="撤销">
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { buildRevokes, revokeApprovals } from '@w3lib/evm-batch-call/approvals'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          const selected = list.filter((a) => a.type !== 'nft' && a.unlimited)
+          // 只构建：ERC20 每个一笔 approve(spender, 0)，Permit2 合成一笔 lockdown，NFT 每个一笔 setApprovalForAll(false)
+          const txs = buildRevokes(selected, 1)   // [{ kind: 'approve' | 'lockdown' | 'setApprovalForAll', to, data, value: '0', approvals }]
+          // 发送：钱包要是授权的所有者，每笔单独确认，一笔失败不影响后面的
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          const results = await revokeApprovals(new Provider(1), signer, selected, { onUpdate: (r) => console.log(r.index, r.status) })
+          // [{ index: 0, kind: 'approve', status: 'confirmed', hash: '0x…', fee: '…', approvals, … }, …]
+        </script>
         <div class="row">
           <label for="apprTokens">代币</label>
           <textarea id="apprTokens" placeholder="要检查的 ERC20 代币，每行一个（对内置的已知 Router / 聚合器检查）" spellcheck="false"></textarea>
@@ -218,29 +343,39 @@
         <div class="actions">
           <span class="checks"><label><input type="checkbox" id="apprPermit2" checked /> 含 Permit2（Tron 没有）</label></span>
           <span class="checks"><label><input type="checkbox" id="apprZero" /> 含额度为 0 / 已过期的项</label></span>
-          <button class="primary" id="runApprovals">查询授权（上面“地址”）</button>
+          <button class="primary" id="runApprovals">查询授权（顶部的地址）</button>
           <span class="stats" id="apprStats"></span>
         </div>
         <div class="actions">
           <span class="wallet-info">先查询，勾选要撤销的授权（默认勾选无限授权的）</span>
           <button class="primary" id="runRevokeBuild">构建撤销交易（不发送）</button>
-          <button class="primary" id="runRevokeSend">撤销选中的（钱包确认）</button>
+          <button class="primary send" id="runRevokeSend">撤销选中的（钱包确认）</button>
           <span class="stats" id="revokeStats"></span>
         </div>
-        <p class="hint">撤销要由授权的所有者发送：钱包地址要和查询时的地址一致；每笔撤销在钱包里单独确认，交易真实上链。钱包用上面“添加 / 移除流动性”的“连接钱包”。</p>
+        <p class="hint">撤销要由授权的所有者发送：钱包地址要和查询时的地址一致；每笔撤销在钱包里单独确认，交易真实上链。钱包在顶部连接。</p>
         <div class="result" id="apprResult"></div>
         <div class="result" id="revokeResult"></div>
       </section>
 
-      <section class="card">
-        <h2>域名 <small class="muted">子路径 /names：ENS（Ethereum）、SPACE ID（BNB Chain）、Basenames（Base）正向 + 反向解析</small></h2>
+      <section class="card" data-group="工具" data-key="names" data-title="域名" data-mode="read" data-desc="ENS / SPACE ID / Basenames 的正向和反向解析。">
+        <h2>域名<small class="muted">子路径 /names：ENS（Ethereum）、SPACE ID（BNB Chain）、Basenames（Base）正向 + 反向解析</small></h2>
+        <script type="text/plain" data-usage>
+          import { getAddressNames, getNameAddresses } from '@w3lib/evm-batch-call/names'
+
+          // 名字 → 地址；chainId 决定域名服务：1 ENS、56 SPACE ID、8453 Basenames
+          const list = await getNameAddresses(['vitalik.eth', 'nick.eth'], { chainId: 1 })
+          // [{ name: 'vitalik.eth', normalized: 'vitalik.eth', address: '0xd8dA…6045', service: 'ens' }, …]
+          // 地址 → 名字：只返回正查也回到同一个地址的主名字
+          const names = await getAddressNames([owner], { chainId: 1 })
+          // [{ address: owner, name: 'alice.eth', service: 'ens' }]
+        </script>
         <div class="row">
           <label for="nameList">名字</label>
           <textarea id="nameList" placeholder="域名，每行一个（用这条链的域名服务）" spellcheck="false"></textarea>
         </div>
         <div class="row">
           <label for="nameAddresses">地址</label>
-          <textarea id="nameAddresses" placeholder="反向解析的地址，每行一个（不填用上面“地址”）" spellcheck="false"></textarea>
+          <textarea id="nameAddresses" placeholder="反向解析的地址，每行一个（不填用顶部的地址）" spellcheck="false"></textarea>
         </div>
         <div class="actions">
           <button class="primary" id="runNames">名字 → 地址</button>
@@ -251,8 +386,19 @@
         <div class="result" id="namesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>手续费 <small class="muted">子路径 /fees：EIP-1559 三档建议；一笔交易的手续费（含 L1 数据费；Tron 算要烧的 TRX）</small></h2>
+      <section class="card" data-group="工具" data-key="fees" data-title="手续费 / gas" data-mode="read" data-desc="EIP-1559 三档手续费建议，或估算一笔交易的花费。">
+        <h2>手续费<small class="muted">子路径 /fees：EIP-1559 三档建议；一笔交易的手续费（含 L1 数据费；Tron 算要烧的 TRX）</small></h2>
+        <script type="text/plain" data-usage>
+          import { getCostEstimate, getFeeEstimate } from '@w3lib/evm-batch-call/fees'
+          import { parseEther } from 'ethers'
+
+          // EIP-1559 三档建议（BSC 这类 baseFee 为 0 的链按 eth_gasPrice）
+          const fees = await getFeeEstimate({ chainId: 8453 })
+          // { type: 'eip1559', baseFee: '1200000000', slow: { maxFeePerGas, maxPriorityFeePerGas }, normal: {…}, fast: {…} }
+          // 一笔交易的手续费：预估 gas × 这一档的价格（OP Stack 链含 L1 数据费），只估算不发送
+          const cost = await getCostEstimate({ from: owner, to: recipient, data: '0x', value: parseEther('0.01') }, { chainId: 8453, level: 'normal' })
+          // { type: 'evm', gasLimit: '21000', gasPrice, fee, maxFee, l1Fee: '…', total, totalFormatted: '0.0000123', symbol: 'ETH' }
+        </script>
         <div class="row">
           <label for="feeTo">to</label>
           <input id="feeTo" placeholder="接收地址 / 合约（不填就是发给 from 自己）" spellcheck="false" />
@@ -273,15 +419,37 @@
             <option value="fast">fast</option>
           </select>
           <button class="primary" id="runFees">费用建议</button>
-          <button class="primary" id="runCost">估算这笔交易（from 用上面“地址”）</button>
+          <button class="primary" id="runCost">估算这笔交易（from 用顶部的地址）</button>
           <span class="stats" id="feesStats"></span>
         </div>
         <p class="hint">估算会在节点上执行一遍交易，会 revert 的交易（余额不够等）估算不出来；只估算，不发送。</p>
         <div class="result" id="feesResult"></div>
       </section>
 
-      <section class="card">
-        <h2>兑换 <small class="muted">子路径 /swap：在内置 V2 / V3 池子里找最好的路线（直接或两跳），报价后可以用钱包发送</small></h2>
+      <section class="card" data-group="交易" data-key="swap" data-title="兑换" data-mode="mixed" data-wallet data-desc="在内置 V2 / V3 池子里找最好的路线并报价，确认后用钱包发送。">
+        <h2>兑换<small class="muted">子路径 /swap：在内置 V2 / V3 池子里找最好的路线（直接或两跳），报价后可以用钱包发送</small></h2>
+        <script type="text/plain" data-usage="报价（只构建）">
+          import { NATIVE_TOKEN } from '@w3lib/evm-batch-call'
+          import { getSwapQuote } from '@w3lib/evm-batch-call/swap'
+
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          // 在内置 V2 / V3 池子里找最好的路线（直接或两跳）；tax 是转账税（V2 报价不含税，带税的代币要填）
+          const plan = await getSwapQuote(owner, { tokenIn: NATIVE_TOKEN, tokenOut: USDT, amountInFormatted: '0.01' }, { chainId: 56, slippage: 0.005, tax: 0 })
+          // { amountOutFormatted: '6.1', amountOutMinFormatted: '6.07', price: 612.3, priceImpact: 0.0001, routes: […],
+          //   route: { protocol: 'pancakeswap-v3', version: 'v3', path: [WBNB, USDT], fees: [100], … }, transactions: [授权（卖出代币且额度不够时）, 兑换] }
+        </script>
+        <script type="text/plain" data-usage="发送">
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { swap } from '@w3lib/evm-batch-call/swap'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // 授权在前、确认后重新报价再发兑换；approve: 'auto' 代币支持 permit 时用签名代替授权，mode: '5792' 钱包一次确认
+          const r = await swap(new Provider(56), signer, { tokenIn: USDT, tokenOut: NATIVE_TOKEN, amountInFormatted: '10' }, { slippage: 0.005, approve: 'auto', mode: '5792' })
+          // { status: 'confirmed', hash, plan, results: [{ kind, status, hash, … }], approval: { requested: 'auto', method: 'permit', via: 'selfPermit' } }
+        </script>
         <div class="row">
           <label for="swapTokenIn">卖出</label>
           <input id="swapTokenIn" placeholder="代币地址；主币填 native" spellcheck="false" />
@@ -298,19 +466,144 @@
           <span class="checks"><label>滑点 <input id="swapSlippage" class="small" value="0.5" spellcheck="false" /> %</label></span>
           <span class="checks"><label>转账税 <input id="swapTax" class="small" value="" placeholder="0" spellcheck="false" /> %</label></span>
           <span class="checks"><label><input type="checkbox" id="swapApproveMax" /> 授权无限额度</label></span>
+          <span class="checks"><label>授权方式
+            <select id="swapApprove" class="small"><option value="">普通授权</option><option value="auto">auto（能签名就签名）</option><option value="permit">permit（EIP-2612）</option><option value="permit2">permit2（内置 Router 不支持，会退回）</option></select></label></span>
+          <span class="checks"><label>发送方式
+            <select id="swapMode" class="small"><option value="tx">逐笔</option><option value="5792">EIP-5792 原子批量</option></select></label></span>
           <button class="primary" id="runSwapQuote">报价（只构建）</button>
-          <button class="primary" id="runSwapSend">发送（钱包确认）</button>
+          <button class="primary send" id="runSwapSend">发送（钱包确认）</button>
           <span class="stats" id="swapStats"></span>
         </div>
         <p class="hint">
-          带转账税的代币要填税率（V2 报价不含税，不填会因 INSUFFICIENT_OUTPUT_AMOUNT 回滚；V3 不支持带税的代币），税率可以用下面“代币风险”查。
-          报价和“最少收到”按不含税算。发送用“添加 / 移除流动性”里连接的钱包（授权在前，逐笔确认），交易真实上链，请先用小额试。
+          带转账税的代币要填税率（V2 报价不含税，不填会因 INSUFFICIENT_OUTPUT_AMOUNT 回滚；V3 不支持带税的代币），税率可以在<a href="#/risk">“代币风险”页</a>查。
+          报价和“最少收到”按不含税算。发送用<a href="#/liquidity">“添加 / 移除流动性”里</a>连接的钱包（授权在前，逐笔确认），交易真实上链，请先用小额试。
         </p>
         <div class="result" id="swapResult"></div>
       </section>
 
-      <section class="card">
-        <h2>代币风险 <small class="muted">子路径 /risk：模拟买入 / 转账 / 卖出，算买卖税、判断貔貅盘，看是否可升级代理、owner 是否放弃</small></h2>
+      <section class="card" data-group="交易" data-key="batch-transfer" data-title="批量转账" data-mode="write" data-wallet data-desc="用连接的钱包一次转给多个地址（主币或某个代币），默认只预估不发送。">
+        <h2>批量转账 <small class="muted">子路径 /write：batchTransfer，走 Disperse 合约一笔转给多人，链上没有该合约时逐笔发送</small></h2>
+        <script type="text/plain" data-usage>
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { batchTransfer } from '@w3lib/evm-batch-call/write'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          const USDT = '0x55d398326f99059fF775485246999027B3197955'
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // 默认走 Disperse 合约一笔转给多人（代币先 approve 本次的精确总额）；不传 token 转主币；dryRun 只预估不发送
+          const results = await batchTransfer(new Provider(56), signer, [
+            { to: alice, formatted: '1.5' },
+            { to: bob, formatted: '20' },
+          ], { token: USDT, mode: 'disperse', dryRun: true })   // mode: 'tx' 逐笔，'5792' 钱包一次确认、原子批量
+          // [{ index: 0, from, to: alice, token: USDT, native: false, formatted: '1.5', via: 'disperse', status: 'simulated', hash: null, gasLimit: '…', … }, …]
+        </script>
+        <div class="row">
+          <label for="btRecipients">收款</label>
+          <textarea id="btRecipients" placeholder="每行一个：地址 数量（按代币单位，如 0xabc… 1.5）" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <label for="btToken">代币</label>
+          <input id="btToken" placeholder="代币地址（留空：转主币）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label>方式
+            <select id="btMode" class="small"><option value="disperse">disperse（一笔转多人）</option><option value="tx">tx（逐笔）</option><option value="5792">EIP-5792（钱包一次确认、原子批量）</option></select></label></span>
+          <span class="checks"><label><input type="checkbox" id="btDry" checked /> 只预估，不发送</label></span>
+          <button class="primary send" id="runBt">执行</button>
+          <span class="stats" id="btStats"></span>
+        </div>
+        <p class="hint">取消勾选“只预估”后会弹出确认再发送，钱包里还要逐笔确认。归集（多个钱包 → 一个地址）和通用批量调用要多个钱包的私钥，不放进浏览器 demo，用法见 README 的“批量写操作”。</p>
+        <div class="result" id="btResult"></div>
+      </section>
+
+      <section class="card" data-group="交易" data-key="smart-account" data-title="智能账户 / EIP-5792" data-mode="read" data-desc="查 SimpleAccount 地址、bundler 支持的 EntryPoint 和钱包的原子批量能力。">
+        <h2>智能账户 / EIP-5792<small class="muted">子路径 /smart-account：SimpleAccount 地址、bundler 支持的 EntryPoint、钱包的原子批量能力</small></h2>
+        <script type="text/plain" data-usage>
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { BundlerClient, getSimpleAccount, getWalletCapabilities } from '@w3lib/evm-batch-call/smart-account'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          // owner 的 SimpleAccount（部署前就能算出；资产转到这个地址才能用 mode: '4337'）；entryPoint: '0.7' | '0.8'
+          const account = await getSimpleAccount(new Provider(8453), owner, { entryPoint: '0.7' })   // { address: '0x…', deployed: false }
+          // bundler 支持的 EntryPoint
+          const entryPoints = await new BundlerClient('https://public.pimlico.io/v2/8453/rpc').supportedEntryPoints()
+          // 已连接钱包的 EIP-5792 能力（wallet_getCapabilities；钱包不支持时为 null）
+          const caps = await getWalletCapabilities(wallet.getConnection('evm')!.provider as Eip1193Provider, owner, 8453)
+          // { atomic: 'supported' | 'ready' | 'unsupported', paymasterService: false, raw: {…} }
+        </script>
+        <div class="row">
+          <label for="smartBundler">bundler</label>
+          <input id="smartBundler" placeholder="可选：bundler URL，如 https://public.pimlico.io/v2/8453/rpc（含 Key 的 URL 不要提交到仓库）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runSmart">查询</button>
+          <span class="stats" id="smartStats"></span>
+        </div>
+        <p class="hint">
+          只读：用顶部的地址算 owner 的 SimpleAccount（部署前就能算出，资产要转到这个地址才能用 <code>mode: '4337'</code>）；已连接钱包时查 <code>wallet_getCapabilities</code>
+          （支持原子批量时，<code>mode: '5792'</code> 一次确认、一笔交易）。要真发一笔原子批量：批量转账、兑换、领取里选“EIP-5792”（钱包一次确认）；7702 / 4337 需要本地签名或 bundler，用法见 README 的“智能账户批量”。
+        </p>
+        <div class="result" id="smartResult"></div>
+      </section>
+
+      <section class="card" data-group="交易" data-key="permit" data-title="免 gas 授权（Permit）" data-mode="sign" data-wallet data-desc="用签名代替 approve 交易：检测代币是否支持 EIP-2612，签名后得到任何人都能提交的 permit 调用数据。">
+        <h2>免 gas 授权 <small class="muted">子路径 /permit：detectPermit、buildPermit、signPermit、permitCalldata</small></h2>
+        <script type="text/plain" data-usage="检测">
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { detectPermit } from '@w3lib/evm-batch-call/permit'
+
+          const multi = new Provider(1)
+          const USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'
+          // 按链 ID 和地址重新算 domain，与代币的 DOMAIN_SEPARATOR 逐位一致才算支持
+          const support = await detectPermit(multi, USDC)
+          // { kind: 'eip2612' | 'dai' | null, domain: { name: 'USD Coin', version: '2', chainId, verifyingContract }, reason?: '…' }
+        </script>
+        <script type="text/plain" data-usage="签名">
+          import { buildPermit, permitCalldata, signPermit } from '@w3lib/evm-batch-call/permit'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          const ROUTER = '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45' // Uniswap SwapRouter02
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // 精确额度（最小单位）、默认 30 分钟有效；只签 EIP-712 数据，不发交易、不花 gas
+          const permit = await buildPermit(multi, { token: USDC, owner: signer.address, spender: ROUTER, value: 100_000_000n })
+          const signed = await signPermit(signer, permit)   // 签名前核对，签完本地验签
+          const calldata = permitCalldata(signed)           // token.permit(...) 的 calldata：谁都可以提交
+        </script>
+        <div class="row">
+          <label for="pmToken">代币</label>
+          <input id="pmToken" placeholder="代币地址（如 USDC）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="pmSpender">spender</label>
+          <input id="pmSpender" placeholder="被授权的地址（路由合约等）" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="pmAmount">数量</label>
+          <input id="pmAmount" placeholder="按代币单位的精确额度，如 100" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <button class="primary" id="runPmDetect">检测</button>
+          <button class="primary send" id="runPmSign">签名（钱包确认）</button>
+          <span class="stats" id="pmStats"></span>
+        </div>
+        <p class="hint">“检测”只读；“签名”只让钱包签一段 EIP-712 数据，不发交易、不花 gas。额度是精确的，有效期 30 分钟，签完在本地验签。</p>
+        <div class="result" id="pmResult"></div>
+      </section>
+
+      <section class="card" data-group="安全" data-key="risk" data-title="代币风险" data-mode="read" data-desc="模拟买入 / 转账 / 卖出，判断买卖税、貔貅盘、代理升级和 owner 状态。">
+        <h2>代币风险<small class="muted">子路径 /risk：模拟买入 / 转账 / 卖出，算买卖税、判断貔貅盘，看是否可升级代理、owner 是否放弃</small></h2>
+        <script type="text/plain" data-usage>
+          import { getTokenRisks } from '@w3lib/evm-batch-call/risk'
+
+          // eth_call 里模拟买入 → 转账 → 卖出（不发交易），算税率、判断貔貅盘
+          const [risk] = await getTokenRisks([token], { chainId: 56 })
+          // { stage: 'ok', honeypot: false, buyTax: 0.05, sellTax: 0.08, transferTax: 0.02, owner: '0x…', implementation: null,
+          //   flags: ['has-tax', 'owned'], protocol: 'pancakeswap-v2', pool: '0x…', buyGas: 125000, sellGas: 98000 }
+        </script>
         <div class="row">
           <label for="riskTokens">代币</label>
           <textarea id="riskTokens" placeholder="代币地址，每行一个" spellcheck="false"></textarea>
@@ -321,6 +614,150 @@
         </div>
         <p class="hint">只在这条链内置的 V2 协议的“代币 / 包装主币”池子里用 eth_call 模拟，不发交易；没有这样的池子（或只在 V3 有流动性）时测不出税。结果是模拟，不能保证以后不变。</p>
         <div class="result" id="riskResult"></div>
+      </section>
+
+      <section class="card" data-group="安全" data-key="simulate" data-title="交易模拟" data-mode="read" data-desc="发送前预演一笔交易：成败、gas、资产进出、授权变化和风险提示。">
+        <h2>交易模拟<small class="muted">子路径 /simulate：发送前看成败、gas、资产进出、授权变化、解码和风险提示（eth_simulateV1，不支持时退回 eth_call）</small></h2>
+        <script type="text/plain" data-usage>
+          import { NATIVE_TOKEN } from '@w3lib/evm-batch-call'
+          import { getBatchSimulation, getSimulation } from '@w3lib/evm-batch-call/simulate'
+          import { getSwapQuote } from '@w3lib/evm-batch-call/swap'
+          import { Interface } from 'ethers'
+
+          const USDT = '0xdAC17F958D2ee523a2206206994597C13D831ec7'
+          const data = new Interface(['function transfer(address to, uint256 amount)']).encodeFunctionData('transfer', [recipient, 1_000_000n])
+          // 一笔：eth_simulateV1（不支持时退回 eth_call）；usd 带美元价值，risk 对收到的代币做风险检查
+          const sim = await getSimulation({ to: USDT, data, value: 0n }, { chainId: 1, from: owner, usd: true, risk: false })
+          // { success: true, gasUsed: '…', fee: '…', balanceChanges: [{ address, asset: USDT, symbol: 'USDT', delta: '-1000000', formatted: '-1', usd: -1 }],
+          //   approvalChanges: [], decoded: { type: 'transfer', summary: '…' }, warnings: [], mode: 'simulateV1' }
+          // 兑换计划（授权 + 兑换）放进同一次模拟，状态延续
+          const plan = await getSwapQuote(owner, { tokenIn: USDT, tokenOut: NATIVE_TOKEN, amountInFormatted: '100' }, { chainId: 1 })
+          const flow = await getBatchSimulation(plan, { chainId: 1, from: owner, usd: true })
+          // { success, results: [每笔的模拟结果], failedIndex?, gasUsed, balanceChanges, approvalChanges, warnings, mode }
+        </script>
+        <div class="row">
+          <label for="simTo">to</label>
+          <input id="simTo" placeholder="合约 / 收款地址" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="simData">data</label>
+          <input id="simData" placeholder="calldata，0x 开头；转账留空" spellcheck="false" />
+        </div>
+        <div class="row">
+          <label for="simValue">value</label>
+          <input id="simValue" placeholder="附带的主币（最小单位，如 1000000000000000）" spellcheck="false" />
+        </div>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="simUsd" checked /> 美元价值</label></span>
+          <span class="checks"><label><input type="checkbox" id="simRisk" /> 收到的代币做风险检查</label></span>
+          <button class="primary" id="runSim">模拟这一笔</button>
+          <button class="primary" id="runSimSwap">模拟“兑换”页的表单（授权 + 兑换）</button>
+          <span class="stats" id="simStats"></span>
+        </div>
+        <p class="hint">发送者用顶部的地址（已连接钱包时用钱包地址）。<a href="#/swap">“兑换”表单</a>会先报价，再把授权和兑换放进同一次模拟（状态延续）。只是模拟，不会发交易。</p>
+        <div class="result" id="simResult"></div>
+      </section>
+
+      <section class="card" data-group="流动性" data-key="rewards" data-title="领取手续费和奖励" data-mode="mixed" data-wallet data-desc="把 V3 / V4 仓位手续费和农场 / gauge 奖励合并成尽量少的交易，先模拟再领取。">
+        <h2>领取奖励<small class="muted">子路径 /rewards：V3 / V4 仓位的手续费 + PancakeSwap 农场 / Aerodrome gauge 的奖励，合并成尽量少的交易</small></h2>
+        <script type="text/plain" data-usage="查询">
+          import { getClaimable } from '@w3lib/evm-batch-call/rewards'
+
+          // V3 / V4 仓位手续费 + PancakeSwap 农场 / Aerodrome gauge 奖励；V4 传 tokenIds 或 scan（同 /lp）
+          const c = await getClaimable(owner, { chainId: 56, prices: true, v4: { tokenIds: ['12345'] } })
+          // c.items: [{ id: 'farm:pancakeswap-v3:7682136', kind: 'farm', staked: true, amounts: [{ token: CAKE, formatted: '0.046', usd: 0.03 }], usd: 0.03 }, …]
+          // c.totals / c.usd：按代币汇总 / 合计；c.errors：出错的来源
+        </script>
+        <script type="text/plain" data-usage="领取">
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { buildClaimAll, claimAll } from '@w3lib/evm-batch-call/rewards'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          const multi = new Provider(56)
+          // 领取计划：合并成尽量少的交易，先模拟，会失败的项放进 skipped；minUsd 跳过小额
+          const plan = await buildClaimAll(multi, owner, { prices: true, minUsd: 1 })   // { items, skipped: [{ item, reason }], totals, usd, transactions }
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // mode: '5792' 钱包一次确认；'7702' 一笔原子交易（要能本地签名，传私钥）；不传逐笔
+          const { status, claimed, failed } = await claimAll(multi, signer, { prices: true, minUsd: 1, mode: '5792' })
+        </script>
+        <div class="actions">
+          <span class="checks"><label><input type="checkbox" id="claimUsd" checked /> 美元价值</label></span>
+          <span class="checks"><label>V4 tokenIds <input id="claimV4" class="small" placeholder="逗号分隔，可空" spellcheck="false" /></label></span>
+          <span class="checks"><label><input type="checkbox" id="claimV4Scan" checked /> 扫描发现 V4 仓位</label></span>
+          <span class="checks"><label>最小美元 <input id="claimMinUsd" class="small" placeholder="如 1" spellcheck="false" /></label></span>
+          <span class="checks"><label>模式
+            <select id="claimMode" class="small"><option value="tx">逐笔</option><option value="7702">7702（一笔原子）</option><option value="5792">5792（钱包）</option></select></label></span>
+          <button class="primary" id="runClaim">查询</button>
+          <button class="primary" id="runClaimPlan">生成领取计划（先模拟）</button>
+          <button class="primary send" id="runClaimSend">领取全部</button>
+          <span class="stats" id="claimStats"></span>
+        </div>
+        <p class="hint">“查询”只读；“生成领取计划”把能领的合并成交易并模拟，会失败的仓位被跳过；“领取全部”用连接的钱包发送（只支持 EVM）。V4 仓位不能按地址列出，要填 tokenId。</p>
+        <div class="result" id="claimResult"></div>
+      </section>
+
+      <section class="card" data-group="工具" data-key="history" data-title="历史记录" data-mode="read" data-desc="查地址的转账、兑换、授权、流动性等历史（可换数据来源）。">
+        <h2>历史记录<small class="muted">子路径 /history：转账 / 兑换 / 授权 / 流动性 / 铸造，来源可换：Blockscout、Etherscan、RPC 日志、TronGrid</small></h2>
+        <script type="text/plain" data-usage>
+          import { getHistory } from '@w3lib/evm-batch-call/history'
+
+          // 默认 Blockscout，失败换 RPC 日志；source 也可以是 'etherscan'（要 apiKey）/ 'rpc' 或数组（按顺序故障切换）
+          const page = await getHistory(owner, { chainId: 1, limit: 20, types: ['swap'] })
+          // { items: [{ hash, time, block, status: 'success', type: 'swap', label: 'Swapped 1 ETH for 2395 USDC on Uniswap V2 Router',
+          //             changes: [{ asset: 'native', symbol: 'ETH', delta: '-1000…', formatted: '-1' }, …], fee: '…', protocol, method }, …],
+          //   nextCursor: 'p:20123456', source: 'blockscout' }
+          // 下一页：带上 nextCursor（可以中途换来源）
+          const more = await getHistory(owner, { chainId: 1, limit: 20, cursor: page.nextCursor, source: ['etherscan', 'rpc'], apiKey })
+        </script>
+        <div class="actions">
+          <span class="checks"><label>来源
+            <select id="histSource" class="small"><option value="">默认</option><option value="blockscout">blockscout</option><option value="etherscan">etherscan（需要 Key）</option><option value="rpc">rpc 日志</option></select></label></span>
+          <span class="checks"><label>类型
+            <select id="histType" class="small"><option value="">全部</option><option value="transfer">transfer</option><option value="swap">swap</option><option value="approve">approve</option><option value="liquidity">liquidity</option><option value="mint">mint</option><option value="contract">contract</option></select></label></span>
+          <span class="checks"><label>条数 <input id="histLimit" class="small" value="20" spellcheck="false" /></label></span>
+          <span class="checks"><label>apiKey <input id="histKey" class="small" placeholder="Etherscan / TronGrid" spellcheck="false" /></label></span>
+          <button class="primary" id="runHist">查询</button>
+          <button class="primary" id="runHistMore">下一页</button>
+          <span class="stats" id="histStats"></span>
+        </div>
+        <p class="hint">Blockscout 公共实例按请求频率限流（一页 3~5 个请求），被限流时自动换下一个来源；rpc 来源没有主币转账，且只在区块窗口里扫，稀疏的地址可能要多点几次“下一页”。</p>
+        <div class="result" id="histResult"></div>
+      </section>
+
+      <section class="card" data-group="领取与回收" data-key="dividends" data-title="Flap 分红" data-mode="mixed" data-wallet data-desc="查询并批量领取 BNB Chain 上 Flap 税收代币的分红。">
+        <h2>Flap 分红<small class="muted">子路径 /dividends：BNB Chain 上 Flap（flap.sh）税收代币的分红，可领取 / 已领取 / 美元价值，批量领取</small></h2>
+        <script type="text/plain" data-usage="查询">
+          import { getDividends } from '@w3lib/evm-batch-call/dividends'
+
+          // 只支持 BSC；tokens 是已知的 Flap 代币，discover 扫最近收到的 Transfer 发现持仓
+          const { items, unsupported } = await getDividends(owner, { chainId: 56, tokens: [flapToken], discover: true })
+          // items: [{ token, symbol, balance, claimable: '194002826213118', claimableFormatted, claimed, asset: 'native', assetSymbol: 'BNB', usd: 0.12, accruing, dividendContract, … }]
+        </script>
+        <script type="text/plain" data-usage="领取">
+          import { Provider } from '@w3lib/evm-batch-call'
+          import { claimDividends } from '@w3lib/evm-batch-call/dividends'
+          import { BrowserProvider } from 'ethers'
+          import type { Eip1193Provider } from '@w3lib/wallet/evm'
+
+          // 钱包：@w3lib/wallet 连接的浏览器钱包 → ethers Signer（也可以直接传私钥字符串）
+          const signer = await new BrowserProvider(wallet.getConnection('evm')!.provider as Eip1193Provider).getSigner()
+          // 每个代币一笔 withdrawDividendsFor(owner)，simulate 先模拟、会 revert 的不发；mode: '7702' / '5792' 合成一笔原子交易
+          const results = await claimDividends(new Provider(56), signer, items, { simulate: true, mode: '5792' })
+          // [{ item, status: 'confirmed' | 'skipped' | …, hash, error }, …]
+        </script>
+        <div class="actions">
+          <input id="divTokens" placeholder="Flap 代币地址（逗号分隔，可空）" spellcheck="false" />
+          <span class="checks"><label><input id="divDiscover" type="checkbox" checked /> 发现持仓（扫描最近收到的 Transfer）</label></span>
+          <span class="checks"><label>模式
+            <select id="divMode" class="small"><option value="tx">逐笔</option><option value="7702">7702（一笔原子）</option><option value="5792">5792（钱包）</option></select></label></span>
+          <button class="primary" id="runDiv">查询</button>
+          <button class="primary send" id="runDivClaim">领取全部</button>
+          <span class="stats" id="divStats"></span>
+        </div>
+        <p class="hint">只支持 BSC。任何人都可以替持有人领取，款项直接到持有人地址；卖光的代币上已累计的分红也能领。公共节点只允许很小的区块范围，发现只能扫最近几百个区块，已知代币请直接填上。</p>
+        <div class="result" id="divResult"></div>
       </section>
     </main>
 

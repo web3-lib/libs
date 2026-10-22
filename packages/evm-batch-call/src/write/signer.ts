@@ -1,4 +1,4 @@
-import { BaseWallet, JsonRpcSigner, SigningKey, getAddress, type Authorization, type AuthorizationRequest, type TransactionRequest } from 'ethers'
+import { BaseWallet, JsonRpcSigner, SigningKey, getAddress, type Authorization, type AuthorizationRequest, type TransactionRequest, type TypedDataDomain, type TypedDataField } from 'ethers'
 
 /**
  * 发交易的钱包，两种都可以：
@@ -35,6 +35,10 @@ export interface WriteSigner {
   sendTransaction?(tx: TransactionRequest): Promise<{ hash: string }>
   /** EIP-7702 授权签名（ethers Wallet 支持；'7702' 模式需要） */
   authorize?(auth: AuthorizationRequest): Promise<Authorization>
+  /** EIP-712 签名（Wallet / 浏览器钱包都支持）：4337 v0.8 的 UserOperation、permit */
+  signTypedData?(domain: TypedDataDomain, types: Record<string, TypedDataField[]>, value: Record<string, unknown>): Promise<string>
+  /** EIP-191 个人签名：4337 v0.7 的 UserOperation */
+  signMessage?(message: string | Uint8Array): Promise<string>
 }
 
 /** 归一化后的钱包 */

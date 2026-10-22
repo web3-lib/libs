@@ -6,6 +6,8 @@ import type { Provider } from '../provider.js'
 import { isTronChain } from '../tron.js'
 import { WriteRpc } from './rpc.js'
 import { emptyOutcome, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxJob, type TxOutcome, type WriteResult } from './send.js'
+import type { Eip1193Like } from '../smartAccount/eip5792.js'
+import type { SmartAccountOptions } from '../smartAccount/send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
 
 /**
@@ -38,13 +40,17 @@ export interface WriteCall {
   gasLimit?: bigint
 }
 
-export type BatchCallMode = 'tx' | '7702'
+export type BatchCallMode = 'tx' | '7702' | '4337' | '5792'
 
 export interface BatchCallOptions extends SendOptions, TronSendOptions {
   /**
    * - 'tx'（默认）：每个调用一笔交易，所有链都支持
    * - '7702'：钱包通过 EIP-7702 委托给批量执行合约，同一钱包的调用合成一笔交易（按 batchSize 拆分），一笔里的调用要么全部成功要么全部失败。
-   *   需要链支持 EIP-7702，钱包需要能本地签名（私钥 / ethers Wallet）。委托会一直保留，可用 revokeDelegation 撤销
+   *   需要链支持 EIP-7702，钱包需要能本地签名（私钥 / ethers Wallet）。委托会一直保留，可用 revokeDelegation 撤销。
+   *   传 sponsor 时由 sponsor 钱包发交易并付 gas（用户只签授权和 UserOperation，不需要有主币），见 sponsor
+   * - '4337'：ERC-4337 智能账户（smartAccount 选项：bundler / paymaster / selfBundle），一个 UserOperation 原子执行同一钱包的调用，可由 paymaster 代付 gas。
+   *   默认账户是 owner 对应的 SimpleAccount（首次使用时部署，资产要放在账户地址里）。子路径 /smart-account
+   * - '5792'：浏览器钱包的 EIP-5792（wallet_sendCalls）：钱包支持原子批量时一次确认原子执行，不支持时退回逐笔发送
    */
   mode?: BatchCallMode
   /**
@@ -58,6 +64,20 @@ export interface BatchCallOptions extends SendOptions, TronSendOptions {
   batchSize?: number
   /** 7702：钱包已委托给其他合约时改为委托给 delegate。默认 false（报错，不动已有的委托） */
   redelegate?: boolean
+  /**
+   * '7702' 代付 gas：用这个钱包（私钥 / Signer）发 EntryPoint.handleOps 交易，付 gas 的是它，用户钱包不需要主币。
+   * 用户签 EIP-7702 授权（未委托时）+ UserOperation；UserOperation 的 gas 价格为 0，sponsor 拿不到补偿，也不能改调用内容。
+   * 用 EntryPoint v0.8 + Simple7702Account
+   */
+  sponsor?: SignerInput
+  /** '4337' 的智能账户选项 */
+  smartAccount?: SmartAccountOptions
+  /** '5792'：钱包的 provider（EIP-1193 / BrowserProvider）。默认用 from 的 JsonRpcSigner 背后的 provider */
+  eip1193?: Eip1193Like
+  /** '5792'：要求原子执行，钱包不能原子批量时不退回逐笔发送，直接失败。默认 false */
+  atomicRequired?: boolean
+  /** '5792'：传给 wallet_sendCalls 的 capabilities（如 `{ paymasterService: { url } }`） */
+  capabilities?: Record<string, unknown>
 }
 
 /** 归一化后的调用 */
@@ -111,7 +131,26 @@ export async function batchCall(provider: Provider, calls: readonly WriteCall[],
   }
   const rpc = await WriteRpc.from(provider)
   const normalized = await normalizeCalls(calls)
-  return (options.mode ?? 'tx') === '7702' ? send7702(rpc, normalized, options) : sendEach(rpc, normalized, options)
+  return sendByMode(rpc, normalized, options)
+}
+
+/** 按 mode 发送；智能账户 / 5792 的代码按需加载，不用时 /write 的体积不变 */
+export async function sendByMode(rpc: WriteRpc, calls: readonly NormalizedCall[], options: BatchCallOptions): Promise<WriteResult[]> {
+  const mode = options.mode ?? 'tx'
+  if (mode === '7702' && options.sponsor) {
+    const { sendSmartBatch } = await import('../smartAccount/send.js')
+    return sendSmartBatch(rpc, calls, { ...options, smartAccount: { ...options.smartAccount, account: 'simple7702', entryPoint: '0.8', selfBundle: options.sponsor, bundler: undefined } })
+  }
+  if (mode === '7702') return send7702(rpc, calls, options)
+  if (mode === '4337') {
+    const { sendSmartBatch } = await import('../smartAccount/send.js')
+    return sendSmartBatch(rpc, calls, options)
+  }
+  if (mode === '5792') {
+    const { send5792 } = await import('../smartAccount/eip5792.js')
+    return send5792(rpc, calls, options)
+  }
+  return sendEach(rpc, calls, options)
 }
 
 /** Tron 链上用 Tron 的实现（按需加载：只用 EVM 时打包不会带上） */
@@ -137,7 +176,7 @@ export async function sendEach(rpc: WriteRpc, calls: readonly NormalizedCall[], 
 }
 
 /** 钱包当前的委托状态 */
-async function delegationOf(rpc: WriteRpc, address: string): Promise<{ delegated: boolean; to: string | null }> {
+export async function delegationOf(rpc: WriteRpc, address: string): Promise<{ delegated: boolean; to: string | null }> {
   const code = (await rpc.code(address)).toLowerCase()
   if (code === '0x' || code === '') {
     return { delegated: false, to: null }
@@ -251,7 +290,7 @@ export async function send7702(rpc: WriteRpc, calls: readonly NormalizedCall[], 
 }
 
 /** 解析 executeBatch 的 ExecuteError(index, error)；只有一个调用时合约直接透传 revert 数据 */
-function failedIndex(data: string, size: number): { index: number; reason: string } | null {
+export function failedIndex(data: string, size: number): { index: number; reason: string } | null {
   if (size === 1) {
     const reason = decodeRevertReason(data)
     return { index: 0, reason: reason ? `execution reverted: ${reason}` : 'execution reverted' }

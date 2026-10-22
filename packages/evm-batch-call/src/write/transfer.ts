@@ -2,7 +2,7 @@ import { Interface, getAddress, getBigInt, parseUnits, type BigNumberish } from 
 
 import { ERC20_ABI, NATIVE_TOKEN, formatUnits } from '../erc20.js'
 import type { Provider } from '../provider.js'
-import { send7702, sendEach, tronModule, type NormalizedCall } from './batch.js'
+import { sendByMode, tronModule, type BatchCallOptions, type NormalizedCall } from './batch.js'
 import { WriteRpc } from './rpc.js'
 import { emptyOutcome, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxJob, type TxOutcome, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
@@ -34,11 +34,12 @@ export interface TransferItem {
  * - 'disperse'（默认）：通过 Disperse 合约，每种代币每 batchSize 个收款人一笔交易。以下情况自动改为逐笔发送：
  *   链上没有 Disperse 合约；某种代币只有一个收款人；某一批预估 revert（收款地址拒收主币、转账收税的代币等，逐笔发送能把出问题的那一个单独标成失败）
  * - 'tx'：每个收款人一笔交易
- * - '7702'：EIP-7702 批量执行，每 batchSize 个收款人一笔（见 BatchCallOptions.mode）
+ * - '7702'：EIP-7702 批量执行，每 batchSize 个收款人一笔（见 BatchCallOptions.mode）；传 sponsor 时由 sponsor 代付 gas
+ * - '4337' / '5792'：智能账户 UserOperation / 浏览器钱包 wallet_sendCalls，每 batchSize 个收款人一笔、原子执行（见 BatchCallOptions.mode）
  */
-export type TransferMode = 'disperse' | 'tx' | '7702'
+export type TransferMode = 'disperse' | 'tx' | '7702' | '4337' | '5792'
 
-export interface BatchTransferOptions extends SendOptions, TronSendOptions {
+export interface BatchTransferOptions extends SendOptions, TronSendOptions, Pick<BatchCallOptions, 'sponsor' | 'smartAccount' | 'eip1193' | 'atomicRequired' | 'capabilities'> {
   /** 默认转的代币，默认主币（NATIVE_TOKEN）；每项也可以单独指定 token */
   token?: string
   mode?: TransferMode
@@ -130,9 +131,15 @@ export async function batchTransfer(provider: Provider, from: SignerInput, recip
   }
   const rpc = await WriteRpc.from(provider)
   const signer = await resolveSigner(from)
-  const planned = await plan(provider, signer.address, recipients, options)
   const mode = options.mode ?? 'disperse'
-  if (mode === 'tx' || mode === '7702') {
+  // 4337 的 SimpleAccount：资产在账户地址里，不是 owner 的地址
+  let holder = signer.address
+  if (mode === '4337' && (options.smartAccount?.account ?? 'simple') === 'simple') {
+    const { getSimpleAccountAddress } = await import('../smartAccount/account.js')
+    holder = await getSimpleAccountAddress(rpc, signer.address, options.smartAccount?.entryPoint ?? '0.7', options.smartAccount?.salt, options.smartAccount?.factory)
+  }
+  const planned = await plan(provider, holder, recipients, options)
+  if (mode !== 'disperse') {
     return sendDirect(rpc, signer, planned, mode, options)
   }
   return sendDisperse(rpc, provider, signer, planned, options)
@@ -203,8 +210,8 @@ function toTransferResult(p: Planned, result: WriteResult, via: TransferMode): T
   }
 }
 
-/** 'tx' / '7702'：直接转账 */
-async function sendDirect(rpc: WriteRpc, signer: ResolvedSigner, planned: readonly Planned[], mode: 'tx' | '7702', options: BatchTransferOptions): Promise<TransferResult[]> {
+/** 'tx' / '7702' / '4337' / '5792'：直接转账 */
+async function sendDirect(rpc: WriteRpc, signer: ResolvedSigner, planned: readonly Planned[], mode: Exclude<TransferMode, 'disperse'>, options: BatchTransferOptions): Promise<TransferResult[]> {
   const calls = planned.map((p) => transferCall(signer, p))
   const callOptions = {
     ...options,
@@ -212,7 +219,7 @@ async function sendDirect(rpc: WriteRpc, signer: ResolvedSigner, planned: readon
     continueOnError: true,
     onUpdate: options.onUpdate && ((r: WriteResult) => options.onUpdate?.(toTransferResult(planned[r.index] as Planned, r, mode))),
   }
-  const results = mode === '7702' ? await send7702(rpc, calls, callOptions) : await sendEach(rpc, calls, callOptions)
+  const results = await sendByMode(rpc, calls, callOptions)
   return results.map((r, i) => toTransferResult(planned[i] as Planned, r, mode))
 }
 
@@ -318,7 +325,7 @@ async function sendDisperse(rpc: WriteRpc, provider: Provider, signer: ResolvedS
   if (direct.length && !options.signal?.aborted) {
     direct.sort((a, b) => a.index - b.index)
     const calls = direct.map((p) => transferCall(signer, p))
-    await sendEach(rpc, calls, {
+    await sendByMode(rpc, calls, {
       ...options,
       mode: 'tx',
       continueOnError: true,

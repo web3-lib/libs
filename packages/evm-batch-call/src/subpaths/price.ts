@@ -55,6 +55,6 @@ export interface GetPortfolioOptions extends PortfolioOptions, ShortcutProviderO
  * ```
  */
 export function getPortfolio(owner: string, options: GetPortfolioOptions): Promise<Portfolio> {
-  const { provider, own } = resolve(options, ['tokens', 'sources', 'lp', 'minUsd', 'onPriceError', 'fetch'])
-  return portfolio(provider, owner, own as PortfolioOptions)
+  const { provider, overrides, own } = resolve(options, ['tokens', 'sources', 'lp', 'minUsd', 'onPriceError', 'fetch'])
+  return portfolio(provider, owner, { ...(own as PortfolioOptions), ...(overrides.signal ? { signal: overrides.signal } : {}) })
 }

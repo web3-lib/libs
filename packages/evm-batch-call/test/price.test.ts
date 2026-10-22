@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { NATIVE_TOKEN, Provider, TRON_CHAIN_ID } from '../src/index.js'
-import { combinePrices, defillamaPrices, priceKeyOf, tokenPrices, type PriceSource } from '../src/subpaths/price.js'
+import { combinePrices, defillamaPrices, getPortfolio, portfolio, priceKeyOf, tokenPrices, type PriceSource } from '../src/subpaths/price.js'
 
 const USDT = '0x55d398326f99059fF775485246999027B3197955'
 const CAKE = '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82'
@@ -59,5 +59,17 @@ describe('price sources', () => {
     expect(at.name).toBe('defillama@1767225600')
     expect([...(await at.prices({ chainId: 56, tokens: [USDT], nativeSymbol: null, fetch: fakeFetch }))]).toEqual([[USDT.toLowerCase(), 1]])
     expect(urls).toEqual([`https://coins.llama.fi/prices/current/coingecko:binancecoin,bsc:${USDT.toLowerCase()}`, `https://coins.llama.fi/prices/historical/1767225600/bsc:${USDT.toLowerCase()}`])
+  })
+})
+
+describe('portfolio signal', () => {
+  it('signal 传给余额查询；getPortfolio 也把 signal 传下去，已取消时以 reason 失败', async () => {
+    let seen: AbortSignal | undefined
+    const fake = { balances: (_o: string, _t: readonly string[], opts: { signal?: AbortSignal }) => ((seen = opts.signal), new Promise(() => {})) } as unknown as Provider
+    const ctl = new AbortController()
+    void portfolio(fake, '0x0000000000000000000000000000000000000001', { tokens: [NATIVE_TOKEN], signal: ctl.signal })
+    expect(seen).toBe(ctl.signal) // 真 Provider 的 balances 随 signal 中止
+    const aborted = AbortSignal.abort(new Error('cancelled'))
+    await expect(getPortfolio('0x0000000000000000000000000000000000000001', { chainId: 56, tokens: [NATIVE_TOKEN], signal: aborted })).rejects.toThrow('cancelled')
   })
 })

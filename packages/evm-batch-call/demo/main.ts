@@ -1,4 +1,5 @@
-import { NATIVE_TOKEN, Provider, TRON_CHAIN_ID, getBalances, getTokens, onRequest, type RequestEvent } from '@w3lib/evm-batch-call'
+import { mountShell, setNodeStatus } from '../../demo-shared/shell'
+import { DEFAULT_RPC_URLS, NATIVE_TOKEN, Provider, TRON_CHAIN_ID, getBalances, getTokens, onRequest, type ProviderSource, type RequestEvent } from '@w3lib/evm-batch-call'
 import {
   addLiquidity,
   buildAddLiquidity,
@@ -15,10 +16,17 @@ import {
 } from '@w3lib/evm-batch-call/liquidity'
 import { buildRevokes, getApprovals, revokeApprovals, type Approval, type RevokeResult } from '@w3lib/evm-batch-call/approvals'
 import { getCostEstimate, getFeeEstimate, type CostEstimate, type FeeLevel, type FeeLevelEstimate } from '@w3lib/evm-batch-call/fees'
-import { LP_PROTOCOLS, LP_QUOTE_TOKENS, getLpPositions, type LpPosition } from '@w3lib/evm-batch-call/lp'
+import { LP_PROTOCOLS, LP_QUOTE_TOKENS, getLpPositions, keyValueLpScanStorage, type LpPosition } from '@w3lib/evm-batch-call/lp'
 import { NAME_SERVICES, getAddressNames, getNameAddresses } from '@w3lib/evm-batch-call/names'
 import { getPortfolio, getTokenPrices, type Portfolio } from '@w3lib/evm-batch-call/price'
 import { getTokenRisks, type TokenRisk } from '@w3lib/evm-batch-call/risk'
+import { BundlerClient, getSimpleAccount, getWalletCapabilities } from '@w3lib/evm-batch-call/smart-account'
+import { claimDividends, getDividends, type DividendItem } from '@w3lib/evm-batch-call/dividends'
+import { getHistory, type Activity } from '@w3lib/evm-batch-call/history'
+import { buildClaimAll, claimAll, getClaimable, type ClaimItem, type ClaimPlan } from '@w3lib/evm-batch-call/rewards'
+import { getBatchSimulation, getSimulation, type BatchSimulationResult, type SimulationResult } from '@w3lib/evm-batch-call/simulate'
+import { batchTransfer } from '@w3lib/evm-batch-call/write'
+import { detectPermit, buildPermit, signPermit, permitCalldata } from '@w3lib/evm-batch-call/permit'
 import { getSwapQuote, swap, type SwapPlan, type SwapResult, type SwapTxResult } from '@w3lib/evm-batch-call/swap'
 import { createWallet } from '@w3lib/wallet'
 import { arbitrum, avalanche, base, bsc, ethereum, optimism, polygon } from '@w3lib/wallet/chains'
@@ -28,6 +36,9 @@ import { createWalletModal } from '@w3lib/wallet/ui'
 import { BrowserProvider, formatUnits, parseUnits, type Eip1193Provider } from 'ethers'
 import { getNftCollections, getNftOwners, getNftTokenUris } from '@w3lib/evm-batch-call/nft'
 import { getOwnerTokens } from '@w3lib/evm-batch-call/owner'
+
+// 外壳：侧边分组导航 + 设置 / 连接面板（见 packages/demo-shared/shell.ts）
+mountShell()
 
 // ---- 链和示例数据 ----
 
@@ -134,8 +145,8 @@ function applyChain() {
   nftContract.value = sampleNft(chainId)
   // Tron 单次合约调用有 CPU 上限：SunSwap V3 的 tokenURI 在链上生成 SVG，几个放进同一次 multicall 就会超时
   nftTokenIds.value = chainId === TRON ? '1' : '1, 2, 3'
-  for (const id of ['balancesResult', 'tokensResult', 'ownerResult', 'lpResult', 'nftResult', 'liqResult', 'priceResult', 'apprResult', 'revokeResult', 'namesResult', 'feesResult', 'swapResult', 'riskResult']) $(id).replaceChildren()
-  for (const id of ['balancesStats', 'tokensStats', 'ownerStats', 'lpStats', 'nftStats', 'liqStats', 'priceStats', 'apprStats', 'revokeStats', 'namesStats', 'feesStats', 'swapStats', 'riskStats']) $(id).textContent = ''
+  for (const id of ['balancesResult', 'tokensResult', 'ownerResult', 'lpResult', 'nftResult', 'liqResult', 'priceResult', 'apprResult', 'revokeResult', 'namesResult', 'feesResult', 'swapResult', 'smartResult', 'riskResult', 'simResult', 'histResult', 'claimResult', 'btResult', 'pmResult', 'divResult']) $(id).replaceChildren()
+  for (const id of ['balancesStats', 'tokensStats', 'ownerStats', 'lpStats', 'nftStats', 'liqStats', 'priceStats', 'apprStats', 'revokeStats', 'namesStats', 'feesStats', 'swapStats', 'smartStats', 'riskStats', 'simStats', 'histStats', 'claimStats', 'btStats', 'pmStats', 'divStats', 'lpV4Progress', 'liqLoadStatus']) $(id).textContent = ''
   applyLiquidityChain()
   applyExtraChain()
 }
@@ -182,9 +193,23 @@ $('sample').addEventListener('click', () => {
 })
 
 /** 各查询共用的节点参数：选的链 + 自己填的节点（不填用内置公共节点） */
+/**
+ * 查询用的节点：填了自己的节点就用它；没填时，已连接的 EVM 钱包正好在这条链上，就先走钱包的节点
+ * （只读请求，不会弹窗），钱包出错时再退到内置公共节点；钱包在别的链上 / 没连接时只用内置公共节点
+ */
+function nodeSource(): ProviderSource | readonly ProviderSource[] | undefined {
+  if (settings.rpc) return settings.rpc
+  if (isTron()) return undefined
+  const c = wallet.getConnection('evm')
+  if (!c || Number(c.chainId) !== settings.chain) return undefined
+  return [c.provider as Eip1193Provider, ...(DEFAULT_RPC_URLS[settings.chain] ?? [])]
+}
+/** 当前用的是哪类节点：自己的 / 钱包 / 内置公共（节点变了就重建 Provider） */
+const nodeKey = () => (settings.rpc ? `rpc:${settings.rpc}` : Array.isArray(nodeSource()) ? `wallet:${wallet.getConnection('evm')?.address}` : 'public')
+
 const nodeOptions = () => ({
   chainId: settings.chain,
-  provider: settings.rpc || undefined,
+  provider: nodeSource(),
 })
 
 const lines = (text: string) =>
@@ -194,8 +219,9 @@ const lines = (text: string) =>
     .filter(Boolean)
 
 function owner(): string {
-  const value = ownerInput.value.trim()
-  if (!value) throw new Error('请先填写地址（或点“示例地址”）')
+  // 没填地址时用已连接钱包的地址
+  const value = ownerInput.value.trim() || connection()?.address || ''
+  if (!value) throw new Error('请先在顶部“地址”里填写地址（或点“示例地址”，或连接钱包）')
   return value
 }
 
@@ -376,9 +402,37 @@ bind('runOwner', 'owner', async () => {
   }
 })
 
+/** V4 仓位：填了 tokenId 就直接查；否则可以扫描仓位合约发给这个地址的 Transfer 事件（进度存在 localStorage，每次推进一段） */
+function v4Options(tokenIds: string[], scan: boolean, progressEl?: HTMLElement) {
+  if (tokenIds.length) return { tokenIds }
+  if (!scan) return undefined
+  return {
+    scan: {
+      storage: keyValueLpScanStorage(localStorage),
+      onProgress: (p: { cursor: number; target: number | null; done: boolean; startBlock: number; pausedUntil?: number; skipped?: true; held?: number }) => {
+        if (!progressEl) return
+        const held = p.held === undefined ? '' : `这个地址持有 ${p.held} 个 V4 仓位 NFT；`
+        const left = p.target !== null && p.cursor >= 0 ? p.target - p.cursor : null
+        const slow = left !== null && left > 1_000_000
+        progressEl.textContent = p.skipped
+          ? '这个地址没有 V4 仓位 NFT，不用扫描'
+          : p.pausedUntil
+            ? `${held}节点不开放 eth_getLogs，V4 扫描已暂停：在右上角“节点设置”里换自己的节点，或手填 V4 tokenId`
+            : p.done
+              ? `${held}V4 扫描完成（已扫到区块 ${p.cursor}）`
+              : `${held}V4 扫描中：已扫到区块 ${p.cursor}${p.target ? ` / ${p.target}` : ''}` +
+                (slow
+                  ? `，还剩约 ${Math.round((left as number) / 1e6)} 百万个区块。公共节点每次只能查很小的区块范围，扫完要很久：建议在右上角“节点设置”里填自己的节点，或手填 V4 tokenId`
+                  : '，结果还不完整，再点一次“查询”继续')
+      },
+    },
+  }
+}
+
 const pair = (p: LpPosition) => `${p.token0.symbol ?? '?'} / ${p.token1.symbol ?? '?'}`
 
-bind('runLp', 'lp', async () => {
+/** LP 查询（“LP 仓位”页的按钮和“加载我的仓位”共用） */
+async function queryLp() {
   const prices = $<HTMLInputElement>('lpPrices').checked
   const tokenIds = lines($<HTMLInputElement>('v4TokenIds').value)
   let priceError: unknown = null
@@ -390,7 +444,7 @@ bind('runLp', 'lp', async () => {
       priceError = err
     },
     includeClosed: $<HTMLInputElement>('lpClosed').checked,
-    v4: tokenIds.length ? { tokenIds } : undefined,
+    v4: v4Options(tokenIds, $<HTMLInputElement>('lpV4Scan').checked, $('lpV4Progress')),
   })
   setPositions(list, from)
   return {
@@ -412,7 +466,8 @@ bind('runLp', 'lp', async () => {
       priceError,
     ),
   }
-})
+}
+bind('runLp', 'lp', queryLp)
 
 bind('runNft', 'nft', async () => {
   const contract = nftContract.value.trim()
@@ -480,9 +535,16 @@ function chainMeta(chainId: number) {
 
 function renderWallet() {
   const c = connection()
+  // 没填节点、钱包又在这条链上：查询走钱包的节点（节点按钮上显示“钱包”）
+  setNodeStatus(Array.isArray(nodeSource()) ? '钱包' : null)
+  // 连上钱包、地址栏还空着：填上钱包地址（查询默认查自己的钱包）
+  if (c && !ownerInput.value.trim()) {
+    ownerInput.value = c.address
+    ownerInput.dispatchEvent(new Event('change'))
+  }
   const info = $('walletInfo')
   if (!c) {
-    info.textContent = '未连接（只构建时用上面“地址”栏的地址）'
+    info.textContent = '未连接（只读查询不需要钱包）'
     $('connectWallet').textContent = '连接钱包'
     return
   }
@@ -504,8 +566,8 @@ $('connectWallet').addEventListener('click', () => void modal.open(walletNamespa
 // 同一条链、同一个节点复用 Provider（自动合并请求）
 let liqProvider: { key: string; provider: Provider } | null = null
 function liquidityProvider(): Provider {
-  const key = `${settings.chain}|${settings.rpc}`
-  if (liqProvider?.key !== key) liqProvider = { key, provider: new Provider(settings.chain, settings.rpc || undefined) }
+  const key = `${settings.chain}|${nodeKey()}`
+  if (liqProvider?.key !== key) liqProvider = { key, provider: new Provider(settings.chain, nodeSource()) }
   return liqProvider.provider
 }
 
@@ -545,7 +607,7 @@ function setPositions(list: LpPosition[], of: string) {
   lastPositions = list
   positionsOwner = of
   const options = list.map((p, i) => new Option(`${p.protocolName} · ${pair(p)} · ${p.version === 'v2' ? `份额 ${(p.share * 100).toPrecision(3)}%` : `#${p.tokenId}`}`, String(i)))
-  liq.position.replaceChildren(...(options.length ? options : [new Option('先在上面“LP 仓位”里查询（用同一个地址）', '')]))
+  liq.position.replaceChildren(...(options.length ? options : [new Option('没有仓位：点右边“加载我的仓位”，或在“LP 仓位”页查询', '')]))
 }
 
 liq.protocol.addEventListener('change', applyProtocol)
@@ -766,6 +828,8 @@ const ex = {
   swapSlippage: $<HTMLInputElement>('swapSlippage'),
   swapTax: $<HTMLInputElement>('swapTax'),
   swapApproveMax: $<HTMLInputElement>('swapApproveMax'),
+  swapApprove: $<HTMLSelectElement>('swapApprove'),
+  swapMode: $<HTMLSelectElement>('swapMode'),
   riskTokens: $<HTMLTextAreaElement>('riskTokens'),
 }
 
@@ -1135,6 +1199,8 @@ function swapRequest() {
   const slippage = numberOf(ex.swapSlippage, '滑点')
   if (slippage !== undefined && !(slippage >= 0 && slippage < 100)) throw new Error('滑点要在 0 ~ 100% 之间')
   const tax = numberOf(ex.swapTax, '转账税')
+  // “无限额度”只对普通授权有效；permit 签的是精确数量，两者不能同时选
+  if (ex.swapApproveMax.checked && ex.swapApprove.value) throw new Error('“授权无限额度”只适用于普通授权：和 permit 授权方式不能同时选')
   if (tax !== undefined && !(tax >= 0 && tax < 100)) throw new Error('转账税要在 0 ~ 100% 之间')
   return {
     params: { tokenIn, tokenOut, amountInFormatted: amountIn },
@@ -1142,7 +1208,9 @@ function swapRequest() {
       ...(slippage === undefined ? {} : { slippage: slippage / 100 }),
       ...(tax === undefined ? {} : { tax: tax / 100 }),
       ...(ex.swapApproveMax.checked ? { approve: 'max' as const } : {}),
+      ...(ex.swapApprove.value ? { approve: ex.swapApprove.value as 'auto' | 'permit' | 'permit2' } : {}),
     },
+    mode: ex.swapMode.value as 'tx' | '5792',
   }
 }
 
@@ -1199,22 +1267,48 @@ bind('runSwapSend', 'swap', async () => {
   const chainId = settings.chain
   chainSelect.disabled = true
   try {
-    const { params, options } = swapRequest()
+    const { params, options, mode } = swapRequest()
     const { signer } = await walletSigner(chainId)
     const progress = $('swapStats')
     const result: SwapResult = await swap(liquidityProvider(), signer, params, {
       ...options,
+      mode,
       onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 笔（${r.kind}）：${r.status}`),
     })
     const view = document.createElement('div')
     const note = document.createElement('p')
     note.className = 'hint'
-    note.textContent = `结果：${result.status}`
+    note.textContent = `结果：${result.status}${result.approval ? `；授权方式：${result.approval.method}${result.approval.via ? `（${result.approval.via}）` : ''}${result.approval.reason ? `，${result.approval.reason}` : ''}` : ''}`
     view.append(note, swapView(result.plan, chainId, options.tax !== undefined && options.tax > 0, result.results))
     return { data: result, view }
   } finally {
     chainSelect.disabled = false
   }
+})
+
+// ---- 智能账户 / EIP-5792（只读） ----
+
+bind('runSmart', 'smart', async () => {
+  const chainId = settings.chain
+  if (isTron(chainId)) throw new Error('Tron 不支持智能账户')
+  const address = owner()
+  const provider = liquidityProvider()
+  const url = $<HTMLInputElement>('smartBundler').value.trim()
+  const c = connection()
+  // 几个查询互不依赖：并发发出
+  const [v07, v08, entryPoints, capabilities] = await Promise.all([
+    getSimpleAccount(provider, address, { entryPoint: '0.7' }),
+    getSimpleAccount(provider, address, { entryPoint: '0.8' }),
+    url ? new BundlerClient(url).supportedEntryPoints() : undefined,
+    c ? getWalletCapabilities(c.provider as never, c.address, chainId) : undefined,
+  ])
+  const out: Record<string, unknown> = { owner: address, simpleAccountV07: v07, simpleAccountV08: v08 }
+  if (url) out.bundlerEntryPoints = entryPoints
+  if (c) out.walletCapabilities = capabilities ?? '钱包不支持 EIP-5792（wallet_getCapabilities）'
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = '4337 的 SimpleAccount 地址（部署前即可算出）；bundler 支持的 EntryPoint；已连接钱包的 EIP-5792 能力。'
+  return { data: out, view: note }
 })
 
 // ---- 代币风险 ----
@@ -1256,6 +1350,337 @@ bind('runRisk', 'risk', async () => {
   }
 })
 
+// ---- 交易模拟（子路径 /simulate） ----
+
+const WARN_KIND = { info: '', warn: '', danger: 'bad' } as const
+
+function simView(sim: SimulationResult | BatchSimulationResult): Node {
+  const wrap = document.createElement('div')
+  const head = document.createElement('p')
+  head.className = 'hint'
+  const single = 'decoded' in sim ? sim : null
+  head.append(tag(sim.success ? '成功' : '会失败', sim.success ? 'ok' : 'bad'), ` ${single ? single.decoded.summary : `${'results' in sim ? sim.results.length : 1} 笔交易`} · gas ${sim.gasUsed}${sim.fee ? ` · 手续费约 ${formatUnits(sim.fee, nativeInfo().decimals)} ${nativeInfo().symbol}` : ''} · ${sim.mode}`)
+  if (single?.error) head.append(` · 原因：${single.error}`)
+  if ('failedIndex' in sim && sim.failedIndex !== undefined) head.append(` · 第 ${sim.failedIndex + 1} 笔失败：${sim.results[sim.failedIndex]?.error ?? ''}`)
+  wrap.append(head)
+  wrap.append(
+    table(
+      ['地址', '资产', '变化', '美元'],
+      sim.balanceChanges.map((c) => [addr(c.address), c.symbol ?? c.asset, c.formatted + (c.tokenId === undefined ? '' : ` #${c.tokenId}`), c.usd == null ? null : c.usd.toFixed(2)]),
+      [2, 3],
+    ),
+  )
+  if (sim.approvalChanges.length) {
+    wrap.append(
+      table(
+        ['授权', '代币', '被授权方', '额度'],
+        sim.approvalChanges.map((a) => [a.type, a.symbol ?? addr(a.token), a.spenderName ?? addr(a.spender), a.revoked ? tag('撤销', 'ok') : a.unlimited ? tag('无限', 'bad') : a.amount]),
+      ),
+    )
+  }
+  for (const w of sim.warnings) {
+    const p = document.createElement('p')
+    p.className = 'hint'
+    p.append(tag(w.code, WARN_KIND[w.severity]), ` ${w.message}`)
+    wrap.append(p)
+  }
+  return wrap
+}
+
+function nativeInfo(): { symbol: string; decimals: number } {
+  const { symbol, decimals } = chainMeta(settings.chain)
+  return { symbol, decimals }
+}
+
+const sim = {
+  to: $<HTMLInputElement>('simTo'),
+  data: $<HTMLInputElement>('simData'),
+  value: $<HTMLInputElement>('simValue'),
+  usd: $<HTMLInputElement>('simUsd'),
+  risk: $<HTMLInputElement>('simRisk'),
+}
+
+bind('runSim', 'sim', async () => {
+  const to = sim.to.value.trim()
+  if (!to) throw new Error('请填写 to')
+  const value = sim.value.value.trim()
+  const result = await getSimulation(
+    { to, ...(sim.data.value.trim() ? { data: sim.data.value.trim() } : {}), ...(value ? { value: BigInt(value) } : {}) },
+    { ...nodeOptions(), from: connection()?.address ?? owner(), usd: sim.usd.checked, risk: sim.risk.checked },
+  )
+  return { data: result, view: simView(result) }
+})
+
+bind('runSimSwap', 'sim', async () => {
+  const { params, options } = swapRequest()
+  const from = connection()?.address ?? owner()
+  const plan = await getSwapQuote(from, params, { ...nodeOptions(), ...options })
+  const result = await getBatchSimulation(plan, { ...nodeOptions(), from, usd: sim.usd.checked, risk: sim.risk.checked })
+  return { data: result, view: simView(result) }
+})
+
+// ---- 历史记录（子路径 /history） ----
+
+let histCursor: string | undefined
+/** 游标属于哪次查询（链、地址、来源、类型）：换了之后“下一页”不能接着用旧游标 */
+let histFor = ''
+const histKey = () => [settings.chain, owner(), hist.source.value, hist.type.value, hist.limit.value].join('|')
+const hist = {
+  source: $<HTMLSelectElement>('histSource'),
+  type: $<HTMLSelectElement>('histType'),
+  limit: $<HTMLInputElement>('histLimit'),
+  key: $<HTMLInputElement>('histKey'),
+}
+
+function activityRow(a: Activity): Cell[] {
+  const changes = document.createElement('span')
+  for (const c of a.changes) {
+    changes.append(tag(`${c.formatted} ${c.symbol ?? ''}${c.tokenId === undefined ? '' : ` #${c.tokenId}`}`, c.delta.startsWith('-') ? 'bad' : 'ok'), ' ')
+  }
+  return [new Date(a.time * 1000).toLocaleString(), a.status === 'failed' ? tag(`${a.type}（失败）`, 'bad') : a.type, a.label, changes, a.counterparty ? addr(a.counterparty) : null, a.fee ?? null]
+}
+
+async function runHistory(cursor?: string) {
+  // 发请求前记下这次查询的条件：等待期间改了表单，游标也只属于发出去的那次查询
+  const key = histKey()
+  const types = hist.type.value ? [hist.type.value as Activity['type']] : undefined
+  const page = await getHistory(owner(), {
+    ...nodeOptions(),
+    limit: Number(hist.limit.value) || 20,
+    ...(hist.source.value ? { source: hist.source.value as 'blockscout' | 'etherscan' | 'rpc' } : {}),
+    ...(hist.key.value.trim() ? { apiKey: hist.key.value.trim() } : {}),
+    ...(types ? { types } : {}),
+    ...(cursor ? { cursor } : {}),
+  })
+  histCursor = page.nextCursor
+  histFor = key
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `来源：${page.source}；${page.nextCursor ? '还有更早的记录，点“下一页”' : '没有更早的记录了'}`
+  view.append(note, table(['时间', '类型', '描述', '资产变化', '对方', '手续费（最小单位）'], page.items.map(activityRow)))
+  return { data: page, view }
+}
+
+bind('runHist', 'hist', () => runHistory())
+bind('runHistMore', 'hist', () => {
+  if (!histCursor) throw new Error('没有更多记录了：请先点“查询”')
+  if (histFor !== histKey()) throw new Error('链、地址或筛选条件变了：请重新点“查询”')
+  return runHistory(histCursor)
+})
+
+// ---- 领取奖励（子路径 /rewards） ----
+
+const claim = {
+  usd: $<HTMLInputElement>('claimUsd'),
+  v4: $<HTMLInputElement>('claimV4'),
+  v4Scan: $<HTMLInputElement>('claimV4Scan'),
+  minUsd: $<HTMLInputElement>('claimMinUsd'),
+  mode: $<HTMLSelectElement>('claimMode'),
+}
+
+/** 查询和构建共用的选项（节点另外传） */
+function claimQuery() {
+  const v4Ids = lines(claim.v4.value)
+  const v4 = v4Options(v4Ids, claim.v4Scan.checked)
+  return { prices: claim.usd.checked, ...(v4 ? { v4 } : {}) }
+}
+function claimOptions() {
+  const minUsd = claim.minUsd.value.trim()
+  return { ...claimQuery(), ...(minUsd ? { minUsd: Number(minUsd) } : {}) }
+}
+
+function claimRow(i: ClaimItem): Cell[] {
+  const amounts = document.createElement('span')
+  for (const a of i.amounts) if (a.amount !== '0') amounts.append(tag(`${a.formatted ?? a.amount} ${a.token.symbol ?? ''}`, ''), ' ')
+  return [i.protocolName, i.kind === 'fees' ? '手续费' : i.kind === 'farm' ? '农场奖励' : 'gauge 奖励', `#${i.tokenId}${i.staked ? '（已质押）' : ''}`, amounts, i.usd == null ? null : i.usd.toFixed(2)]
+}
+
+function claimView(items: ClaimItem[], usd: number | null | undefined, plan?: ClaimPlan): HTMLElement {
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `${items.length} 项${usd == null ? '' : `，合计约 $${usd.toFixed(2)}`}${plan ? ` · ${plan.transactions.length} 笔交易${plan.skipped.length ? ` · 跳过 ${plan.skipped.length} 项` : ''}` : ''}`
+  view.append(note, table(['协议', '类型', '仓位', '数量', '美元'], items.map(claimRow), [4]))
+  if (plan?.skipped.length) view.append(table(['跳过的仓位', '原因'], plan.skipped.map((s) => [`${s.item.protocolName} #${s.item.tokenId}`, s.reason])))
+  return view
+}
+
+bind('runClaim', 'claim', async () => {
+  const c = await getClaimable(owner(), { ...nodeOptions(), ...claimQuery() })
+  const view = claimView(c.items, c.usd)
+  for (const e of c.errors) {
+    const p = document.createElement('p')
+    p.className = 'hint'
+    p.append(tag(e.source, 'bad'), ` ${e.error}`)
+    view.append(p)
+  }
+  return { data: c, view }
+})
+
+bind('runClaimPlan', 'claim', async () => {
+  const plan = await buildClaimAll(liquidityProvider(), connection()?.address ?? owner(), claimOptions())
+  return { data: plan, view: claimView(plan.items, plan.usd, plan) }
+})
+
+bind('runClaimSend', 'claim', async () => {
+  if (isTron(settings.chain)) throw new Error('领取全部暂只支持 EVM 链')
+  // 连接 / 切链 / 核对钱包确实切过去了，同其他发送
+  const { signer } = await walletSigner(settings.chain)
+  const mode = claim.mode.value as 'tx' | '7702' | '5792'
+  const result = await claimAll(liquidityProvider(), signer, { ...claimOptions(), ...(mode === 'tx' ? {} : { mode }) })
+  const view = claimView(result.plan.items, result.plan.usd, result.plan)
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `结果：${result.status} · 已领取 ${result.claimed.length} 项，未成功 ${result.failed.length} 项`
+  view.prepend(note)
+  return { data: result, view }
+})
+
+// ---- Flap 分红（子路径 /dividends） ----
+
+const div = { tokens: $<HTMLInputElement>('divTokens'), discover: $<HTMLInputElement>('divDiscover'), mode: $<HTMLSelectElement>('divMode') }
+let divItems: DividendItem[] = []
+
+async function runDividends() {
+  if (settings.chain !== 56) throw new Error('Flap 分红只支持 BSC：请先把链切到 BSC')
+  const tokens = lines(div.tokens.value)
+  const result = await getDividends(owner(), { ...nodeOptions(), chainId: 56, tokens, ...(div.discover.checked ? { discover: true } : {}) })
+  divItems = result.items
+  const view = document.createElement('div')
+  const note = document.createElement('p')
+  note.className = 'hint'
+  note.textContent = `${result.items.length} 个代币有可领取的分红${result.unsupported.length ? `；${result.unsupported.length} 个识别不了（${result.unsupported[0]?.reason}）` : ''}${result.priceError ? `；价格服务出错：${result.priceError}` : ''}`
+  view.append(
+    note,
+    table(
+      ['代币', '余额', '可领取', '已领取', '价值', '继续累计'],
+      result.items.map((i) => [addr(i.token), `${formatUnits(i.balance, i.decimals)} ${i.symbol ?? ''}`, `${i.claimableFormatted} ${i.assetSymbol ?? ''}`, `${i.claimedFormatted} ${i.assetSymbol ?? ''}`, i.usd === null ? '—' : `$${i.usd.toFixed(4)}`, i.accruing ? '是' : '否']),
+    ),
+  )
+  return { data: result, view }
+}
+bind('runDiv', 'div', runDividends)
+bind('runDivClaim', 'div', async () => {
+  // 构建和模拟走 liquidityProvider()（跟随页面的链）：链不是 BSC 时之前查到的分红也不再适用
+  if (settings.chain !== 56) throw new Error('Flap 分红只支持 BSC：请先把链切到 BSC，再重新查询')
+  if (!divItems.length) throw new Error('没有可领取的分红：请先点“查询”')
+  const { signer } = await walletSigner(56)
+  const mode = div.mode.value as 'tx' | '7702' | '5792'
+  const results = await claimDividends(liquidityProvider(), signer, divItems, { simulate: true, ...(mode === 'tx' ? {} : { mode }) })
+  const view = table(
+    ['代币', '状态', '交易', '错误'],
+    results.map((r) => [addr(r.item.token), statusTag(r.status, r.error), r.hash ? link(r.hash, null) : null, r.error ?? null]),
+  )
+  return { data: results, view }
+})
+
+// ---- 批量转账（子路径 /write） ----
+
+const bt = { recipients: $<HTMLTextAreaElement>('btRecipients'), token: $<HTMLInputElement>('btToken'), mode: $<HTMLSelectElement>('btMode'), dry: $<HTMLInputElement>('btDry') }
+
+bind('runBt', 'bt', async () => {
+  const rows = bt.recipients.value
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [to, formatted] = l.split(/[\s,]+/)
+      if (!to || !formatted) throw new Error(`格式不对：${l}（每行“地址 数量”）`)
+      return { to, formatted }
+    })
+  if (!rows.length) throw new Error('请填收款地址和数量')
+  if (rows.length > 500) throw new Error('demo 一次最多 500 个收款人')
+  const chainId = settings.chain
+  const dryRun = bt.dry.checked
+  const token = bt.token.value.trim()
+  // 发送中不能切链（钱包网络按发送时的链）
+  chainSelect.disabled = true
+  try {
+    const { signer, address } = await walletSigner(chainId)
+    if (!dryRun && !confirm(`用 ${address} 向 ${rows.length} 个地址转${token ? `代币 ${token}` : '主币'}，确认发送？`)) throw new Error('已取消')
+    const progress = $('btStats')
+    const results = await batchTransfer(liquidityProvider(), signer, rows, {
+      ...(token ? { token } : {}),
+      mode: isTron(chainId) ? 'tx' : (bt.mode.value as 'disperse' | 'tx' | '5792'),
+      dryRun,
+      onUpdate: (r) => (progress.textContent = `第 ${r.index + 1} 项：${r.status}`),
+    })
+    const meta = chainMeta(chainId)
+    return {
+      data: results,
+      view: table(
+        ['#', '收款', '数量', '方式', '状态', '交易哈希'],
+        results.map((r, i) => [i + 1, addr(r.to), r.formatted ?? r.amount, r.via, statusTag(r.status, r.error), r.hash ? link(r.hash, meta.explorer) : null]),
+        [2],
+      ),
+    }
+  } finally {
+    chainSelect.disabled = false
+  }
+})
+
+// ---- 免 gas 授权（子路径 /permit） ----
+
+const pm = { token: $<HTMLInputElement>('pmToken'), spender: $<HTMLInputElement>('pmSpender'), amount: $<HTMLInputElement>('pmAmount') }
+
+bind('runPmDetect', 'pm', async () => {
+  if (isTron(settings.chain)) throw new Error('permit 只支持 EVM 链')
+  const token = pm.token.value.trim()
+  if (!ADDRESS.test(token)) throw new Error('请填代币地址（0x…）')
+  const support = await detectPermit(liquidityProvider(), token)
+  return {
+    data: support,
+    view: keyValues([
+      ['支持', tag(support.kind ? support.kind : '不支持', support.kind ? 'ok' : 'bad')],
+      ['原因', support.reason ?? null],
+      ['domain', support.domain ? `${support.domain.name ?? ''} v${support.domain.version ?? ''}` : null],
+    ]),
+  }
+})
+
+bind('runPmSign', 'pm', async () => {
+  if (isTron(settings.chain)) throw new Error('permit 只支持 EVM 链')
+  const token = pm.token.value.trim()
+  const spender = pm.spender.value.trim()
+  if (!ADDRESS.test(token) || !ADDRESS.test(spender)) throw new Error('请填代币和 spender 地址（0x…）')
+  if (!pm.amount.value.trim()) throw new Error('请填授权数量')
+  const chainId = settings.chain
+  const [info] = await getTokens([token], { ...nodeOptions(), fields: ['symbol', 'decimals'] })
+  if (!info?.success || info.decimals === null || info.decimals === undefined) throw new Error('读不到代币精度，检查代币地址和链')
+  const { signer, address } = await walletSigner(chainId)
+  const permit = await buildPermit(liquidityProvider(), { token, owner: address, spender, value: parseUnits(pm.amount.value.trim(), info.decimals) })
+  const signed = await signPermit(signer as Parameters<typeof signPermit>[0], permit, { chainId })
+  const calldata = permitCalldata(signed)
+  return {
+    data: { permit, signature: signed.signature, calldata },
+    view: keyValues([
+      ['授权', `${address} → ${spender}`],
+      ['额度', `${pm.amount.value.trim()} ${info.symbol ?? ''}`],
+      ['有效期至', new Date(permit.deadline * 1000).toLocaleString()],
+      ['签名', signed.signature],
+      ['calldata', `${calldata.slice(0, 66)}…（${(calldata.length - 2) / 2} 字节）`],
+    ]),
+  }
+})
+
 // 初始化放在最后：applyChain 会用到上面定义的钱包和各区块的表单
 applyChain()
 applyAction()
+
+// 仓位下拉框的内容来自 LP 查询：这里直接调用同一个查询（同一个地址），不用切页
+$('liqLoad').addEventListener('click', async () => {
+  const status = $('liqLoadStatus')
+  const button = $<HTMLButtonElement>('liqLoad')
+  button.disabled = true
+  status.textContent = '查询中…'
+  try {
+    await queryLp()
+    const count = Array.from($<HTMLSelectElement>('liqPosition').options).filter((o) => o.value).length
+    status.textContent = `找到 ${count} 个仓位`
+  } catch (err) {
+    status.textContent = `查询失败：${err instanceof Error ? err.message : String(err)}`
+  } finally {
+    button.disabled = false
+  }
+})
