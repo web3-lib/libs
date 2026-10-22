@@ -1,6 +1,6 @@
 {
   "name": "@w3lib/ton-batch-call",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Batched TON reads and writes via the toncenter v3 indexer: TON / jetton balances for many owners per request, jetton metadata, NFTs, wallet states; batch transfers, collection, batch transactions (wallet v4r2 / v5r1, TON Connect). No TON SDK dependency.",
   "keywords": [
     "ton",
