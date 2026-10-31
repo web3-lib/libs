@@ -1,6 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 
-import { encodeAddress, getAssociatedTokenAddress, isAddress } from '../address.js'
+import { encodeAddress, getAssociatedTokenAddress, InvalidAddressError, isAddress } from '../address.js'
 import type { SolanaClient } from '../client.js'
 import { NATIVE_MINT, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '../constants.js'
 import { formatUnits, parseMint, parseTokenAccount, parseTransferFeeConfig, parseUnits, type AccountInfo } from '../layout.js'
@@ -25,7 +25,7 @@ export interface Ctx {
 export function createCtx(client: SolanaClient, owner: string, options: SolanaLiquidityOptions): Ctx {
   for (const address of [owner, options.recipient ?? owner]) {
     if (!isAddress(address)) {
-      throw new Error(`Invalid address: ${address}`)
+      throw new InvalidAddressError(`Invalid address: ${address}`, address)
     }
   }
   const slippage = options.slippage ?? 0.005

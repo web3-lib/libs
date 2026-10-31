@@ -1,12 +1,19 @@
-import { sha256 } from '@noble/hashes/sha2.js'
 import { base58, base64 } from '@scure/base'
 
 import type { SolanaClient } from '../client.js'
-import { SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '../constants.js'
-import { RpcError, isNodeFault } from '../rpc.js'
-import { MAX_COMPUTE_UNITS, setComputeUnitLimit, setComputeUnitPrice } from './instructions.js'
+import type { RpcSource } from '../source.js'
+import { mapPool } from '../util.js'
+import { Chain, isRecentMessage, remember, type Blockhash } from './chain.js'
+import { errorText, isBudgetExceeded, isRejection, transactionErrorText } from './errors.js'
+import { MAX_COMPUTE_UNITS } from './instructions.js'
+import { budgetInstructions, packUnits } from './pack.js'
 import type { LocalSigner, ResolvedSigner, SignerInput, WalletSigner } from './signer.js'
-import { MAX_ACCOUNT_LOCKS, PACKET_DATA_SIZE, compileMessage, messageBlockhash, sameBytes, serializeTransaction, transactionSize, type CompiledMessage, type Instruction } from './transaction.js'
+import { MAX_ACCOUNT_LOCKS, PACKET_DATA_SIZE, compileMessage, messageBlockhash, sameBytes, serializeTransaction, type CompiledMessage, type Instruction } from './transaction.js'
+import { Tracker } from './tracker.js'
+
+// 拆出去的部分仍从这里导出（包内其他模块和外部引用的路径不变）
+export { priorityFeeFor } from './chain.js'
+export { transactionErrorText } from './errors.js'
 
 /**
  * 每个调用的状态：
@@ -52,6 +59,23 @@ export interface SendOptions {
   signal?: AbortSignal
   /** 每个结果状态变化时回调，用于展示进度 */
   onUpdate?: (result: WriteResult) => void
+  /**
+   * 发送交易用的节点（如专门的发送服务、质押连接的节点）：URL、URL 数组、web3.js Connection 或自定义传输。
+   * 不传时用 client 的节点；模拟、查确认状态仍用 client
+   */
+  sendRpc?: RpcSource | readonly RpcSource[]
+  /**
+   * 广播给哪些节点（sendRpc，不传时 client 的节点）：
+   * - 'first'（默认）：按故障切换顺序只发给第一个可用的节点
+   * - 'all'：同时发给所有节点，任一接受即可（多个节点各自转发给出块节点，拥堵时更容易上链；等待确认期间的重发也会发给所有节点）。
+   * 默认 'first'：公共节点对 sendTransaction 限频严，每两次轮询就重发一次时，全部广播会成倍增加请求；官方节点在浏览器里总是 403，发给它只是白费请求
+   */
+  broadcast?: 'first' | 'all'
+  /**
+   * 计算单元上限 = 模拟消耗 × ratio + extra（默认 ratio 1.1、extra 1000），不超过 140 万。
+   * 消耗会随链上状态变化的调用（如兑换穿过的 tick 数不同）可以调大，避免上链时超出上限失败；固定手续费的调用（扫空 SOL）不受影响
+   */
+  computeUnitMargin?: { ratio?: number; extra?: number }
 }
 
 /** 每个调用的结果，都是字符串 / 数字 / null，可以直接 JSON.stringify */
@@ -113,36 +137,6 @@ export function toWriteResult(index: number, from: string, outcome: TxOutcome): 
   }
 }
 
-/** 并发数为 limit 的 map，结果按输入顺序 */
-export async function mapPool<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i] as T, i)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
-  return results
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    const timer = setTimeout(done, ms)
-    function done() {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', done)
-      resolve()
-    }
-    signal?.addEventListener('abort', done, { once: true })
-  })
-}
-
 /** 每个签名的基础手续费（lamports） */
 export const LAMPORTS_PER_SIGNATURE = 5000n
 
@@ -151,357 +145,7 @@ export function transactionFee(signatures: number, computeUnits: number, price: 
   return LAMPORTS_PER_SIGNATURE * BigInt(signatures) + (price * BigInt(computeUnits) + 999_999n) / 1_000_000n
 }
 
-function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
-// ---- 交易错误 ----
-
-interface SimulationValue {
-  err: unknown
-  logs?: string[] | null
-  unitsConsumed?: number
-}
-
-const TX_ERRORS: Record<string, string> = {
-  InsufficientFundsForFee: 'insufficient SOL for the transaction fee',
-  AccountNotFound: 'fee payer account not found (it has no SOL)',
-  BlockhashNotFound: 'blockhash not found',
-  AlreadyProcessed: 'transaction already processed',
-}
-
-/**
- * 日志里最有用的一行：程序打印的 “Program log: Error: …”，其次是系统程序直接打印的说明（如 “Transfer: insufficient lamports …”，
- * 不以 “Program ” 开头），最后才是运行时的 “Program … failed: custom program error: 0x1”
- */
-function logDetail(logs: readonly string[]): string | undefined {
-  const reversed = [...logs].reverse()
-  const programError = reversed.find((line) => /^Program log: (Error|error)/.test(line))
-  if (programError) return programError.replace(/^Program log: /, '')
-  const plain = reversed.find((line) => !line.startsWith('Program '))
-  if (plain) return plain
-  return reversed.find((line) => / failed: /.test(line))?.replace(/^Program \w+ failed: /, '')
-}
-
-// 常见程序的自定义错误码（上链失败时没有日志，只有错误码）
-const SYSTEM_ERRORS = ['account already in use', 'insufficient lamports', 'invalid program id', 'invalid account data length']
-const TOKEN_ERRORS: Record<number, string> = {
-  0: 'account not rent-exempt',
-  1: 'insufficient funds',
-  2: 'invalid mint',
-  3: 'account not associated with this mint',
-  4: 'owner does not match',
-  9: 'account is not initialized',
-  11: 'non-native account can only be closed if its balance is zero',
-  17: 'account is frozen',
-  18: 'mint decimals mismatch',
-}
-
-function customErrorText(program: string | undefined, code: number): string | undefined {
-  if (program === SYSTEM_PROGRAM_ID) return SYSTEM_ERRORS[code]
-  if (program === TOKEN_PROGRAM_ID || program === TOKEN_2022_PROGRAM_ID) return TOKEN_ERRORS[code]
-  return undefined
-}
-
-/**
- * 交易错误的可读说明：优先取日志（见 logDetail），否则按错误类型；
- * programs 是每条指令的程序（按下标），用来翻译常见程序的自定义错误码
- */
-export function transactionErrorText(err: unknown, logs?: readonly string[] | null, programs?: readonly string[]): string {
-  const detail = logDetail(logs ?? [])
-  if (typeof err === 'string') {
-    return TX_ERRORS[err] ?? err
-  }
-  const instruction = (err as { InstructionError?: [number, unknown] } | null)?.InstructionError
-  if (instruction) {
-    const [index, reason] = instruction
-    const custom = (reason as { Custom?: number } | null)?.Custom
-    const known = custom === undefined ? undefined : customErrorText(programs?.[index], custom)
-    return detail ?? known ?? (typeof reason === 'string' ? reason : JSON.stringify(reason))
-  }
-  if ((err as { InsufficientFundsForRent?: unknown } | null)?.InsufficientFundsForRent) {
-    return 'account would be left with less SOL than the rent-exempt minimum'
-  }
-  return detail ?? JSON.stringify(err)
-}
-
-function isBudgetExceeded(err: unknown, logs?: readonly string[] | null): boolean {
-  const reason = (err as { InstructionError?: [number, unknown] } | null)?.InstructionError?.[1]
-  return reason === 'ComputationalBudgetExceeded' || (logs ?? []).some((l) => /exceeded CUs meter|compute units/i.test(l) && /exceed/i.test(l))
-}
-
-// ---- 节点访问 ----
-
-/**
- * 最近发出过的交易消息（sha256）：同样的消息签名也相同，再发一次只会被节点当成同一笔。
- * 在签名之前检查（钱包签名的交易也适用），重复时调整计算单元上限让消息不同
- */
-const recentMessages = new Set<string>()
-
-function messageKey(message: Uint8Array): string {
-  return base64.encode(sha256(message))
-}
-
-function remember(message: Uint8Array): void {
-  recentMessages.add(messageKey(message))
-  if (recentMessages.size > 10_000) {
-    recentMessages.delete(recentMessages.values().next().value as string)
-  }
-}
-
-interface Blockhash {
-  blockhash: string
-  lastValidBlockHeight: number
-}
-
-/** 一批发送共用的节点访问：blockhash（缓存 10 秒）、优先费用（按账户缓存 10 秒） */
-class Chain {
-  #blockhash: { at: number; value: Promise<Blockhash> } | null = null
-  readonly #fees = new Map<string, { at: number; value: Promise<bigint> }>()
-
-  constructor(
-    readonly client: SolanaClient,
-    readonly options: SendOptions,
-  ) {}
-
-  get commitment(): 'confirmed' | 'finalized' {
-    return this.options.commitment ?? 'confirmed'
-  }
-
-  #walletChain: Promise<string | undefined> | null = null
-
-  /** Wallet Standard 的链标识（'solana:mainnet' 等）；网络未知时为 undefined */
-  walletChain(): Promise<string | undefined> {
-    this.#walletChain ??= this.client.getCluster().then(
-      (cluster) => (cluster ? `solana:${cluster}` : undefined),
-      () => undefined,
-    )
-    return this.#walletChain
-  }
-
-  blockhash(fresh = false): Promise<Blockhash> {
-    if (fresh || !this.#blockhash || Date.now() - this.#blockhash.at > 10_000) {
-      const value = this.client
-        .request<{ value: Blockhash }>('getLatestBlockhash', [{ commitment: 'confirmed' }])
-        .then((res) => res.value)
-      value.catch(() => {
-        if (this.#blockhash?.value === value) this.#blockhash = null
-      })
-      this.#blockhash = { at: Date.now(), value }
-    }
-    return this.#blockhash.value
-  }
-
-  async priorityFee(writable: readonly string[]): Promise<bigint> {
-    const option = this.options.priorityFee ?? 'auto'
-    if (option !== 'auto') {
-      return BigInt(option)
-    }
-    const accounts = [...writable].sort().slice(0, 128)
-    const key = accounts.join(',')
-    let cached = this.#fees.get(key)
-    if (!cached || Date.now() - cached.at > 10_000) {
-      const cap = BigInt(this.options.maxPriorityFee ?? 1_000_000)
-      const value = this.client
-        .request<Array<{ prioritizationFee: number }>>('getRecentPrioritizationFees', [accounts])
-        .then((list) => {
-          const fees = list.map((f) => BigInt(f.prioritizationFee)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-          const p75 = fees.length ? (fees[Math.min(fees.length - 1, Math.floor(fees.length * 0.75))] as bigint) : 0n
-          return p75 < cap ? p75 : cap
-        })
-        .catch(() => 0n) // 节点不支持时不加优先费用
-      cached = { at: Date.now(), value }
-      this.#fees.set(key, cached)
-    }
-    return cached.value
-  }
-
-  async simulate(message: CompiledMessage, minContextSlot: number | undefined): Promise<SimulationValue> {
-    const raw = base64.encode(serializeTransaction(message, message.signers.map(() => null)))
-    const config: Record<string, unknown> = { encoding: 'base64', sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed' }
-    if (minContextSlot !== undefined) {
-      config.minContextSlot = minContextSlot
-    }
-    // 节点暂时的问题（限频、高度还没到 minContextSlot 等）重试几次，不当成调用失败
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const res = await this.client.request<{ value: SimulationValue }>('simulateTransaction', [raw, config])
-        return res.value
-      } catch (err) {
-        if (attempt >= 3 || (err instanceof RpcError && !isNodeFault(err))) throw err
-        await sleep(500 * (attempt + 1), this.options.signal)
-      }
-    }
-  }
-
-  /** 广播：'accepted'；节点明确拒绝时抛出；节点都连不上时返回错误说明（交易可能已经发出） */
-  async broadcast(raw: string): Promise<'accepted' | { uncertain: string }> {
-    try {
-      await this.client.request('sendTransaction', [raw, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }])
-      return 'accepted'
-    } catch (err) {
-      if (/already (been )?processed/i.test(errorText(err))) {
-        return 'accepted'
-      }
-      if (err instanceof RpcError && !isNodeFault(err)) {
-        throw err
-      }
-      return { uncertain: `broadcast not acknowledged: ${errorText(err)}` }
-    }
-  }
-}
-
-/** 按 SendOptions 取优先费用单价（micro-lamports / 计算单元）；writable 是交易里的可写账户 */
-export function priorityFeeFor(client: SolanaClient, options: SendOptions, writable: readonly string[]): Promise<bigint> {
-  return new Chain(client, options).priorityFee(writable)
-}
-
-// ---- 确认 ----
-
-interface SignatureStatus {
-  slot: number
-  err: unknown
-  confirmationStatus?: 'processed' | 'confirmed' | 'finalized' | null
-}
-
-type WatchResult = { kind: 'landed'; slot: number; err: unknown } | { kind: 'expired' } | { kind: 'timeout' } | { kind: 'aborted' }
-
-interface Watched {
-  signature: string
-  raw: string
-  /** blockhash 的有效期；Infinity 表示不知道（钱包换了 blockhash），这时不判断过期、不自动重发 */
-  lastValidBlockHeight: number
-  deadline: number
-  polls: number
-  resolve(result: WatchResult): void
-}
-
-/** 统一轮询所有待确认的交易：一次 getSignatureStatuses 查全部（每 256 个一组），未确认的每次重发，blockhash 过期后再查一次历史确认没上链 */
-class Tracker {
-  readonly #watched = new Set<Watched>()
-  #running = false
-
-  constructor(readonly chain: Chain) {}
-
-  watch(signature: string, raw: string, lastValidBlockHeight: number): Promise<WatchResult> {
-    const { timeout = 120_000 } = this.chain.options
-    return new Promise((resolve) => {
-      this.#watched.add({ signature, raw, lastValidBlockHeight, deadline: Date.now() + timeout, polls: 0, resolve })
-      if (!this.#running) {
-        this.#running = true
-        void this.#loop()
-      }
-    })
-  }
-
-  /** 查交易状态；contextSlot 是各次响应里最小的 context.slot（节点的数据新到哪个 slot） */
-  async #statuses(signatures: string[], history: boolean): Promise<{ found: Map<string, SignatureStatus>; contextSlot: number }> {
-    const found = new Map<string, SignatureStatus>()
-    let contextSlot = Number.POSITIVE_INFINITY
-    for (let i = 0; i < signatures.length; i += 256) {
-      const chunk = signatures.slice(i, i + 256)
-      const res = await this.chain.client.request<{ context?: { slot?: number }; value: Array<SignatureStatus | null> }>('getSignatureStatuses', [
-        chunk,
-        { searchTransactionHistory: history },
-      ])
-      contextSlot = Math.min(contextSlot, res.context?.slot ?? 0)
-      res.value.forEach((s, k) => s && found.set(chunk[k] as string, s))
-    }
-    return { found, contextSlot }
-  }
-
-  #done(status: SignatureStatus): boolean {
-    const level = status.confirmationStatus
-    return this.chain.commitment === 'finalized' ? level === 'finalized' : level === 'confirmed' || level === 'finalized'
-  }
-
-  #settle(item: Watched, result: WatchResult): void {
-    this.#watched.delete(item)
-    item.resolve(result)
-  }
-
-  async #loop(): Promise<void> {
-    const { pollInterval = 2_000, signal } = this.chain.options
-    try {
-      while (this.#watched.size) {
-        await sleep(pollInterval, signal)
-        if (signal?.aborted) {
-          ;[...this.#watched].forEach((w) => this.#settle(w, { kind: 'aborted' }))
-          return
-        }
-        const items = [...this.#watched]
-        try {
-          const { found: statuses } = await this.#statuses(
-            items.map((w) => w.signature),
-            false,
-          )
-          for (const item of items) {
-            const status = statuses.get(item.signature)
-            if (status && this.#done(status)) {
-              this.#settle(item, { kind: 'landed', slot: status.slot, err: status.err })
-            }
-          }
-          const waiting = items.filter((w) => this.#watched.has(w))
-          if (!waiting.length) {
-            continue
-          }
-          // 区块高度和对应的 slot 一起取（同一个节点、同一个时刻）
-          const epoch = await this.chain.client.request<{ blockHeight: number; absoluteSlot: number }>('getEpochInfo', [{ commitment: 'confirmed' }])
-          const expired = waiting.filter((w) => epoch.blockHeight > w.lastValidBlockHeight)
-          if (expired.length) {
-            // 过期了：再查一次历史确认确实没上链。请求可能落到另一个节点（多节点 / 负载均衡），
-            // 它的数据必须不早于看到过期的那个 slot，否则可能只是它还没看到这笔交易，这一轮先不判断
-            const history = await this.#statuses(
-              expired.map((w) => w.signature),
-              true,
-            )
-            const caughtUp = history.contextSlot >= epoch.absoluteSlot
-            for (const item of expired) {
-              const status = history.found.get(item.signature)
-              if (!status) {
-                if (!caughtUp) continue
-                this.#settle(item, { kind: 'expired' })
-              } else if (this.#done(status)) {
-                this.#settle(item, { kind: 'landed', slot: status.slot, err: status.err })
-              }
-            }
-          }
-        } catch {
-          // 节点暂时出错：下次再查
-        }
-        const now = Date.now()
-        for (const item of [...this.#watched]) {
-          if (now >= item.deadline) {
-            this.#settle(item, { kind: 'timeout' })
-          } else if (++item.polls % 2 === 0) {
-            // 每两次轮询重发一次（每笔都重发会让待确认交易多时很快触发节点限频）
-            void this.chain.broadcast(item.raw).catch(() => {})
-          }
-        }
-      }
-    } finally {
-      this.#running = false
-      if (this.#watched.size) {
-        this.#running = true
-        void this.#loop()
-      }
-    }
-  }
-}
-
 // ---- 发送 ----
-
-/** 打包用的占位 blockhash（大小与真实值相同） */
-const PLACEHOLDER_BLOCKHASH = '11111111111111111111111111111111'
-
-function budgetInstructions(units: number, price: bigint): Instruction[] {
-  return [setComputeUnitLimit(units), setComputeUnitPrice(price)]
-}
-
-function fits(payer: string, units: readonly Unit[]): boolean {
-  const message = compileMessage(payer, [...budgetInstructions(MAX_COMPUTE_UNITS, 0n), ...units.flatMap((u) => u.instructions)], PLACEHOLDER_BLOCKHASH)
-  return transactionSize(message) <= PACKET_DATA_SIZE && message.accountKeys.length <= MAX_ACCOUNT_LOCKS
-}
 
 /** 交易错误对应的调用：InstructionError 的指令下标（前两条是计算预算指令），或租金不足的账户所在的调用 */
 function failingUnit(err: unknown, units: readonly Unit[], message: CompiledMessage): number | null {
@@ -527,6 +171,30 @@ function failingUnit(err: unknown, units: readonly Unit[], message: CompiledMess
     return null
   }
   return null
+}
+
+/** 免租下限：0 字节系统账户（手续费支付者付完手续费后不能掉到它和 0 之间） */
+const RENT_EXEMPT_MINIMUM = 890_880n
+
+/**
+ * 取舍：以前有优先费用时总是按真实的上限和单价再模拟一次，它挡住的是两种情况：
+ * - 付款方付不起优先费用：这里用模拟后余额 + 当前余额判断，付不起（或拿不到余额）时照旧再模拟一次，这层保护没有丢；
+ * - 收紧后的计算单元上限（消耗 × 1.1 + 1000）不够用：第二次模拟和第一次只隔几百毫秒、基于几乎同一个状态，
+ *   消耗与第一次相同，上限按定义高于它，几乎不可能在这里失败；真正的风险是发送时状态已经变了（如兑换路径穿过更多 tick），
+ *   第二次模拟同样看不到。所以默认跳过，消耗会波动的调用用 SendOptions.computeUnitMargin 调大余量
+ *
+ * 第一次模拟（计算单元上限取最大、单价 0，节点已扣基础手续费）后，付款方能否再付得起优先费用（单价 × 真实的上限）：
+ * 模拟后的余额和当前余额（手续费在执行前从当前余额里扣）各减去基础手续费 / 优先费用后都不低于免租下限才算付得起；
+ * 拿不到余额时按付不起处理（再完整模拟一次，同以前）
+ */
+function canAffordPriority(signatures: number, limit: number, price: bigint, before: bigint | null, sim: { accounts?: Array<{ lamports: number | string } | null> | null }): boolean {
+  const after = sim.accounts?.[0]?.lamports
+  if (before === null || after === undefined || after === null) {
+    return false
+  }
+  const priority = transactionFee(0, limit, price)
+  const base = LAMPORTS_PER_SIGNATURE * BigInt(signatures)
+  return BigInt(after) - priority >= RENT_EXEMPT_MINIMUM && before - base - priority >= RENT_EXEMPT_MINIMUM
 }
 
 export interface SendUnitsOptions {
@@ -562,13 +230,10 @@ interface Prepared {
   fixed: boolean
 }
 
-function isRejection(err: unknown): boolean {
-  const e = err as { code?: unknown; name?: unknown; message?: unknown } | null
-  return e?.code === 4001 || /reject|denied|cancel|declined/i.test(`${String(e?.name ?? '')} ${String(e?.message ?? '')}`)
-}
-
 async function sendGroup(chain: Chain, tracker: Tracker, units: readonly Unit[], options: SendOptions, batchSize: number): Promise<void> {
   const { signal, dryRun = false, wait = true, retries = 2 } = options
+  const marginRatio = Math.max(1, options.computeUnitMargin?.ratio ?? 1.1)
+  const marginExtra = Math.max(0, Math.ceil(options.computeUnitMargin?.extra ?? 1000))
   const payer = (units[0] as Unit).payer
   /** 有浏览器钱包等外部签名者：先准备好全部交易，再让钱包一次签完 */
   const deferred = units.some((u) => u.payer.kind === 'wallet' || u.signers.some((s) => s.kind === 'wallet'))
@@ -619,7 +284,12 @@ async function sendGroup(chain: Chain, tracker: Tracker, units: readonly Unit[],
         // 模拟时计算单元上限取最大值，优先费用单价按 0（否则节点按 140 万 × 单价预扣手续费，余额少的付款方会被误判为付不起）；
         // 算出真实的上限后再按真实费用复核一次
         const simMessage = compileMessage(payer.address, [...budgetInstructions(fixed?.computeUnits ?? MAX_COMPUTE_UNITS, fixed ? price : 0n), ...instructions], blockhash.blockhash)
-        const sim = await chain.simulate(simMessage, minSlot)
+        // 有优先费用时同时拿付款方模拟后的余额和当前余额（和模拟合并在同一个批量请求里），判断付不付得起优先费用，付得起就不再模拟第二次
+        const affordCheck = !fixed && price > 0n
+        const [sim, payerBefore] = await Promise.all([
+          chain.simulate(simMessage, minSlot, affordCheck ? [payer.address] : undefined),
+          affordCheck ? chain.balance(payer.address, minSlot) : null,
+        ])
         if (sim.err) {
           if (!waited && inFlight.some((f) => f.sent)) {
             // 可能依赖前面还没确认的交易：等它们确认后重新模拟
@@ -656,8 +326,8 @@ async function sendGroup(chain: Chain, tracker: Tracker, units: readonly Unit[],
           continue
         }
         const consumed = sim.unitsConsumed ?? null
-        const limit = fixed?.computeUnits ?? (consumed ? Math.min(MAX_COMPUTE_UNITS, Math.ceil(consumed * 1.1) + 1000) : MAX_COMPUTE_UNITS)
-        if (!fixed && price > 0n) {
+        const limit = fixed?.computeUnits ?? (consumed ? Math.min(MAX_COMPUTE_UNITS, Math.ceil(consumed * marginRatio) + marginExtra) : MAX_COMPUTE_UNITS)
+        if (affordCheck && !canAffordPriority(simMessage.signers.length, limit, price, payerBefore, sim)) {
           const check = await chain.simulate(compileMessage(payer.address, [...budgetInstructions(limit, price), ...instructions], blockhash.blockhash), minSlot)
           if (check.err) {
             fail(pending, transactionErrorText(check.err, check.logs))
@@ -685,7 +355,7 @@ async function sendGroup(chain: Chain, tracker: Tracker, units: readonly Unit[],
       // 同样的消息签名也相同、会被节点当成同一笔：调整计算单元上限让消息不同
       let limit = p.limit
       let message = compileMessage(payer.address, [...budgetInstructions(limit, p.price), ...p.instructions], p.blockhash.blockhash)
-      while (!p.fixed && recentMessages.has(messageKey(message.bytes))) {
+      while (!p.fixed && isRecentMessage(message.bytes)) {
         limit += 1
         message = compileMessage(payer.address, [...budgetInstructions(limit, p.price), ...p.instructions], p.blockhash.blockhash)
       }
@@ -831,26 +501,23 @@ async function sendGroup(chain: Chain, tracker: Tracker, units: readonly Unit[],
     }
   }
 
-  // 打包：从下一个调用开始，依次加入后面的调用，直到超出交易大小 / 账户数上限
+  // 打包（packUnits：相邻的调用放进同一笔，不超过交易大小 / 账户数上限；固定手续费的调用单独一笔），按顺序逐笔取出
+  const packs = packUnits(payer.address, units, { batchSize, alone: (i) => Boolean((units[i] as Unit).fixed) })
+  let packIndex = 0
+  /** 下一个还没取出的调用下标 */
   let next = 0
   const nextBatch = (): Unit[] | null => {
-    while (next < units.length) {
-      const first = units[next] as Unit
-      next++
-      if (!fits(payer.address, [first])) {
+    while (packIndex < packs.length) {
+      const pack = packs[packIndex++] as (typeof packs)[number]
+      next = (pack.indices[pack.indices.length - 1] as number) + 1
+      if (pack.tooLarge) {
+        const first = units[pack.indices[0] as number] as Unit
         update(first, { status: 'failed', error: `transaction too large (over ${PACKET_DATA_SIZE} bytes or ${MAX_ACCOUNT_LOCKS} accounts)` })
         if (!first.continueOnError) stopped = true
         if (stopped) return null
         continue
       }
-      const batch: Unit[] = [first]
-      while (!first.fixed && next < units.length && batch.length < batchSize) {
-        const candidate = units[next] as Unit
-        if (candidate.fixed || !fits(payer.address, [...batch, candidate])) break
-        batch.push(candidate)
-        next++
-      }
-      return batch
+      return pack.indices.map((i) => units[i] as Unit)
     }
     return null
   }

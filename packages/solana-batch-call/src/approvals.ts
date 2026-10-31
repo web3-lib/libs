@@ -4,18 +4,19 @@
  */
 import { base64 } from '@scure/base'
 
-import { encodeAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress } from './address.js'
+import { encodeAddress, getAssociatedTokenAddress, getMetadataAddress, InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './constants.js'
-import { findExtension, formatUnits, parseMetaplexMetadata, parseMint, type AccountInfo } from './layout.js'
-import { methodUnavailable } from './lp.js'
+import { Bytes } from './bytes.js'
+import { findExtension, formatUnits, parseMetaplexMetadata, parseMint, parseTokenAccountState as parseTokenAccountBase, type AccountInfo } from './layout.js'
+import { withMethodHint } from './lp.js'
 import { closeAccount, harvestWithheldTokensToMint, revoke } from './write/instructions.js'
 import type { BatchCallOptions } from './write/batch.js'
 import type { WriteResult } from './write/send.js'
 import type { SignerInput } from './write/signer.js'
 import type { Instruction } from './write/transaction.js'
 
-export interface ApprovalsQuery extends RequestOptions {
+export interface ApprovalsOptions extends RequestOptions {
   /**
    * 要检查的代币 mint：读这些代币的关联代币账户（ATA，SPL Token 和 Token-2022 都看），免费公共节点也能用；非 ATA 的代币账户查不到。
    * 不传时列出地址的全部代币账户（getTokenAccountsByOwner），需要支持它的节点
@@ -24,6 +25,9 @@ export interface ApprovalsQuery extends RequestOptions {
   /** 返回全部代币账户（含没有授权、有余额的），默认 false：只返回有授权（delegate / 别人的关闭权限）的账户和余额为 0 的账户 */
   all?: boolean
 }
+
+/** @deprecated 改名为 ApprovalsOptions（与其他查询的 options 命名统一），旧名保留 */
+export type ApprovalsQuery = ApprovalsOptions
 
 /** 关不掉的原因：balance 有余额（Wrapped SOL 除外）；close-authority 关闭权限是别的地址；confidential-balance Token-2022 机密余额不为 0 */
 export type CloseBlocker = 'balance' | 'close-authority' | 'confidential-balance'
@@ -66,8 +70,6 @@ export interface TokenAccountApproval {
   closeBlocker: CloseBlocker | null
 }
 
-const ACCOUNT_SIZE = 165
-const ACCOUNT_TYPE_ACCOUNT = 2
 const EXT_TRANSFER_FEE_AMOUNT = 2
 const EXT_CONFIDENTIAL_TRANSFER_ACCOUNT = 5
 const EXT_PERMANENT_DELEGATE = 12
@@ -88,18 +90,11 @@ interface ParsedAccount {
   confidentialBalance: boolean
 }
 
-/** 解析代币账户；不是已初始化的代币账户时为 null */
+/** 解析代币账户（基础布局用 layout 的 parseTokenAccountState）及关闭相关的 Token-2022 扩展；不是已初始化的代币账户时为 null */
 export function parseTokenAccountState(data: Uint8Array): ParsedAccount | null {
-  if (data.length !== ACCOUNT_SIZE && !(data.length > ACCOUNT_SIZE && data[ACCOUNT_SIZE] === ACCOUNT_TYPE_ACCOUNT)) {
+  const base = parseTokenAccountBase(data)
+  if (!base) {
     return null
-  }
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-  const pubkey = (offset: number) => encodeAddress(data.slice(offset, offset + 32))
-  // COption：u32 标记（1 有、0 没有）+ 值
-  const option = (offset: number) => view.getUint32(offset, true) === 1
-  const state = data[108] as number
-  if (state === 0) {
-    return null // 未初始化
   }
   const withheld = findExtension(data, EXT_TRANSFER_FEE_AMOUNT)
   // 机密转账：待入账（lo / hi）和可用余额的密文全为 0 才能关闭；手续费扩展同理（Token-2022 的 closable 检查）
@@ -107,15 +102,15 @@ export function parseTokenAccountState(data: Uint8Array): ParsedAccount | null {
   const confidentialFee = findExtension(data, EXT_CONFIDENTIAL_TRANSFER_FEE_AMOUNT)
   const nonZero = (bytes: Uint8Array | null, from: number, to: number) => !!bytes && bytes.slice(from, to).some((b) => b !== 0)
   return {
-    mint: pubkey(0),
-    owner: pubkey(32),
-    amount: view.getBigUint64(64, true),
-    delegate: option(72) ? pubkey(76) : null,
-    frozen: state === 2,
-    native: option(109),
-    delegatedAmount: view.getBigUint64(121, true),
-    closeAuthority: option(129) ? pubkey(133) : null,
-    withheldAmount: withheld && withheld.length >= 8 ? new DataView(withheld.buffer, withheld.byteOffset).getBigUint64(0, true) : 0n,
+    mint: base.mint,
+    owner: base.owner,
+    amount: base.amount,
+    delegate: base.delegate,
+    frozen: base.frozen,
+    native: base.native,
+    delegatedAmount: base.delegatedAmount,
+    closeAuthority: base.closeAuthority,
+    withheldAmount: withheld && withheld.length >= 8 ? new Bytes(withheld).u64(0) : 0n,
     confidentialBalance: nonZero(confidential, 33, 225) || nonZero(confidentialFee, 0, 64),
   }
 }
@@ -142,12 +137,12 @@ interface Found {
  * await approvals(new SolanaClient('https://my-rpc…'), owner)   // 全部代币账户
  * ```
  */
-export async function approvals(client: SolanaClient, owner: string, query: ApprovalsQuery = {}): Promise<TokenAccountApproval[]> {
+export async function approvals(client: SolanaClient, owner: string, options: ApprovalsOptions = {}): Promise<TokenAccountApproval[]> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
-  const { signal } = query
-  const found = query.mints ? await ataAccounts(client, owner, query.mints, signal) : await listAccounts(client, owner, signal)
+  const { signal } = options
+  const found = options.mints ? await ataAccounts(client, owner, options.mints, signal) : await listAccounts(client, owner, signal)
   // 只看 owner 自己的账户（ATA 的 owner 可能被改过：SPL Token 的 ATA 能 SetAuthority 换 owner）
   const mine = found.filter((f) => f.parsed.owner === owner)
   const mints = [...new Set(mine.map((f) => f.parsed.mint))]
@@ -185,7 +180,7 @@ export async function approvals(client: SolanaClient, owner: string, query: Appr
       closeBlocker,
     }
   })
-  return query.all ? list : list.filter((a) => a.delegate !== null || a.closeBlocker === 'close-authority' || BigInt(a.amount) === 0n)
+  return options.all ? list : list.filter((a) => a.delegate !== null || a.closeBlocker === 'close-authority' || BigInt(a.amount) === 0n)
 }
 
 /** 指定 mints：两个程序的 ATA 都读（mint 所属程序未知时只有一个存在） */
@@ -203,22 +198,19 @@ async function ataAccounts(client: SolanaClient, owner: string, mints: readonly 
 
 /** 不传 mints：用 getTokenAccountsByOwner 列出两个程序的全部代币账户（base64，自己解析扩展） */
 async function listAccounts(client: SolanaClient, owner: string, signal: AbortSignal | undefined): Promise<Found[]> {
-  const lists = await Promise.all(
-    [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map((programId) =>
-      client.request<{ value: RawTokenAccount[] }>('getTokenAccountsByOwner', [owner, { programId }, { encoding: 'base64', commitment: client.commitment }], { signal }).then(
-        (res) => ({ programId, value: res.value ?? [] }),
+  const lists = await withMethodHint(
+    Promise.all(
+      [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map((programId) =>
+        client
+          .request<{ value: RawTokenAccount[] }>('getTokenAccountsByOwner', [owner, { programId }, { encoding: 'base64', commitment: client.commitment }], { signal })
+          .then((res) => ({ programId, value: res.value ?? [] })),
       ),
     ),
-  ).catch((err: unknown) => {
-    if (signal?.aborted || !methodUnavailable(err)) {
-      throw err // 取消、限频、超时等原样抛出（保留错误类型）
-    }
-    throw new Error(
-      `Listing the token accounts of ${owner} failed (${err instanceof Error ? err.message : String(err)}). ` +
-        'Listing needs getTokenAccountsByOwner (most free public nodes do not support it): pass the mints in `mints`, or use a node that supports it',
-      { cause: err },
-    )
-  })
+    signal,
+    (detail) =>
+      `Listing the token accounts of ${owner} failed (${detail}). ` +
+      'Listing needs getTokenAccountsByOwner (most free public nodes do not support it): pass the mints in `mints`, or use a node that supports it',
+  )
   return lists.flatMap(({ programId, value }) =>
     value.flatMap((entry) => {
       const parsed = entry.account.owner === programId ? parseTokenAccountState(base64.decode(entry.account.data[0])) : null

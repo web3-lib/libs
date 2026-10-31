@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### 改进（读取链路，无破坏性变更）
+
+- 取消传到底层：`RpcTransport.request` 新增可选的第三个参数 `{ signal }`（新增类型 `RpcRequestOptions`，自定义传输不处理也照常工作）。各查询的 `signal` 传给传输层：`HttpRpc` 合并超时与 signal 交给 `fetch`，还在排队的调用取消时直接移出队列，已发出的批量请求在所有成员都取消后才中止；`FallbackRpc` 取消后不再换节点，也不把节点记为故障；取消时 reject 的仍是 `signal.reason`
+- publicnode 的已知限制预置：单次 `getMultipleAccounts` 最多 10 个账户、一个批量里最多 1 个，首次请求就按它拆分，不再先等 3 秒多的 403
+- `HttpRpc` 新增 `maxConcurrency`（默认 4）：同一节点地址同时在途的 HTTP 请求数上限（按 URL 在所有连接间共享），超出的排队：排队最多等 `timeout`（等不到按超时处理、多节点时换节点），发出后重新计时。之前大批量读取在 publicnode 上同时有二十多个请求
+- 拆分后的 `getMultipleAccounts` 子请求、客户端分组读取改用并发池（不再整波等最慢的；出错后不再发后面的请求）
+- 429 退避加 ±25% 随机抖动，有 `Retry-After` 头时按它等（超过 10 秒不等，直接报错交给上层换节点）；413 / “Batch of more than N” 缩小的批量 10 分钟后恢复（之前永久缩小）；学到的节点限制表有条目上限
+- 去重：`HttpRpc` 同一批里 method 和 params 完全相同的只读调用只发一次（新增选项 `dedupe`，默认 true）；补读代币 decimals / 元数据时，同一 mint 正在被别的查询读取就共用那次读取
+- `/lp`：LP mint → 池子地址找到后缓存（最多 1 万条），之后不再 `getProgramAccounts`；按 LP mint 找池子同时最多 4 个
+- 内部：并发池 `mapPool`、`sleep` 挪到公共的 `util.ts`
+
+### 新功能 / 改进（第二阶段，公开 API 只新增）
+
+- 写操作 `SendOptions` 新增 `sendRpc`（发送交易用的节点，按 client 的网络和节点选项解析，网络不一致时报 `NetworkMismatchError`；模拟和查确认状态仍用 client）和 `broadcast: 'first' | 'all'`（默认 `'first'`；`'all'` 同时发给所有节点，第一个接受就返回，其余在后台完成）
+- 有优先费用时少一次模拟：第一次模拟顺带取付款方模拟后的余额（和当前余额同一个批量请求），付完优先费用后仍不低于免租下限就不再按真实费用模拟第二次。取舍：第二次模拟和第一次只隔几百毫秒、基于几乎同一个状态，按收紧后的计算单元上限复核几乎不会失败，挡不住发送时的状态变化；新增 `SendOptions.computeUnitMargin`（默认 `{ ratio: 1.1, extra: 1000 }`），消耗会波动的调用可以调大余量
+- 内部的并发池（`mapPool`）一项出错后不再执行后面的项（/lp 找池子的 `getProgramAccounts`、/history 的 `getTransaction` 等）
+- 等待确认时不再每轮都查 `getEpochInfo`：记下上次的（区块高度, slot），用状态查询返回的 slot 估算高度上限，可能过期时才查
+- `priorityFee: 'auto'` 去掉 0 再取 75 分位：不活跃账户的最近费用大多是 0（2026-10 主网实测 USDC mint 150 个 slot 里 135 个为 0），之前几乎总是算出 0
+- 打包合一：`batchCall` 等的发送和 `/reclaim`、`/claim` 的批量计划共用 `packUnits`，按累计的账户集合和指令字节增量估算交易大小（之前每加一个调用就完整编译整条消息），每笔最后完整编译校验一次；分组结果与之前相同
+- `client.balances(owner, { mints, ...options })` 新写法（新类型 `BalancesQueryOptions`），旧写法 `balances(owner, mints, options)` 照常可用
+- 地址非法时抛 `InvalidAddressError`（继承 `Error`，message 不变，带 `code: 'INVALID_ADDRESS'` 和 `address`），主入口导出
+- `/approvals`、`/reclaim`、`/claim` 的查询参数类型改名为 `ApprovalsOptions`、`ReclaimableOptions`、`ClaimableOptions`（与其他查询的 options 统一），旧名 `ApprovalsQuery`、`ReclaimQuery`、`ClaimQuery` 保留为别名（@deprecated）
+- 去重：同一批里相同的只读调用，第二个起的调用方拿到结果的副本（调用方修改结果不会影响别人）
+- PDA 缓存的键改用种子的十六进制（不再每次 base58 编码），满了按 LRU 淘汰最久没用的（之前整表清空）
+
+### 内部重构（导出路径和名字不变）
+
+- `client.ts` 拆成 `tokenMeta.ts`（代币信息缓存）、`accountReader.ts`（账户读取管线）、`balances.ts`（三种余额查法、持仓列表）、`tokenDetails.ts`（代币详情 / NFT），`SolanaClient` 只保留薄的公开方法
+- `write/send.ts` 拆出 `errors.ts`（交易错误文案）、`chain.ts`（blockhash / 优先费用 / 模拟 / 广播）、`tracker.ts`（确认轮询）、`pack.ts`（打包）
+- 二进制读取器合一（`bytes.ts`，原 layout 的 Reader、lp 的 Bytes、decode 的 Data）；代币账户完整布局的解析统一到 `layout.parseTokenAccountState`（/approvals、/simulate 共用）；计算预算指令的上限 / 单价解码合一（`computeBudgetOf`，/simulate、/fees 共用）；`history.ts` 的并发池改用公共的 `mapPool`；“方法不可用时说明怎么绕过”的报错包装抽成 `withMethodHint`（/lp、/approvals、资产总值共用）
+
 ## 0.6.0
 
 ### 新功能

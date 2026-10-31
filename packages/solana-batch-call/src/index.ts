@@ -6,6 +6,7 @@ export {
   type AccountsOptions,
   type BalanceQuery,
   type BalancesOptions,
+  type BalancesQueryOptions,
   type ClientConfig,
   type OwnerTokensOptions,
   type PersistTokenMetaOptions,
@@ -64,7 +65,17 @@ export {
   clusterOfGenesis,
   type Cluster,
 } from './constants.js'
-export { createProgramAddress, decodeAddress, encodeAddress, findProgramAddress, getAssociatedTokenAddress, getMetadataAddress, isAddress, isOnCurve } from './address.js'
+export {
+  InvalidAddressError,
+  createProgramAddress,
+  decodeAddress,
+  encodeAddress,
+  findProgramAddress,
+  getAssociatedTokenAddress,
+  getMetadataAddress,
+  isAddress,
+  isOnCurve,
+} from './address.js'
 export {
   formatAmount,
   formatUnits,
@@ -94,6 +105,7 @@ export {
   type FallbackOptions,
   type HttpRpcOptions,
   type RequestEvent,
+  type RpcRequestOptions,
   type RpcTransport,
 } from './rpc.js'
 export { NetworkCheckedRpc, NetworkMismatchError, type RpcSource, type SourceOptions } from './source.js'

@@ -2,7 +2,7 @@
  * 指令解码（/simulate 和 /history 共用）：System、SPL Token / Token-2022、关联代币账户、计算预算、Memo、升级程序加载器，
  * 以及 programs.ts 里认得的 DEX / 聚合器（协议 + 指令名 + 大类）。其他程序只给程序名（认得时）和大类 contract / unknown
  */
-import { encodeAddress } from './address.js'
+import { Bytes } from './bytes.js'
 import { ASSOCIATED_TOKEN_PROGRAM_ID, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './constants.js'
 import { BPF_LOADER_UPGRADEABLE, COMPUTE_BUDGET, MEMO_V1, MEMO_V2, PROGRAMS, knownMethod, type IxType } from './programs.js'
 
@@ -28,32 +28,6 @@ export const AUTHORITY_TYPES = [
 
 const short = (a: string | undefined) => (a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '?')
 
-class Data {
-  readonly view: DataView
-  offset = 0
-  constructor(readonly bytes: Uint8Array) {
-    this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  }
-  u8() {
-    return this.view.getUint8(this.offset++)
-  }
-  u32() {
-    const v = this.view.getUint32(this.offset, true)
-    this.offset += 4
-    return v
-  }
-  u64() {
-    const v = this.view.getBigUint64(this.offset, true)
-    this.offset += 8
-    return v
-  }
-  key() {
-    const v = encodeAddress(this.bytes.slice(this.offset, this.offset + 32))
-    this.offset += 32
-    return v
-  }
-}
-
 /**
  * 解码一条指令。accounts 是指令用到的账户地址（已按指令里的下标解析，包含地址查找表里的），data 是指令数据。
  * 数据格式不对时不抛错，按“不认识的指令”返回
@@ -78,7 +52,7 @@ export function decodeInstruction(index: number, programId: string, accounts: re
 type Partial_ = Pick<DecodedInstruction, 'type' | 'summary'> & Partial<Pick<DecodedInstruction, 'method' | 'args' | 'protocol'>>
 
 function decodeKnown(programId: string, a: readonly string[], data: Uint8Array): Partial_ | null {
-  const d = new Data(data)
+  const d = new Bytes(data)
   switch (programId) {
     case SYSTEM_PROGRAM_ID:
       return decodeSystem(d, a)
@@ -108,7 +82,7 @@ function decodeKnown(programId: string, a: readonly string[], data: Uint8Array):
   }
 }
 
-function decodeSystem(d: Data, a: readonly string[]): Partial_ {
+function decodeSystem(d: Bytes, a: readonly string[]): Partial_ {
   const tag = d.u32()
   switch (tag) {
     case 0: {
@@ -139,7 +113,7 @@ function decodeSystem(d: Data, a: readonly string[]): Partial_ {
   }
 }
 
-function decodeToken(d: Data, a: readonly string[]): Partial_ {
+function decodeToken(d: Bytes, a: readonly string[]): Partial_ {
   const tag = d.u8()
   const amountArgs = (extra: Record<string, unknown>, amount: bigint) => ({ ...extra, amount: amount.toString() })
   switch (tag) {

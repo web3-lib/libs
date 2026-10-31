@@ -11,7 +11,7 @@
  * await claimAll(client, key, c.positions)                                  // 批量领取
  * ```
  */
-import { claimable, type Claimable, type ClaimQuery } from '../claim.js'
+import { claimable, type Claimable, type ClaimableOptions } from '../claim.js'
 import { resolve, type ShortcutOptions } from '../shortcuts.js'
 
 export {
@@ -25,6 +25,7 @@ export {
   type ClaimOptions,
   type ClaimPlan,
   type ClaimProtocol,
+  type ClaimableOptions,
   type ClaimQuery,
   type ClaimResult,
   type ClaimSimulation,
@@ -35,7 +36,7 @@ export {
 } from '../claim.js'
 export type { PlanSimulation } from '../batchPlan.js'
 
-export interface GetClaimableOptions extends ClaimQuery, ShortcutOptions {}
+export interface GetClaimableOptions extends ClaimableOptions, ShortcutOptions {}
 
 /**
  * 预览一个地址能领取的手续费和挖矿奖励（只读取），节点参数与 getBalances 相同。默认列出全部代币账户（需要支持 getTokenAccountsByOwner 的节点），

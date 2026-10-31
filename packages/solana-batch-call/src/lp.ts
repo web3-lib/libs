@@ -1,10 +1,12 @@
 import { sha256 } from '@noble/hashes/sha2.js'
 import { base64 } from '@scure/base'
 
-import { decodeAddress, encodeAddress, findProgramAddress, isAddress } from './address.js'
+import { decodeAddress, findProgramAddress, InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { formatUnits, parseMint, parseTokenAccount, type AccountInfo } from './layout.js'
 import { AllNodesFailedError, HttpError, RpcError } from './rpc.js'
+import { boundedSet, mapPool } from './util.js'
+import { Bytes } from './bytes.js'
 import {
   getAmountsForLiquidity,
   getFeeGrowthInside,
@@ -168,34 +170,8 @@ export interface LpPositionsOptions extends RequestOptions {
 // 账户布局（各程序的 Anchor / 原生账户，偏移量含 8 字节判别符）
 // ---------------------------------------------------------------------------
 
-/** 小端读取账户数据（添加 / 移除流动性也用） */
-export class Bytes {
-  readonly #view: DataView
-  constructor(readonly data: Uint8Array) {
-    this.#view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-  }
-  u8(o: number): number {
-    return this.#view.getUint8(o)
-  }
-  u16(o: number): number {
-    return this.#view.getUint16(o, true)
-  }
-  u32(o: number): number {
-    return this.#view.getUint32(o, true)
-  }
-  i32(o: number): number {
-    return this.#view.getInt32(o, true)
-  }
-  u64(o: number): bigint {
-    return this.#view.getBigUint64(o, true)
-  }
-  u128(o: number): bigint {
-    return (this.#view.getBigUint64(o + 8, true) << 64n) | this.#view.getBigUint64(o, true)
-  }
-  key(o: number): string {
-    return encodeAddress(this.data.subarray(o, o + 32))
-  }
-}
+// 小端读取账户数据：公共的 Bytes（添加 / 移除流动性也从这里引用）
+export { Bytes }
 
 const ZERO_ADDRESS = '11111111111111111111111111111111'
 const RAYDIUM_POSITION_SIZE = 281
@@ -544,7 +520,7 @@ interface RawAmm {
  */
 export async function lpPositions(client: SolanaClient, owner: string, options: LpPositionsOptions = {}): Promise<SolanaLpPosition[]> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
   const protocols = new Set<SolanaLpProtocol>(options.protocols ?? (Object.keys(SOLANA_LP_PROTOCOLS) as SolanaLpProtocol[]))
   for (const p of protocols) {
@@ -554,7 +530,7 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
   }
   for (const address of [...(options.mints ?? []), ...(options.pools ?? [])]) {
     if (!isAddress(address)) {
-      throw new Error(`Invalid address: ${address}`)
+      throw new InvalidAddressError(`Invalid address: ${address}`, address)
     }
   }
   const { signal } = options
@@ -621,13 +597,30 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
     }
   })
 
-  // 3. 池子：集中流动性的池子账户；LP 代币按 LP mint 找池子
+  // 3. 池子：集中流动性的池子账户；LP 代币按 LP mint 找池子（之前找到过的直接读池子账户，和集中流动性的池子一起读）
   const poolAddresses = [...new Set(positions.map((p) => p.pool))]
+  const cached = lookups.flatMap((l) => {
+    const address = ammPoolByLpMint.get(lpPoolKey(l.protocol, l.lpMint))
+    return address ? [{ ...l, address }] : []
+  })
+  const uncached = lookups.filter((l) => !ammPoolByLpMint.has(lpPoolKey(l.protocol, l.lpMint)))
   const [poolAccounts, found] = await Promise.all([
-    client.accounts(poolAddresses, { signal }),
-    Promise.all(lookups.map((l) => findAmmPool(client, l.protocol, l.lpMint, signal))),
+    client.accounts([...poolAddresses, ...cached.map((c) => c.address)], { signal }),
+    findAmmPools(client, uncached, signal),
   ])
-  for (const pool of found) {
+  // 缓存的池子核对一下（地址不对、账户读不到时重新找）
+  const stale: typeof lookups = []
+  cached.forEach((c, i) => {
+    const account = poolAccounts[poolAddresses.length + i]
+    const pool = account ? parseAmmPool(account) : null
+    if (pool && pool.protocol === c.protocol && pool.lpMint === c.lpMint) {
+      poolByLp.set(pool.lpMint, pool)
+    } else {
+      ammPoolByLpMint.delete(lpPoolKey(c.protocol, c.lpMint))
+      stale.push({ protocol: c.protocol, lpMint: c.lpMint })
+    }
+  })
+  for (const pool of [...found, ...(stale.length ? await findAmmPools(client, stale, signal) : [])]) {
     if (pool) {
       poolByLp.set(pool.lpMint, pool)
     }
@@ -752,6 +745,19 @@ export async function lpPositions(client: SolanaClient, owner: string, options: 
 }
 
 /**
+ * 方法不可用（见 methodUnavailable）时把错误换成说明怎么绕过的 Error（cause 为原错误，hint 拿到原错误的 message）；
+ * 取消、限频、超时等原样抛出（保留错误类型）。/lp、/approvals、资产总值共用
+ */
+export function withMethodHint<T>(promise: Promise<T>, signal: AbortSignal | undefined, hint: (detail: string) => string): Promise<T> {
+  return promise.catch((err: unknown) => {
+    if (signal?.aborted || !methodUnavailable(err)) {
+      throw err
+    }
+    throw new Error(hint(err instanceof Error ? err.message : String(err)), { cause: err })
+  })
+}
+
+/**
  * 节点不提供这个方法（方法不存在、被拦截、需要付费 / Token、403 等）：这时报错里说明怎么绕过。
  * 多节点时所有节点都是这个原因才算；限频、超时、网络不对等原样抛出（资产总值 portfolio 也用）
  */
@@ -779,43 +785,63 @@ async function listHoldings(client: SolanaClient, owner: string, mints: readonly
     const balances = list.length ? await client.balances(owner, list, { signal }) : []
     return balances.filter((b) => b.success && !b.native && b.balance !== '0').map((b) => ({ mint: b.token, amount: BigInt(b.balance), decimals: b.decimals }))
   }
-  const tokens = await client.ownerTokens(owner, { signal, metadata: false, includeNative: false, includeNfts: true }).catch((err: unknown) => {
-    if (signal?.aborted || !methodUnavailable(err)) {
-      throw err // 取消、限频、超时等原样抛出（保留错误类型）
-    }
-    throw new Error(
-      `Scanning the token accounts of ${owner} failed (${err instanceof Error ? err.message : String(err)}). ` +
-        'Scanning needs getTokenAccountsByOwner (most free public nodes do not support it): pass the position NFT / LP mints in `mints`, or use a node that supports it',
-      { cause: err },
-    )
-  })
+  const tokens = await withMethodHint(
+    client.ownerTokens(owner, { signal, metadata: false, includeNative: false, includeNfts: true }),
+    signal,
+    (detail) =>
+      `Scanning the token accounts of ${owner} failed (${detail}). ` +
+      'Scanning needs getTokenAccountsByOwner (most free public nodes do not support it): pass the position NFT / LP mints in `mints`, or use a node that supports it',
+  )
   return tokens.map((t) => ({ mint: t.token, amount: BigInt(t.balance), decimals: t.decimals }))
 }
 
-/** 按 LP mint 找 AMM v4 / CPMM 的池子（getProgramAccounts + memcmp），找不到时为 null */
+/**
+ * LP mint → 池子地址（AMM v4 / CPMM）：池子地址不会变，找到后永久缓存（条目数有上限，超出淘汰最早写入的），
+ * 之后不再 getProgramAccounts，用时读池子账户核对
+ */
+const ammPoolByLpMint = new Map<string, string>()
+const MAX_CACHED_LP_POOLS = 10_000
+/** 同时进行的 getProgramAccounts 数（每个都要节点扫描整个程序的账户，很重） */
+const MAX_PARALLEL_POOL_LOOKUPS = 4
+
+function lpPoolKey(protocol: 'raydium-amm' | 'raydium-cpmm', lpMint: string): string {
+  return `${protocol}:${lpMint}`
+}
+
+/** 测试用：清空 LP mint → 池子地址的缓存 */
+export function resetLpPoolCache(): void {
+  ammPoolByLpMint.clear()
+}
+
+/** 按 LP mint 找池子，限制并发；结果与 lookups 一一对应 */
+function findAmmPools(
+  client: SolanaClient,
+  lookups: ReadonlyArray<{ protocol: 'raydium-amm' | 'raydium-cpmm'; lpMint: string }>,
+  signal: AbortSignal | undefined,
+): Promise<Array<AmmPoolState | null>> {
+  return mapPool(lookups, MAX_PARALLEL_POOL_LOOKUPS, (l) => findAmmPool(client, l.protocol, l.lpMint, signal))
+}
+
+/** 按 LP mint 找 AMM v4 / CPMM 的池子（getProgramAccounts + memcmp），找不到时为 null；找到的池子地址写入缓存 */
 async function findAmmPool(client: SolanaClient, protocol: 'raydium-amm' | 'raydium-cpmm', lpMint: string, signal: AbortSignal | undefined): Promise<AmmPoolState | null> {
   const [programId, size, offset] = protocol === 'raydium-amm' ? [RAYDIUM_AMM_PROGRAM_ID, AMM_POOL_SIZE, 464] : [RAYDIUM_CPMM_PROGRAM_ID, CPMM_POOL_SIZE, 136]
-  const res = await client
-    .request<{ pubkey: string; account: { data: [string, string]; owner: string } }[]>(
+  // 免费公共节点大多不支持 getProgramAccounts：说明怎么绕过
+  const res = await withMethodHint(
+    client.request<{ pubkey: string; account: { data: [string, string]; owner: string } }[]>(
       'getProgramAccounts',
       [programId, { encoding: 'base64', commitment: client.commitment, filters: [{ dataSize: size }, { memcmp: { offset, bytes: lpMint } }] }],
       { signal },
-    )
-    .catch((err: unknown) => {
-      if (signal?.aborted || !methodUnavailable(err)) {
-        throw err
-      }
-      // 免费公共节点大多不支持 getProgramAccounts：说明怎么绕过
-      throw new Error(
-        `Finding the ${SOLANA_LP_PROTOCOLS[protocol].name} pool of LP token ${lpMint} uses getProgramAccounts, which failed (${err instanceof Error ? err.message : String(err)}; most free public nodes do not support it). ` +
-          "Pass the pool address in `pools`, use a node that supports getProgramAccounts, or skip LP tokens with `protocols: ['raydium-clmm', 'orca-whirlpool']`",
-        { cause: err },
-      )
-    })
+    ),
+    signal,
+    (detail) =>
+      `Finding the ${SOLANA_LP_PROTOCOLS[protocol].name} pool of LP token ${lpMint} uses getProgramAccounts, which failed (${detail}; most free public nodes do not support it). ` +
+      "Pass the pool address in `pools`, use a node that supports getProgramAccounts, or skip LP tokens with `protocols: ['raydium-clmm', 'orca-whirlpool']`",
+  )
   for (const item of res ?? []) {
     const data = base64.decode(item.account.data[0])
     const pool = parseAmmPool({ address: item.pubkey, owner: item.account.owner, data, lamports: 0n, executable: false })
     if (pool?.lpMint === lpMint) {
+      boundedSet(ammPoolByLpMint, lpPoolKey(protocol, lpMint), pool.address, MAX_CACHED_LP_POOLS)
       return pool
     }
   }

@@ -10,7 +10,7 @@
  * await closeTokenAccounts(client, key, list.filter((a) => a.amount === '0'))
  * ```
  */
-import { approvals, type ApprovalsQuery, type TokenAccountApproval } from '../approvals.js'
+import { approvals, type ApprovalsOptions, type TokenAccountApproval } from '../approvals.js'
 import { resolve, type ShortcutOptions } from '../shortcuts.js'
 
 export {
@@ -22,6 +22,7 @@ export {
   revokeApprovals,
   type ApprovalCall,
   type ApprovalResult,
+  type ApprovalsOptions,
   type ApprovalsQuery,
   type BuildClosesOptions,
   type CloseAccountsOptions,
@@ -30,7 +31,7 @@ export {
 } from '../approvals.js'
 export { closeAccount, harvestWithheldTokensToMint, revoke } from '../write/instructions.js'
 
-export interface GetApprovalsOptions extends ApprovalsQuery, ShortcutOptions {}
+export interface GetApprovalsOptions extends ApprovalsOptions, ShortcutOptions {}
 
 /**
  * 查地址的代币账户给出的授权和可以关闭的空账户，节点参数与 getBalances 相同。

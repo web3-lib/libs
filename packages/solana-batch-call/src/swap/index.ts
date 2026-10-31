@@ -3,7 +3,7 @@
  * （直接兑换，或经过 SOL / USDC / USDT 的两跳），按链上状态在本地报价（照搬各程序的计算），选输出最多的；
  * 按滑点算最少收到的数量，构建指令（SOL 自动包装 / 解包、缺少的代币账户自动创建），发送同 /write
  */
-import { getAssociatedTokenAddress, isAddress } from '../address.js'
+import { getAssociatedTokenAddress, InvalidAddressError, isAddress } from '../address.js'
 import type { SolanaClient } from '../client.js'
 import { NATIVE_MINT, TOKEN_PROGRAM_ID } from '../constants.js'
 import { formatUnits, parseTokenAccount, type AccountInfo } from '../layout.js'
@@ -180,7 +180,7 @@ export async function buildSwap(client: SolanaClient, owner: string, params: Sol
   const tokenIn = nativeIn ? NATIVE_MINT : params.tokenIn
   const tokenOut = nativeOut ? NATIVE_MINT : params.tokenOut
   for (const mint of [tokenIn, tokenOut]) {
-    if (!isAddress(mint)) throw new Error(`Invalid mint address: ${mint}`)
+    if (!isAddress(mint)) throw new InvalidAddressError(`Invalid mint address: ${mint}`, mint)
   }
   if (tokenIn === tokenOut) throw new Error(nativeIn || nativeOut ? 'Wrapping / unwrapping SOL is not a swap' : 'tokenIn and tokenOut are the same')
   const protocols = new Set(options.protocols ?? SWAP_PROTOCOLS)
@@ -192,7 +192,7 @@ export async function buildSwap(client: SolanaClient, owner: string, params: Sol
     if (!isAddress(m)) throw new Error(`Invalid intermediate mint: ${m}`)
   }
   for (const p of options.pools ?? []) {
-    if (!isAddress(p)) throw new Error(`Invalid pool address: ${p}`)
+    if (!isAddress(p)) throw new InvalidAddressError(`Invalid pool address: ${p}`, p)
   }
 
   // 1. 一次读：候选池子（PDA 推导 + 传入的）、Clock、各代币的 mint

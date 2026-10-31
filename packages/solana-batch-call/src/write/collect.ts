@@ -1,4 +1,4 @@
-import { getAssociatedTokenAddress, isAddress } from '../address.js'
+import { getAssociatedTokenAddress, InvalidAddressError, isAddress } from '../address.js'
 import type { SolanaClient } from '../client.js'
 import { formatUnits } from '../layout.js'
 import type { TokenBalance } from '../types.js'
@@ -71,7 +71,7 @@ interface Item {
  */
 export async function batchCollect(client: SolanaClient, wallets: readonly SignerInput[], to: string, options: BatchCollectOptions): Promise<CollectResult> {
   if (!isAddress(to)) {
-    throw new Error(`Invalid collect address: ${to}`)
+    throw new InvalidAddressError(`Invalid collect address: ${to}`, to)
   }
   const cache = new Map()
   const signers = await Promise.all(wallets.map((w) => resolveSigner(w, cache)))

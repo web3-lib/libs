@@ -4,13 +4,13 @@
  */
 import { base64 } from '@scure/base'
 
-import { getAssociatedTokenAddress, isAddress } from './address.js'
+import { getAssociatedTokenAddress, InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { NATIVE_MINT, TOKEN_PROGRAM_ID } from './constants.js'
 import { parseTokenAccount, parseUnits } from './layout.js'
 import { buildSwap, type SolanaSwapOptions, type SolanaSwapPlan } from './swap/index.js'
 import { MAX_COMPUTE_UNITS, setComputeUnitLimit } from './write/instructions.js'
-import { transactionErrorText } from './write/send.js'
+import { transactionErrorText } from './write/errors.js'
 import { MAX_ACCOUNT_LOCKS, PACKET_DATA_SIZE, compileMessage, serializeTransaction, transactionSize, type Instruction } from './write/transaction.js'
 
 export type TradeStage = 'ok' | 'no-pool' | 'buy-failed' | 'sell-failed'
@@ -55,7 +55,7 @@ export interface TradeCheckOptions extends RequestOptions, Pick<SolanaSwapOption
  * ```
  */
 export async function tradeChecks(client: SolanaClient, mints: readonly string[], options: TradeCheckOptions): Promise<SolanaTradeCheck[]> {
-  if (!isAddress(options.owner)) throw new Error(`Invalid owner address: ${options.owner}`)
+  if (!isAddress(options.owner)) throw new InvalidAddressError(`Invalid owner address: ${options.owner}`, options.owner)
   if (options.amount !== undefined && options.amountFormatted !== undefined) throw new Error('Pass either amount or amountFormatted, not both')
   const spent = options.amountFormatted !== undefined ? parseUnits(options.amountFormatted, 9) : options.amount !== undefined ? BigInt(options.amount) : 50_000_000n
   if (spent <= 0n) throw new RangeError('amount must be greater than 0')

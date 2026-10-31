@@ -2,7 +2,7 @@
  * 资产总值（子路径 `@w3lib/solana-batch-call/price`）：代币余额 × 价格，可选加上 LP 仓位的价值
  */
 import type { RequestOptions, SolanaClient } from './client.js'
-import { lpPositions, methodUnavailable, type LpPositionsOptions, type SolanaLpPosition } from './lp.js'
+import { lpPositions, withMethodHint, type LpPositionsOptions, type SolanaLpPosition } from './lp.js'
 import { combinePrices, defillamaPrices, onchainPrices, tokenPrices, type SolanaPriceSource } from './price.js'
 
 export interface PortfolioOptions extends RequestOptions {
@@ -110,15 +110,12 @@ async function holdings(client: SolanaClient, owner: string, tokens: readonly st
     const balances = tokens.length ? await client.balances(owner, tokens, { symbol: true, signal }) : []
     return balances.filter((b) => b.success).map((b) => ({ token: b.token, native: b.native, symbol: b.symbol ?? null, balance: b.balance, decimals: b.decimals, formatted: b.formatted }))
   }
-  const owned = await client.ownerTokens(owner, { signal }).catch((err: unknown) => {
-    if (signal?.aborted || !methodUnavailable(err)) {
-      throw err // 取消、限频、超时等原样抛出（保留错误类型）
-    }
-    throw new Error(
-      `Listing the tokens of ${owner} failed (${err instanceof Error ? err.message : String(err)}). ` +
-        'Listing needs getTokenAccountsByOwner (most free public nodes do not support it): pass the mints in `tokens`, or use a node that supports it',
-      { cause: err },
-    )
-  })
+  const owned = await withMethodHint(
+    client.ownerTokens(owner, { signal }),
+    signal,
+    (detail) =>
+      `Listing the tokens of ${owner} failed (${detail}). ` +
+      'Listing needs getTokenAccountsByOwner (most free public nodes do not support it): pass the mints in `tokens`, or use a node that supports it',
+  )
   return owned.map((t) => ({ token: t.token, native: t.native, symbol: t.symbol ?? null, balance: t.balance, decimals: t.decimals, formatted: t.formatted }))
 }

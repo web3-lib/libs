@@ -123,7 +123,7 @@ await getLpPositions(owner, { provider, prices: true })
 | 选项 | 说明 |
 | --- | --- |
 | `mints` | 只看这些代币（仓位 NFT 的 mint、LP 代币的 mint），按 ATA 读余额，免费节点也能用。不传时扫描全部代币账户（需要支持 `getTokenAccountsByOwner` 的节点） |
-| `pools` | Raydium AMM v4 / CPMM 的池子地址。LP 代币要找到对应的池子：不在这里的按 LP mint 用 `getProgramAccounts` 查找（免费公共节点大多不支持，这时报错并提示传 `pools`，或用 `protocols` 只查 CLMM / Whirlpool）；不是 AMM v4 / CPMM 池子的地址会报错；不持有 Raydium 的 LP 代币时不会用到 |
+| `pools` | Raydium AMM v4 / CPMM 的池子地址。LP 代币要找到对应的池子：不在这里的按 LP mint 用 `getProgramAccounts` 查找（同时最多 4 个；找到的池子地址会缓存，之后只读池子账户核对；免费公共节点大多不支持，这时报错并提示传 `pools`，或用 `protocols` 只查 CLMM / Whirlpool）；不是 AMM v4 / CPMM 池子的地址会报错；不持有 Raydium 的 LP 代币时不会用到 |
 | `protocols` | 只查某些协议：`'raydium-clmm'`、`'orca-whirlpool'`、`'raydium-amm'`、`'raydium-cpmm'`，默认全部 |
 | `includeClosed` | 返回已清空的仓位（流动性为 0、手续费也领完，NFT 还在），默认 false |
 | `prices` | `true` 用 DefiLlama，也可以传自己的 `SolanaPriceSource`；默认不查。价格源出错时照样返回仓位，只是 `valueUsd` / `feesUsd` 为 null |
@@ -330,7 +330,7 @@ await getCostEstimate({ feePayer: owner, instructions: [ix1, ix2] })
 await getCostEstimate({ transaction: base64Tx })   // 构建好的交易（如聚合器 API 返回的），按交易自带的计算预算算
 ```
 
-- **费用建议**：`getRecentPrioritizationFees` 返回最近 150 个 slot 里（会写 `accounts` 的）落块交易的**最低**单价，三档取第 50 / 75 / 90 百分位（`percentiles`），`normal` 与 `/write` 的 `priorityFee: 'auto'` 取法相同（不含 `maxPriorityFee` 上限）。不传 `accounts` 时看全网，大多是 0（每个区块总有不加优先费的交易）；估某笔交易时传它的可写账户（`estimateCost` 自动这样做）
+- **费用建议**：`getRecentPrioritizationFees` 返回最近 150 个 slot 里（会写 `accounts` 的）落块交易的**最低**单价，三档取第 50 / 75 / 90 百分位（`percentiles`），`normal` 是包含 0 的 75 分位（`/write` 的 `priorityFee: 'auto'` 去掉 0 再取 75 分位，并受 `maxPriorityFee` 限制）。不传 `accounts` 时看全网，大多是 0（每个区块总有不加优先费的交易）；估某笔交易时传它的可写账户（`estimateCost` 自动这样做）
 - **一笔交易**：模拟一次（`sigVerify: false`、`replaceRecentBlockhash`，不需要签名、不会发送），模拟失败时抛出（带程序日志里的原因）。传指令时按 `/write` 的发送方式算：去掉自带的计算预算指令，计算单元上限 = 模拟消耗 × 1.1 + 1000，单价按这一档（`level`，或 `priorityFee` 直接指定，或传查好的 `fees` 共用）；传构建好的交易时按它自带的 SetComputeUnitLimit / SetComputeUnitPrice（没有单价时优先费为 0，没有上限时按每条指令 20 万），v0 交易会读地址查找表找可写账户
 - **手续费** = 每个签名 5000 lamports + 单价 × 上限（向上取整）。**押金**：交易前不存在、模拟后存在、有数据或不归 System Program 的可写账户（新建的代币账户、仓位等），按 `getMinimumBalanceForRentExemption` 算（不写死：2026-10 主网 165 字节是 1,488,440 lamports），关闭账户时退回；普通转账给新地址不算押金
 - 只支持 legacy 和 v0 交易：主网已经有 v1 格式的交易（2026-10 约三成），它们的布局不同，传入时报错（改传指令）
@@ -544,6 +544,8 @@ await getHistory(address, { source: [heliusHistory({ apiKey }), rpcHistory()] })
 
 ## 余额的三种模式
 
+`client.balances(owner, mints, options)` 也可以写成 `client.balances(owner, { mints, ...options })`（两种写法等价）。
+
 | | 指定 mints（默认，`accounts: 'ata'`） | 指定 mints + `accounts: 'all'` | 扫描（不传 mints，或 `scan: true`） |
 | --- | --- | --- | --- |
 | 实现 | 本地推导 ATA + 一次 `getMultipleAccounts` | 每个代币一次按 mint 过滤的 `getTokenAccountsByOwner`（同一 tick 发出，合并成批量请求） | `getTokenAccountsByOwner`（Token / Token-2022 各一次） |
@@ -565,7 +567,7 @@ await getBalances(owner, [USDC, PYUSD], { provider: 'https://my-rpc.example', ac
 - **缓存**：decimals、所属程序永久缓存；name、symbol 来自可修改的元数据，缓存 1 小时（确认没有元数据的代币同样缓存，不会每次重查）。按网络共享（各函数共用）；自定义节点且没指定 `cluster` 时只在该客户端内缓存。最多 5 万个代币，超出淘汰最早的
 - **大数**：lamports 等 u64 超过 2⁵³ 时不会丢精度
 - **失败**：mint 不存在、地址非法等只让该项 `success: false`，并带 `error` 说明原因；节点不可用等整个请求失败时才抛错（多个节点都失败时是 `AllNodesFailedError`，`err.errors` 里有每个节点的名称和原因）
-- **取消**：所有查询都可以传 `signal`（`AbortSignal`）。已取消时直接 reject、不发请求；中途取消时立即 reject，已经发出、和其他查询合并在一起的底层请求继续完成
+- **取消**：所有查询都可以传 `signal`（`AbortSignal`）。已取消时直接 reject、不发请求；中途取消时立即 reject（reason 为 `signal.reason`）。signal 会传到底层：还在排队的请求不再发出，已经发出的 HTTP 请求在合并在一起的所有调用方都取消后中止，取消后也不再换节点。自定义传输的 `request(method, params, options?)` 可以从第三个参数拿到 `{ signal }`，不处理也照常工作
 - **最低 slot**：`getBalances` / `getMultiBalances` / `getSolBalances` / `getOwnerTokens` / `accounts` 可以传 `minContextSlot`：节点高度不够时换下一个节点，都不够时每 500ms 重试，最多约 10 秒；`withSlot: true`（或传了 `minContextSlot`）时结果项带读取时的 `slot`（一次查询发了多个请求时取最小的）
 
 ## 轮询余额
@@ -617,6 +619,8 @@ token.transferFee
 | `no-holder` | 没有持有人（供应量为 0 或已销毁） | `getNftOwners` |
 | `missing-field` | 代币存在，但请求的字段读不到；`errorField` 是第一个读不到的字段（如没有元数据时的 `name`） | `getTokens` |
 
+owner 等参数本身非法时（不是单项失败）抛 `InvalidAddressError`（继承 `Error`，message 不变，带 `code: 'INVALID_ADDRESS'` 和 `address`）。
+
 ```ts
 const [item] = await getBalances(owner, [mint])
 if (item.error === 'invalid-address') throw new Error('bad mint')  // 参数错误
@@ -648,9 +652,11 @@ await getBalances(owner, mints, { provider: 'https://my-rpc.example', cluster: '
 
 **传输层行为**（`HttpRpc`）：
 
-- 收集窗口（`batchWait`，默认 0 即同一 tick）内的调用合并成一个批量请求，最多 `maxBatchSize`（默认 20）条
-- 节点不支持批量请求时自动改为逐条并发；返回 “Batch of more than N” 时按 N 缩小批量；请求体过大（413）时批量减半。批量请求被限频或拒绝访问时不会降级（降级只会让限频更严重）
-- HTTP 429 和 JSON-RPC 错误码 429 都会退避重试（`retries`，默认 2；传入多个自定义节点时为 0，直接换节点；内置节点保留重试），批量里只重试被限频的那几条
+- 收集窗口（`batchWait`，默认 0 即同一 tick）内的调用合并成一个批量请求，最多 `maxBatchSize`（默认 20）条；同一批里 method 和 params 完全相同的只读调用只发一次，结果分给各调用方（`dedupe: false` 关闭）
+- 同一节点地址同时在途的 HTTP 请求最多 `maxConcurrency`（默认 4，按 URL 在所有连接间共享；`0` 不限制），超出的排队；排队最多等 `timeout`（等不到按超时处理、换节点），发出后重新计时
+- publicnode 的已知限制（单次 `getMultipleAccounts` 最多 10 个账户、一个批量里最多 1 个 `getMultipleAccounts`）是预置的，第一次请求就按它拆分，不用先等 3 秒多的 403；其他节点的限制从报错里学到后按节点地址记住
+- 节点不支持批量请求时自动改为逐条并发；返回 “Batch of more than N” 时按 N 缩小批量；请求体过大（413）时批量减半（这两种缩小 10 分钟后恢复原来的大小）。批量请求被限频或拒绝访问时不会降级（降级只会让限频更严重）
+- HTTP 429 和 JSON-RPC 错误码 429 都会退避重试（`retries`，默认 2；传入多个自定义节点时为 0，直接换节点；内置节点保留重试），退避带随机抖动，有 `Retry-After` 头时按它等（超过 10 秒不等，直接报错换节点）；批量里只重试被限频的那几条
 - 单次请求超时 `timeout`，默认 10 秒
 
 **故障切换**（多节点时）：网络错误、超时、限频、403、需要 API Key、请求被拦截、高度不到 `minContextSlot` 等节点问题换下一个节点；参数错误等确定性错误直接抛出（`RpcError`，`isNodeFault(err)` 可判断）。
@@ -686,6 +692,8 @@ new SolanaClient(provider?, {
   batchWait: 0,
   batch: true,                 // false：不合并成批量请求
   retries: 2,
+  maxConcurrency: 4,           // 同一节点地址同时在途的 HTTP 请求数
+  dedupe: true,                // 同一批里相同的只读调用只发一次
   cooldown: 30_000,
   headers: { 'x-api-key': '…' },
   fetch: customFetch,          // 需要代理等场景
@@ -751,7 +759,7 @@ await batchCall(client, [{ from: signer, instructions }])
 **打包与发送**：
 - 同一手续费支付者的相邻调用打包进同一笔交易（`mode: 'pack'`，默认；`'tx'` 每个调用一笔）。Solana 一笔交易本来就能放多条指令，不需要 EVM 上 Disperse 那样的合约
 - 每笔先模拟：失败的调用（余额不足、账户冻结、SOL 转给新地址但低于免租下限等）单独标记 `failed`，其余重新模拟后照常发送；模拟失败且同一支付者还有未确认的交易时，先等它们确认再模拟一次（后一笔依赖前一笔的结果时自动正确处理）。节点暂时的问题（限频、高度落后）会重试，不当成调用失败
-- 计算单元上限按模拟结果设置（× 1.1 + 1000），优先费用默认 `'auto'`：按这笔交易可写账户的最近费用取 75 分位，不超过 `maxPriorityFee`（默认 1,000,000 micro-lamports / CU）。调用里自带的 SetComputeUnitLimit / SetComputeUnitPrice 指令会被去掉（和库加的重复会让交易失败），优先费用用 `priorityFee` 指定
+- 计算单元上限按模拟结果设置（× 1.1 + 1000），优先费用默认 `'auto'`：按这笔交易可写账户的最近费用去掉 0 后取 75 分位（不活跃的账户大多数 slot 是 0，带上 0 几乎总是 0），不超过 `maxPriorityFee`（默认 1,000,000 micro-lamports / CU）。有优先费用时，第一次模拟顺带取付款方模拟后的余额（和当前余额一起读，同一个批量请求），付完优先费用后仍不低于免租下限就不再模拟第二次，否则照旧按真实费用再模拟一次。调用里自带的 SetComputeUnitLimit / SetComputeUnitPrice 指令会被去掉（和库加的重复会让交易失败），优先费用用 `priorityFee` 指定
 - 交易发出后不等确认就发下一笔；等待期间每两次轮询重发一次原交易，一次 `getSignatureStatuses` 查所有交易。blockhash 过期仍没上链时换新 blockhash 重新模拟、重发，最多 `retries` 次（默认 2）。判断过期时，再查一次历史的那个节点的数据必须不早于看到过期的那个 slot（多节点 / 负载均衡时落后的节点可能还没看到已上链的交易），否则这一轮先不判断，避免重复执行
 - Token-2022：有转账手续费的代币，`amount` 是转出的数量，收款方实际收到的更少；带 transfer hook 的代币，TransferChecked 需要额外的账户，本库不支持（模拟会失败，这一项 `failed`）
 - 同一笔交易上链后才失败时一起回滚，里面的调用都是 `reverted`
@@ -768,7 +776,7 @@ await batchCall(client, [{ from: signer, instructions }])
 
 **归集流程**（`batchCollect`）：一次读出所有钱包的余额 → 归集地址没有该代币的 ATA 时创建（传了 `feePayer` 时随第一批转账创建；不传时先由第一个有这种代币的钱包单独创建，其他钱包只需付得起手续费）→ 打包发送代币转账（`closeAccounts` 时随后关闭代币账户）→ 包含 SOL 时等代币归集确认，按最新余额扫空 SOL：传了 `feePayer` 时整个余额转走，否则扣掉这笔的手续费后转走（余额归零）。代币没有全部归集成功的钱包不扫 SOL；余额为 0、低于 `minAmount`、钱包就是归集地址或 `feePayer` 的项为 `skipped`。Solana 上不需要先给子钱包补 gas，传 `feePayer` 即可；不传时没有 SOL 的钱包对应的项失败。`dryRun` 时代币转账照常模拟，扫 SOL 的金额要等归集之后才知道，只标记 `simulated`、不做模拟。
 
-**共同选项**（`SendOptions`）：`feePayer`、`priorityFee` / `maxPriorityFee`、`wait`（默认 true）、`timeout`（默认 120 秒）、`pollInterval`（默认 2 秒）、`retries`（默认 2）、`commitment`（`'confirmed'` / `'finalized'`）、`concurrency`（不同手续费支付者并发数，默认 8）、`dryRun`、`signal`、`onUpdate`。
+**共同选项**（`SendOptions`）：`feePayer`、`priorityFee` / `maxPriorityFee`、`wait`（默认 true）、`timeout`（默认 120 秒）、`pollInterval`（默认 2 秒）、`retries`（默认 2）、`commitment`（`'confirmed'` / `'finalized'`）、`concurrency`（不同手续费支付者并发数，默认 8）、`dryRun`、`signal`、`onUpdate`、`sendRpc`（发送交易用的节点，如专门的发送服务；模拟和查状态仍用 client）、`broadcast`（`'first'` 默认只发给第一个可用节点；`'all'` 同时发给所有节点，第一个接受就返回，更容易上链但请求数成倍增加）、`computeUnitMargin`（计算单元上限 = 模拟消耗 × `ratio` + `extra`，默认 1.1 和 1000；消耗会随状态波动的调用可以调大）。`sendRpc` 按 client 的网络和节点选项（headers、fetch、timeout 等）解析，和 client 不在同一个网络时报 `NetworkMismatchError`。等待确认时只在交易可能快过期时才查区块高度（按状态查询返回的 slot 估算），不再每轮都查。
 
 **指令工具**：`systemTransfer`、`transferChecked`、`createAssociatedTokenAccountIdempotent`、`closeAccount`、`revoke`、`harvestWithheldTokensToMint`、`setComputeUnitLimit`、`setComputeUnitPrice`，生成本库格式的指令，可直接放进 `batchCall`。
 

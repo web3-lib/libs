@@ -1,6 +1,17 @@
-/** 最小的 JSON-RPC 传输接口：可以传入自己的实现（如包一层 @solana/kit 的 rpc） */
+import { mapPool, sleep } from './util.js'
+
+/** RpcTransport.request 的第三个参数（可选，自定义传输可以忽略） */
+export interface RpcRequestOptions {
+  /**
+   * 取消：已取消时不发请求，中途取消时 reject（reason 为 signal.reason）。
+   * HttpRpc 会把它传到 fetch：还在排队的调用直接移出队列，已发出的批量请求在所有成员都取消后中止；FallbackRpc 取消后不再换节点
+   */
+  signal?: AbortSignal
+}
+
+/** 最小的 JSON-RPC 传输接口：可以传入自己的实现（如包一层 @solana/kit 的 rpc）；options 是 0.6.1 新增的可选参数，不处理也能照常工作 */
 export interface RpcTransport {
-  request<T = unknown>(method: string, params?: readonly unknown[]): Promise<T>
+  request<T = unknown>(method: string, params?: readonly unknown[], options?: RpcRequestOptions): Promise<T>
   /** 节点名称，用于 AllNodesFailedError / onRequest 里标识节点；不传时自定义传输显示为 'custom' */
   readonly label?: string
 }
@@ -71,19 +82,54 @@ const REQUEST_BLOCKED = /request blocked/i
 const BLOCKED_LIMIT = 10
 const BLOCKED_FLOOR = 8
 
-/** 从报错里学到的节点限制，按节点地址共享（同一个节点的多个客户端不用各自再试一遍） */
-const learnedLimits = new Map<string, { methods: Map<string, number>; maxAccounts?: number }>()
+/** 节点的限制：单个方法在一个批量里的数量、单次 getMultipleAccounts 的账户数 */
+interface NodeLimits {
+  methods: Map<string, number>
+  maxAccounts?: number
+}
 
-function learnedFor(url: string): { methods: Map<string, number>; maxAccounts?: number } {
-  let entry = learnedLimits.get(url)
+/** 按节点地址记的表（健康状态、学到的限制、在途请求数）的条目上限，超出时淘汰最早加入的 */
+const MAX_TRACKED_URLS = 1000
+
+/** 按节点地址取条目，没有时创建；表的条目数有上限（淘汰最早加入的） */
+function trackedEntry<V>(map: Map<string, V>, url: string, create: () => V): V {
+  let entry = map.get(url)
   if (!entry) {
-    entry = { methods: new Map() }
-    learnedLimits.set(url, entry)
+    entry = create()
+    map.set(url, entry)
+    if (map.size > MAX_TRACKED_URLS) {
+      map.delete(map.keys().next().value as string)
+    }
   }
   return entry
 }
 
-/** 测试用：清空学到的节点限制 */
+/**
+ * 已知节点的限制（2026-10 实测），首次请求就按它拆分，不必先撞一次报错：
+ * publicnode 单次 getMultipleAccounts 最多 10 个账户、一个批量里最多 1 个 getMultipleAccounts，
+ * 超过账户数要等 3 秒多才返回 403
+ */
+function presetLimits(url: string): NodeLimits {
+  let host = ''
+  try {
+    host = new URL(url).hostname
+  } catch {
+    // 地址不合法：没有预置限制
+  }
+  if (/^solana[\w-]*\.publicnode\.com$/i.test(host)) {
+    return { methods: new Map([['getMultipleAccounts', 1]]), maxAccounts: BLOCKED_LIMIT }
+  }
+  return { methods: new Map() }
+}
+
+/** 从报错里学到的节点限制（含预置的已知限制），按节点地址共享（同一个节点的多个客户端不用各自再试一遍） */
+const learnedLimits = new Map<string, NodeLimits>()
+
+function learnedFor(url: string): NodeLimits {
+  return trackedEntry(learnedLimits, url, () => presetLimits(url))
+}
+
+/** 测试用：清空学到的节点限制（预置的已知限制在下次创建连接时重新带上） */
 export function resetLearnedLimits(): void {
   learnedLimits.clear()
 }
@@ -149,7 +195,10 @@ export function isNodeFault(err: unknown): boolean {
 }
 
 export interface HttpRpcOptions {
-  /** 单次 HTTP 请求超时（毫秒），<= 0 不限制。默认 10000 */
+  /**
+   * 单次 HTTP 请求超时（毫秒），<= 0 不限制。默认 10000。排队等并发名额（maxConcurrency）最多也等这么久，
+   * 等不到按超时处理（多节点时换节点）；拿到名额、真正发出后重新计时
+   */
   timeout?: number
   headers?: Record<string, string>
   /** 一个 HTTP 批量请求最多包含的调用数。默认 20 */
@@ -158,17 +207,43 @@ export interface HttpRpcOptions {
   batch?: boolean
   /** 收集窗口（毫秒），窗口内的调用合并成一个 HTTP 请求。默认 0（同一 tick） */
   batchWait?: number
-  /** 遇到 HTTP 429 时的重试次数（指数退避，从 500ms 开始）。默认 2 */
+  /** 遇到 HTTP 429 时的重试次数（指数退避，从 500ms 开始，带随机抖动；有 Retry-After 头时按它等）。默认 2 */
   retries?: number
   /** 自定义 fetch（如需要代理时） */
   fetch?: typeof fetch
+  /**
+   * 同一节点地址同时在途的 HTTP 请求数上限（按 URL 在所有 HttpRpc 实例间共享，超出的排队）。默认 4；<= 0 或 Infinity 不限制
+   */
+  maxConcurrency?: number
+  /** 同一个批量请求里 method 和 params 完全相同的只读调用只发一次、结果分给各调用方。默认 true */
+  dedupe?: boolean
 }
 
+/** 一个调用方（同一调用去重后可能有多个） */
+interface Waiter {
+  resolve: (value: unknown) => void
+  reject: (reason: unknown) => void
+  signal?: AbortSignal
+  cleanup?: () => void
+}
+
+/** 队列里的一个调用（去重后：method + params 相同的调用方共用一个） */
 interface Pending {
   method: string
   params: readonly unknown[]
-  resolve: (value: unknown) => void
-  reject: (reason: unknown) => void
+  /** 去重用的 key；不参与去重时为 undefined */
+  key: string | undefined
+  waiters: Waiter[]
+  /** 已经有结果（或已移出队列） */
+  done: boolean
+  /** 包含它、正在进行的 HTTP 请求 */
+  posts: Set<Post>
+}
+
+/** 一次 HTTP 请求（单个或批量）：成员都取消后中止 */
+interface Post {
+  items: readonly Pending[]
+  controller: AbortController
 }
 
 interface RpcResponse {
@@ -182,16 +257,145 @@ let nextId = 1
 /** 批量请求被拒绝、可以降级为逐条请求的 HTTP 状态 */
 const BATCH_REJECTED_STATUS = new Set([400, 404, 405, 415, 422])
 
-/** 节点不支持批量时，多久后重新尝试批量 */
+/** 节点不支持批量 / 限制批量大小时，多久后重新尝试（批量、原来的批量大小） */
 const BATCH_RETRY_AFTER = 10 * 60 * 1000
+
+/** 有副作用、不能去重的方法 */
+const WRITE_METHOD = /^(send|requestAirdrop)/
+
+/** 429 时 Retry-After 超过这个时间（毫秒）就不等了，直接报错（交给上层换节点） */
+const MAX_RETRY_AFTER = 10_000
 
 function isBatchLimitError(message: string | undefined): boolean {
   return !!message && /batch/i.test(message) && /more than \d+|too (large|many|big)|not (allowed|supported)|exceed/i.test(message)
 }
 
 /**
+ * 429 后的等待时间：有 Retry-After（秒数或 HTTP 日期）时按它，超过 MAX_RETRY_AFTER 时返回 null（不等，直接报错）；
+ * 否则指数退避（500ms 起）加 ±25% 随机抖动，避免同时被限频的请求又同时重试
+ */
+export function retryDelay(attempt: number, retryAfter: string | null | undefined): number | null {
+  const header = retryAfter?.trim()
+  if (header) {
+    const seconds = Number(header)
+    const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now()
+    if (Number.isFinite(ms)) {
+      return ms > MAX_RETRY_AFTER ? null : Math.max(0, ms)
+    }
+  }
+  return Math.round(500 * 2 ** attempt * (0.75 + Math.random() * 0.5))
+}
+
+/** 合并多个 AbortSignal（AbortSignal.any 不可用的旧环境手动合并） */
+function anySignal(signals: readonly AbortSignal[]): AbortSignal {
+  if (signals.length === 1) {
+    return signals[0] as AbortSignal
+  }
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any(signals as AbortSignal[])
+  }
+  const controller = new AbortController()
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason)
+      break
+    }
+    signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true, signal: controller.signal })
+  }
+  return controller.signal
+}
+
+/** 同一节点地址的在途 HTTP 请求数（所有 HttpRpc 实例共享）；waiting 里每项带自己的上限 */
+interface Slots {
+  active: number
+  waiting: Array<{ limit: number; start: () => void }>
+}
+
+const slotsByUrl = new Map<string, Slots>()
+
+/** 拿一个并发名额（先来先得）；signal 取消时不再等 */
+function acquireSlot(slots: Slots, limit: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason)
+  }
+  if (slots.active < limit && !slots.waiting.length) {
+    slots.active++
+    return Promise.resolve()
+  }
+  return new Promise((resolve, reject) => {
+    const entry = {
+      limit,
+      start: () => {
+        signal.removeEventListener('abort', onAbort)
+        resolve()
+      },
+    }
+    const onAbort = () => {
+      const i = slots.waiting.indexOf(entry)
+      if (i !== -1) {
+        slots.waiting.splice(i, 1)
+        drainSlots(slots)
+      }
+      reject(signal.reason)
+    }
+    slots.waiting.push(entry)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+function releaseSlot(slots: Slots): void {
+  slots.active--
+  drainSlots(slots)
+}
+
+function drainSlots(slots: Slots): void {
+  for (let head = slots.waiting[0]; head && slots.active < head.limit; head = slots.waiting[0]) {
+    slots.waiting.shift()
+    slots.active++
+    head.start()
+  }
+}
+
+/** 调用方是否都已取消（没有调用方传 signal 时不会） */
+function abandoned(item: Pending): boolean {
+  return item.waiters.every((w) => w.signal?.aborted)
+}
+
+/** 还需要结果：没有结果、也没被所有调用方放弃 */
+function live(item: Pending): boolean {
+  return !item.done && !abandoned(item)
+}
+
+/** 去重后的结果按调用方各给一份：第一个调用方拿原对象，其余的拿副本（调用方修改结果不会影响别人） */
+function copyResult(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return value
+  }
+  return typeof structuredClone === 'function' ? structuredClone(value) : JSON.parse(JSON.stringify(value))
+}
+
+function resolveItem(item: Pending, value: unknown): void {
+  if (item.done) return
+  item.done = true
+  item.waiters.forEach((waiter, i) => {
+    waiter.cleanup?.()
+    waiter.resolve(i === 0 ? value : copyResult(value))
+  })
+}
+
+function rejectItem(item: Pending, reason: unknown): void {
+  if (item.done) return
+  item.done = true
+  for (const waiter of item.waiters) {
+    waiter.cleanup?.()
+    waiter.reject(reason)
+  }
+}
+
+/**
  * 基于 fetch 的 JSON-RPC 传输：同一收集窗口内的调用合并成一个 JSON-RPC 批量请求。
  * 节点不支持批量（返回非数组）或限制批量大小（如 drpc 免费档最多 3 条）时自动降级。
+ * 同一节点地址同时在途的 HTTP 请求数有上限（maxConcurrency，默认 4）；request 的 signal 会传到 fetch
  */
 export class HttpRpc implements RpcTransport {
   readonly url: string
@@ -202,14 +406,20 @@ export class HttpRpc implements RpcTransport {
   readonly #batchWait: number
   readonly #retries: number
   readonly #fetch: typeof fetch
-  #maxBatchSize: number
-  /** 从报错里学到的限制（按节点地址共享）：单个方法在一个批量里的数量（如 publicnode：getMultipleAccounts 最多 1 个）、单次的账户数 */
-  readonly #learned: { methods: Map<string, number>; maxAccounts?: number }
+  readonly #maxBatchSize: number
+  readonly #maxConcurrency: number
+  readonly #dedupe: boolean
+  /** 节点限制批量大小（413、“more than N”）时临时调小的批量大小，到期恢复 maxBatchSize */
+  #batchLimit: { size: number; until: number } | null = null
+  /** 从报错里学到的限制（按节点地址共享，含预置的已知限制）：单个方法在一个批量里的数量（如 publicnode：getMultipleAccounts 最多 1 个）、单次的账户数 */
+  readonly #learned: NodeLimits
   /** options.batch：调用方是否允许批量 */
   readonly #batchOption: boolean
   /** 节点明确表示不支持批量时，在这之前逐条请求（之后重新尝试批量） */
   #batchDisabledUntil = 0
   #queue: Pending[] = []
+  /** 队列里可去重的调用（key → 调用），flush 时清空 */
+  #queuedByKey = new Map<string, Pending>()
   #timer: ReturnType<typeof setTimeout> | null = null
 
   constructor(url: string, options: HttpRpcOptions = {}) {
@@ -223,20 +433,25 @@ export class HttpRpc implements RpcTransport {
     this.#batchWait = options.batchWait ?? 0
     this.#retries = Math.max(0, options.retries ?? 2)
     this.#fetch = options.fetch ?? ((...args) => fetch(...args))
+    const concurrency = options.maxConcurrency ?? 4
+    this.#maxConcurrency = concurrency > 0 ? concurrency : Number.POSITIVE_INFINITY
+    this.#dedupe = options.dedupe ?? true
   }
 
-  request<T = unknown>(method: string, params: readonly unknown[] = []): Promise<T> {
+  request<T = unknown>(method: string, params: readonly unknown[] = [], options?: RpcRequestOptions): Promise<T> {
+    const signal = options?.signal
     if (method === 'getMultipleAccounts' && Array.isArray(params[0])) {
-      return this.#getMultipleAccounts(params) as Promise<T>
+      return this.#getMultipleAccounts(params, signal) as Promise<T>
     }
-    return this.#enqueue<T>(method, params)
+    return this.#enqueue<T>(method, params, signal)
   }
 
   /**
    * getMultipleAccounts：节点限制单次账户数时（“Too many accounts requested”），减半后分多次请求、合并结果，
-   * 并记下上限，之后直接按上限拆分。合并后 context.slot 取最小值
+   * 并记下上限，之后直接按上限拆分。合并后 context.slot 取最小值。
+   * 拆分后的子请求用并发池发出：一个失败后不再发后面的（节点多半在限频或拒绝），取消后也不再发
    */
-  async #getMultipleAccounts(params: readonly unknown[]): Promise<unknown> {
+  async #getMultipleAccounts(params: readonly unknown[], signal: AbortSignal | undefined): Promise<unknown> {
     const [addresses, ...rest] = params as [unknown[], ...unknown[]]
     const max = this.#learned.maxAccounts
     if (max !== undefined && addresses.length > max) {
@@ -244,7 +459,10 @@ export class HttpRpc implements RpcTransport {
       for (let i = 0; i < addresses.length; i += max) {
         parts.push(addresses.slice(i, i + max))
       }
-      const results = (await Promise.all(parts.map((part) => this.#getMultipleAccounts([part, ...rest])))) as Array<{
+      // 同时排队的子请求数：够把所有并发名额用满即可（每个 HTTP 请求能带几个 getMultipleAccounts × 并发上限）
+      const perPost = this.#batch ? (this.#learned.methods.get('getMultipleAccounts') ?? this.#batchSize) : 1
+      const limit = Number.isFinite(this.#maxConcurrency) ? this.#maxConcurrency * perPost : parts.length
+      const results = (await mapPool(parts, limit, (part) => this.#getMultipleAccounts([part, ...rest], signal))) as Array<{
         context?: { slot?: number }
         value?: unknown[]
       }>
@@ -256,7 +474,7 @@ export class HttpRpc implements RpcTransport {
       }
     }
     try {
-      return await this.#enqueue('getMultipleAccounts', params)
+      return await this.#enqueue('getMultipleAccounts', params, signal)
     } catch (err) {
       const tooMany = err instanceof RpcError && TOO_MANY_ACCOUNTS.test(err.message) && addresses.length > 1
       const blocked = err instanceof RpcError && REQUEST_BLOCKED.test(err.message) && addresses.length > BLOCKED_FLOOR
@@ -265,7 +483,7 @@ export class HttpRpc implements RpcTransport {
         const stated = Number(/maximum of (\d+) accounts/i.exec(err.message)?.[1])
         const next = stated >= 1 ? stated : blocked && addresses.length > BLOCKED_LIMIT ? BLOCKED_LIMIT : Math.floor(addresses.length / 2)
         this.#learned.maxAccounts = Math.max(1, Math.min(this.#learned.maxAccounts ?? Number.POSITIVE_INFINITY, next))
-        return this.#getMultipleAccounts(params)
+        return this.#getMultipleAccounts(params, signal)
       }
       throw err
     }
@@ -276,15 +494,82 @@ export class HttpRpc implements RpcTransport {
     return this.#batchOption && Date.now() >= this.#batchDisabledUntil
   }
 
-  #enqueue<T>(method: string, params: readonly unknown[]): Promise<T> {
+  /** 当前的批量大小：节点限制过批量大小时，冷却期内用调小后的值，到期恢复 */
+  get #batchSize(): number {
+    const limit = this.#batchLimit
+    if (limit && Date.now() < limit.until) {
+      return limit.size
+    }
+    this.#batchLimit = null
+    return this.#maxBatchSize
+  }
+
+  /** 节点限制批量大小：10 分钟内按 size 分批，之后恢复（偶发的 413 不会永久缩小批量） */
+  #limitBatchSize(size: number): void {
+    this.#batchLimit = { size: Math.max(1, Math.min(size, this.#batchSize)), until: Date.now() + BATCH_RETRY_AFTER }
+  }
+
+  #enqueue<T>(method: string, params: readonly unknown[], signal: AbortSignal | undefined): Promise<T> {
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason)
+    }
     return new Promise<T>((resolve, reject) => {
-      this.#queue.push({ method, params, resolve: resolve as (value: unknown) => void, reject })
-      if (!this.#batch || this.#queue.length >= this.#maxBatchSize) {
+      const waiter: Waiter = { resolve: resolve as (value: unknown) => void, reject, signal }
+      let key: string | undefined
+      if (this.#dedupe && !WRITE_METHOD.test(method)) {
+        try {
+          key = `${method}\u0000${JSON.stringify(params)}`
+        } catch {
+          key = undefined // 参数不能序列化（如 bigint）：不去重，发送时照常报错
+        }
+      }
+      const existing = key === undefined ? undefined : this.#queuedByKey.get(key)
+      const item: Pending = existing ?? { method, params, key, waiters: [], done: false, posts: new Set() }
+      item.waiters.push(waiter)
+      if (signal) {
+        const onAbort = () => this.#abortWaiter(item, waiter)
+        signal.addEventListener('abort', onAbort, { once: true })
+        waiter.cleanup = () => signal.removeEventListener('abort', onAbort)
+      }
+      if (existing) {
+        return // 同一批里相同的调用：共用一个结果
+      }
+      this.#queue.push(item)
+      if (key !== undefined) {
+        this.#queuedByKey.set(key, item)
+      }
+      if (!this.#batch || this.#queue.length >= this.#batchSize) {
         this.#flush()
       } else if (!this.#timer) {
         this.#timer = setTimeout(() => this.#flush(), this.#batchWait)
       }
     })
+  }
+
+  /**
+   * 调用方取消：立即 reject 这个调用方；同一调用的其他调用方都取消时，还在排队的移出队列，
+   * 已发出的 HTTP 请求在所有成员都被取消后中止
+   */
+  #abortWaiter(item: Pending, waiter: Waiter): void {
+    waiter.cleanup?.()
+    waiter.reject(waiter.signal?.reason)
+    if (item.done || !abandoned(item)) {
+      return
+    }
+    const index = this.#queue.indexOf(item)
+    if (index !== -1) {
+      this.#queue.splice(index, 1)
+      if (item.key !== undefined && this.#queuedByKey.get(item.key) === item) {
+        this.#queuedByKey.delete(item.key)
+      }
+      item.done = true
+      return
+    }
+    for (const post of item.posts) {
+      if (post.items.every(abandoned)) {
+        post.controller.abort(waiter.signal?.reason)
+      }
+    }
   }
 
   #flush(): void {
@@ -294,20 +579,22 @@ export class HttpRpc implements RpcTransport {
     }
     const queue = this.#queue
     this.#queue = []
+    this.#queuedByKey = new Map()
     for (const chunk of this.#split(queue)) {
       void this.#dispatch(chunk)
     }
   }
 
-  /** 按 maxBatchSize 和各方法的数量限制分批（保持顺序；不受限的方法照常合并） */
+  /** 按批量大小和各方法的数量限制分批（保持顺序；不受限的方法照常合并） */
   #split(items: readonly Pending[]): Pending[][] {
     const chunks: Pending[][] = []
+    const batchSize = this.#batchSize
     let current: Pending[] = []
     let counts = new Map<string, number>()
     for (const item of items) {
       const limit = this.#learned.methods.get(item.method)
       const count = counts.get(item.method) ?? 0
-      if (current.length >= this.#maxBatchSize || (limit !== undefined && count >= limit)) {
+      if (current.length >= batchSize || (limit !== undefined && count >= limit)) {
         chunks.push(current)
         current = []
         counts = new Map()
@@ -333,24 +620,35 @@ export class HttpRpc implements RpcTransport {
       return false
     }
     this.#learned.methods.set(method, limit)
-    await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
+    await this.#redispatch(items)
     return true
   }
 
   /** retriedServerError：这一批已经因 5xx + JSON-RPC 错误重试过一次 */
-  async #dispatch(items: Pending[], retriedServerError = false): Promise<void> {
+  async #dispatch(chunk: Pending[], retriedServerError = false): Promise<void> {
+    // 已被所有调用方取消的不再发
+    const items = chunk.filter(live)
+    if (!items.length) {
+      return
+    }
     if (items.length === 1 || !this.#batch) {
       await Promise.all(items.map((item) => this.#single(item)))
       return
     }
     const ids = items.map(() => nextId++)
-    let body: unknown
+    let posted: { body: unknown; retryAfter: string | null }
     try {
-      body = await this.#post(items.map((item, i) => ({ jsonrpc: '2.0', id: ids[i], method: item.method, params: item.params })))
+      posted = await this.#post(
+        items.map((item, i) => ({ jsonrpc: '2.0', id: ids[i], method: item.method, params: item.params })),
+        items,
+      )
     } catch (err) {
+      if (items.every((item) => !live(item))) {
+        return // 调用方都取消了（各自已经 reject）
+      }
       if (err instanceof HttpError && err.status === 413 && items.length > 1) {
-        // 请求体太大：批量减半后重发
-        this.#maxBatchSize = Math.max(1, Math.floor(items.length / 2))
+        // 请求体太大：批量减半后重发（一段时间后恢复原来的批量大小）
+        this.#limitBatchSize(Math.floor(items.length / 2))
         await this.#redispatch(items)
         return
       }
@@ -369,18 +667,24 @@ export class HttpRpc implements RpcTransport {
           await this.#dispatch(items, true)
           return
         }
-        const [first, ...rest] = items as [Pending, ...Pending[]]
+        // 试探用还需要结果的第一条（期间被取消的不再发）
+        const remaining = items.filter(live)
+        if (!remaining.length) {
+          return
+        }
+        const [first, ...rest] = remaining as [Pending, ...Pending[]]
         if (await this.#single(first)) {
           this.#disableBatch()
           await Promise.all(rest.map((item) => this.#single(item)))
         } else {
-          rest.forEach((item) => item.reject(err))
+          rest.forEach((item) => rejectItem(item, err))
         }
         return
       }
-      items.forEach((item) => item.reject(err))
+      items.forEach((item) => rejectItem(item, err))
       return
     }
+    const { body } = posted
     if (!Array.isArray(body)) {
       const error = (body as RpcResponse)?.error
       // 单个方法在批量里的数量超限（整批被拒）：按限制重新分批，不当成节点问题
@@ -390,7 +694,7 @@ export class HttpRpc implements RpcTransport {
       const rpcError = new RpcError(error?.message ?? 'Invalid JSON-RPC batch response', error?.code, error?.data)
       // 限频 / 鉴权等节点问题：原样报错，不降级（降级成逐条请求只会让限频更严重）
       if (rpcError.nodeFault) {
-        items.forEach((item) => item.reject(rpcError))
+        items.forEach((item) => rejectItem(item, rpcError))
         return
       }
       // 整批被拒（不是账户数超限）：节点多半不支持批量（各家错误码不同：-32600 / -32601 / -32700 …），
@@ -410,11 +714,11 @@ export class HttpRpc implements RpcTransport {
     }
     const limited = (body as RpcResponse[]).find((res) => isBatchLimitError(res.error?.message))
     if (limited) {
-      // 如 “Batch of more than 3 requests are not allowed”：按限制缩小批量后重发；
+      // 如 “Batch of more than 3 requests are not allowed”：按限制缩小批量后重发（一段时间后恢复）；
       // 限制不小于当前批量（节点的上限判断有偏差）或解析不出数字时，降级为逐条请求，避免无限重发
       const max = Number(/more than (\d+)/i.exec(limited.error?.message ?? '')?.[1])
       if (Number.isFinite(max) && max > 1 && max < items.length) {
-        this.#maxBatchSize = max
+        this.#limitBatchSize(max)
         await this.#redispatch(items)
       } else {
         this.#disableBatch()
@@ -435,24 +739,32 @@ export class HttpRpc implements RpcTransport {
       }
     })
     if (limitedItems.length) {
-      await new Promise((r) => setTimeout(r, 500))
+      const wait = retryDelay(0, posted.retryAfter)
+      if (wait === null) {
+        limitedItems.forEach((item) => settle(item, byId.get(ids[items.indexOf(item)])))
+        return
+      }
+      await sleep(wait)
       await Promise.all(limitedItems.map((item) => this.#single(item, 0)))
     }
   }
 
-  /** 按当前的 maxBatchSize 重新分批发送（每批都比原来小，不会无限循环） */
+  /** 按当前的批量大小重新分批发送（每批都比原来小，不会无限循环） */
   async #redispatch(items: Pending[]): Promise<void> {
-    await Promise.all(this.#split(items).map((chunk) => this.#dispatch(chunk)))
+    await Promise.all(this.#split(items.filter(live)).map((chunk) => this.#dispatch(chunk)))
   }
 
   /** 逐条发送一个调用；返回是否拿到了结果（没有出错） */
   async #single(item: Pending, retries = this.#retries): Promise<boolean> {
+    if (!live(item)) {
+      return false
+    }
     try {
-      const body = (await this.#post({ jsonrpc: '2.0', id: nextId++, method: item.method, params: item.params }, retries)) as RpcResponse
-      settle(item, body)
-      return !body?.error
+      const { body } = await this.#post({ jsonrpc: '2.0', id: nextId++, method: item.method, params: item.params }, [item], retries)
+      settle(item, body as RpcResponse)
+      return !(body as RpcResponse)?.error
     } catch (err) {
-      item.reject(err)
+      rejectItem(item, err)
       return false
     }
   }
@@ -462,59 +774,102 @@ export class HttpRpc implements RpcTransport {
     this.#batchDisabledUntil = Date.now() + BATCH_RETRY_AFTER
   }
 
-  async #post(payload: unknown, retries = this.#retries): Promise<unknown> {
-    for (let attempt = 0; ; attempt++) {
-      let response: Response
-      try {
-        response = await this.#fetch(this.url, {
-          method: 'POST',
-          headers: this.#headers,
-          body: JSON.stringify(payload),
-          signal: this.#timeout > 0 && Number.isFinite(this.#timeout) ? AbortSignal.timeout(this.#timeout) : undefined,
-        })
-      } catch (err) {
-        // AbortSignal.timeout 触发时是 TimeoutError（DOMException）
-        const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
-        throw new HttpError(`Request to ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, undefined, timeout)
+  /**
+   * 发一次 HTTP 请求（含 429 退避重试）。items 是这次请求的成员：都被调用方取消时中止 fetch / 退避等待，抛出取消的 reason。
+   * 同一节点地址同时在途的请求数受 maxConcurrency 限制：排队最多等 timeout 毫秒（超时抛 HttpError timeout，交给上层换节点），发出后重新计时
+   */
+  async #post(payload: unknown, items: readonly Pending[], retries = this.#retries): Promise<{ body: unknown; retryAfter: string | null }> {
+    const post: Post = { items, controller: new AbortController() }
+    const cancel = post.controller.signal
+    items.forEach((item) => item.posts.add(post))
+    const slots = trackedEntry(slotsByUrl, this.url, () => ({ active: 0, waiting: [] }))
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const limited = this.#timeout > 0 && Number.isFinite(this.#timeout)
+        // 排队等名额也受 timeout 限制：同一地址的其他连接把名额占住不放（如 timeout: 0 的请求挂住）时不会无限等下去
+        const queueTimeout = limited ? AbortSignal.timeout(this.#timeout) : null
+        try {
+          await acquireSlot(slots, this.#maxConcurrency, queueTimeout ? anySignal([cancel, queueTimeout]) : cancel)
+        } catch (err) {
+          if (cancel.aborted) {
+            throw cancel.reason
+          }
+          throw new HttpError(`Request to ${this.#safeUrl} timed out waiting for a free connection slot (maxConcurrency ${this.#maxConcurrency})`, undefined, true)
+        }
+        let response: Response
+        let text = ''
+        /** 429 后要等多久再重试；null 表示不重试 */
+        let wait: number | null = null
+        try {
+          const signal = limited ? anySignal([cancel, AbortSignal.timeout(this.#timeout)]) : cancel
+          try {
+            response = await this.#fetch(this.url, { method: 'POST', headers: this.#headers, body: JSON.stringify(payload), signal })
+          } catch (err) {
+            if (cancel.aborted) {
+              throw cancel.reason
+            }
+            // AbortSignal.timeout 触发时是 TimeoutError（DOMException）
+            const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
+            throw new HttpError(`Request to ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, undefined, timeout)
+          }
+          if (response.status === 429 && attempt < retries) {
+            wait = retryDelay(attempt, response.headers?.get?.('retry-after'))
+          }
+          if (wait !== null) {
+            void response.body?.cancel().catch(() => {})
+          } else {
+            try {
+              text = await response.text()
+            } catch (err) {
+              if (cancel.aborted) {
+                throw cancel.reason
+              }
+              // 读响应体时超时或连接中断：同样包装成 HttpError（原生 DOMException / TypeError 不会被当成可恢复的节点问题）
+              const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
+              throw new HttpError(`Reading response from ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, response.status, timeout)
+            }
+          }
+        } finally {
+          releaseSlot(slots)
+        }
+        if (wait !== null) {
+          // 退避期间不占并发名额
+          await sleep(wait, cancel)
+          continue
+        }
+        let body: unknown
+        try {
+          body = parseJson(text)
+        } catch {
+          throw new HttpError(`Invalid JSON from ${this.#safeUrl} (HTTP ${response.status})`, response.status)
+        }
+        // 非 2xx 但返回了 JSON-RPC 结构（如 403 Access forbidden、drpc 的 500 + 批量错误数组）：交给上层解析
+        if (!response.ok && !Array.isArray(body) && !(body as RpcResponse)?.error) {
+          throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}`, response.status)
+        }
+        // 5xx + 单个 JSON-RPC 错误：
+        // - 繁忙、过载等明确的临时故障：按 HTTP 错误处理，直接换节点（不重试、不逐条，不给过载的节点加量）
+        // - -32603 internal error：含义不明确，标记 rpcError，由 #dispatch 判断是临时故障还是节点用 5xx 拒绝批量
+        // 其他错误（方法数量超限、账户数超限、参数错误、minContextSlot、限频等）照常交给上层按类型处理
+        const bodyError = response.status >= 500 && !Array.isArray(body) ? (body as RpcResponse)?.error : undefined
+        const kind = bodyError ? classifyRpcError(bodyError.code, bodyError.message ?? '') : undefined
+        if (kind === 'transient' || kind === 'internal') {
+          const message = bodyError?.message
+          throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}${message ? `: ${message}` : ''}`, response.status, false, kind === 'internal')
+        }
+        const retryAfter = response.headers?.get?.('retry-after') ?? null
+        // 有的节点限频时返回 HTTP 200 + JSON-RPC 错误码 429：同样退避重试
+        if (attempt < retries && isRateLimited(body)) {
+          const wait = retryDelay(attempt, retryAfter)
+          if (wait !== null) {
+            await sleep(wait, cancel)
+            continue
+          }
+        }
+        return { body, retryAfter }
       }
-      if (response.status === 429 && attempt < retries) {
-        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
-        continue
-      }
-      let text: string
-      try {
-        text = await response.text()
-      } catch (err) {
-        // 读响应体时超时或连接中断：同样包装成 HttpError（原生 DOMException / TypeError 不会被当成可恢复的节点问题）
-        const timeout = (err as { name?: unknown } | null)?.name === 'TimeoutError'
-        throw new HttpError(`Reading response from ${this.#safeUrl} failed: ${(err as Error)?.message ?? err}`, response.status, timeout)
-      }
-      let body: unknown
-      try {
-        body = parseJson(text)
-      } catch {
-        throw new HttpError(`Invalid JSON from ${this.#safeUrl} (HTTP ${response.status})`, response.status)
-      }
-      // 非 2xx 但返回了 JSON-RPC 结构（如 403 Access forbidden、drpc 的 500 + 批量错误数组）：交给上层解析
-      if (!response.ok && !Array.isArray(body) && !(body as RpcResponse)?.error) {
-        throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}`, response.status)
-      }
-      // 5xx + 单个 JSON-RPC 错误：
-      // - 繁忙、过载等明确的临时故障：按 HTTP 错误处理，直接换节点（不重试、不逐条，不给过载的节点加量）
-      // - -32603 internal error：含义不明确，标记 rpcError，由 #dispatch 判断是临时故障还是节点用 5xx 拒绝批量
-      // 其他错误（方法数量超限、账户数超限、参数错误、minContextSlot、限频等）照常交给上层按类型处理
-      const bodyError = response.status >= 500 && !Array.isArray(body) ? (body as RpcResponse)?.error : undefined
-      const kind = bodyError ? classifyRpcError(bodyError.code, bodyError.message ?? '') : undefined
-      if (kind === 'transient' || kind === 'internal') {
-        const message = bodyError?.message
-        throw new HttpError(`HTTP ${response.status} from ${this.#safeUrl}${message ? `: ${message}` : ''}`, response.status, false, kind === 'internal')
-      }
-      // 有的节点限频时返回 HTTP 200 + JSON-RPC 错误码 429：同样退避重试
-      if (attempt < retries && isRateLimited(body)) {
-        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
-        continue
-      }
-      return body
+    } finally {
+      items.forEach((item) => item.posts.delete(post))
     }
   }
 }
@@ -565,11 +920,11 @@ function isRateLimited(body: unknown): boolean {
 
 function settle(item: Pending, response: RpcResponse | undefined): void {
   if (!response) {
-    item.reject(new HttpError('Missing response in JSON-RPC batch'))
+    rejectItem(item, new HttpError('Missing response in JSON-RPC batch'))
   } else if (response.error) {
-    item.reject(new RpcError(response.error.message ?? 'JSON-RPC error', response.error.code, response.error.data))
+    rejectItem(item, new RpcError(response.error.message ?? 'JSON-RPC error', response.error.code, response.error.data))
   } else {
-    item.resolve(response.result)
+    resolveItem(item, response.result)
   }
 }
 
@@ -653,7 +1008,6 @@ interface NodeHealth {
 // 节点健康状态按节点共享（模块级）：客户端重建后，刚出过错的节点仍排在后面。URL 节点按完整 URL，其他按对象
 const healthByUrl = new Map<string, NodeHealth>()
 let healthByObject = new WeakMap<object, NodeHealth>()
-const MAX_TRACKED_URLS = 1000
 /** 连续超时这么多次才冷却（单次超时多半只是这次请求慢） */
 const TIMEOUTS_BEFORE_COOLDOWN = 3
 
@@ -666,15 +1020,7 @@ function healthKeyOf(node: RpcTransport): string | object {
 /** 每次用时按 key 从全局表里取：表淘汰条目后，各实例仍取到同一个对象 */
 function healthOf(key: string | object): NodeHealth {
   if (typeof key === 'string') {
-    let health = healthByUrl.get(key)
-    if (!health) {
-      health = { failedAt: 0, timeouts: 0 }
-      healthByUrl.set(key, health)
-      if (healthByUrl.size > MAX_TRACKED_URLS) {
-        healthByUrl.delete(healthByUrl.keys().next().value as string)
-      }
-    }
-    return health
+    return trackedEntry(healthByUrl, key, () => ({ failedAt: 0, timeouts: 0 }))
   }
   let health = healthByObject.get(key)
   if (!health) {
@@ -721,23 +1067,33 @@ export class FallbackRpc implements RpcTransport {
     this.#healthKeys = nodes.map(healthKeyOf)
   }
 
-  async request<T = unknown>(method: string, params?: readonly unknown[]): Promise<T> {
+  async request<T = unknown>(method: string, params?: readonly unknown[], options?: RpcRequestOptions): Promise<T> {
+    const signal = options?.signal
     const errors: Array<{ node: string; error: unknown }> = []
     const order = this.#order()
     for (let attempt = 0; attempt < order.length; attempt++) {
+      // 已取消：不再发、不再换节点
+      if (signal?.aborted) {
+        throw signal.reason
+      }
       const index = order[attempt] as number
       const node = this.nodes[index] as RpcTransport
       const label = this.#labels[index] as string
       const health = healthOf(this.#healthKeys[index] as string | object)
       const started = Date.now()
       try {
-        const result = await node.request<T>(method, params)
+        // 没有 signal 时按两个参数调用（自定义传输不受影响）
+        const result = await (signal ? node.request<T>(method, params, { signal }) : node.request<T>(method, params))
         health.failedAt = 0
         health.timeouts = 0
         emit({ node: label, method, ms: Date.now() - started, ok: true, attempt })
         return result
       } catch (err) {
         emit({ node: label, method, ms: Date.now() - started, ok: false, error: err, attempt })
+        // 调用方取消导致的失败：不算节点故障，也不换节点
+        if (signal?.aborted) {
+          throw signal.reason
+        }
         if (!isNodeFault(err)) {
           throw err
         }

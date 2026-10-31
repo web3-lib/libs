@@ -1,4 +1,4 @@
-import { encodeAddress } from './address.js'
+import { Bytes } from './bytes.js'
 
 /** getMultipleAccounts 解析后的账户 */
 export interface AccountInfo {
@@ -8,80 +8,6 @@ export interface AccountInfo {
   owner: string
   data: Uint8Array
   executable: boolean
-}
-
-class Reader {
-  #offset: number
-  readonly #view: DataView
-
-  constructor(
-    readonly bytes: Uint8Array,
-    offset = 0,
-  ) {
-    this.#offset = offset
-    this.#view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  }
-
-  get offset(): number {
-    return this.#offset
-  }
-
-  #need(n: number): void {
-    if (this.#offset + n > this.bytes.length) {
-      throw new RangeError('Account data is shorter than expected')
-    }
-  }
-
-  skip(n: number): void {
-    this.#need(n)
-    this.#offset += n
-  }
-
-  u8(): number {
-    this.#need(1)
-    return this.bytes[this.#offset++] as number
-  }
-
-  u16(): number {
-    this.#need(2)
-    const v = this.#view.getUint16(this.#offset, true)
-    this.#offset += 2
-    return v
-  }
-
-  u32(): number {
-    this.#need(4)
-    const v = this.#view.getUint32(this.#offset, true)
-    this.#offset += 4
-    return v
-  }
-
-  u64(): bigint {
-    this.#need(8)
-    const v = this.#view.getBigUint64(this.#offset, true)
-    this.#offset += 8
-    return v
-  }
-
-  pubkey(): string {
-    this.#need(32)
-    const v = encodeAddress(this.bytes.slice(this.#offset, this.#offset + 32))
-    this.#offset += 32
-    return v
-  }
-
-  /** borsh string：u32 长度 + UTF-8；去掉 Metaplex 用来补齐长度的 \0 */
-  string(): string {
-    const len = this.u32()
-    this.#need(len)
-    const v = new TextDecoder().decode(this.bytes.slice(this.#offset, this.#offset + len))
-    this.#offset += len
-    return v.replace(/\0+$/, '').trim()
-  }
-
-  option<T>(read: () => T): T | null {
-    return this.u8() === 1 ? read() : null
-  }
 }
 
 export interface MintInfo {
@@ -116,7 +42,7 @@ export function parseMint(data: Uint8Array): MintInfo {
   if (data.length !== MINT_SIZE && !(data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_MINT)) {
     throw new RangeError('Not a mint account')
   }
-  const r = new Reader(data)
+  const r = new Bytes(data)
   const hasMintAuthority = r.u32() === 1
   const mintAuthority = r.pubkey()
   const supply = r.u64()
@@ -140,7 +66,7 @@ export function findExtension(data: Uint8Array, extensionType: number): Uint8Arr
     return null
   }
   try {
-    const r = new Reader(data, EXTENSIONS_OFFSET)
+    const r = new Bytes(data, EXTENSIONS_OFFSET)
     while (r.offset + 4 <= data.length) {
       const type = r.u16()
       const length = r.u16()
@@ -167,7 +93,7 @@ function parseTokenMetadataExtension(data: Uint8Array): TokenMetadata | null {
     return null
   }
   try {
-    const m = new Reader(ext)
+    const m = new Bytes(ext)
     m.pubkey() // updateAuthority
     m.pubkey() // mint
     return { name: m.string(), symbol: m.string(), uri: m.string() }
@@ -212,7 +138,7 @@ export function parseTransferFeeConfig(data: Uint8Array): TransferFeeConfigInfo 
     return null
   }
   try {
-    const r = new Reader(ext)
+    const r = new Bytes(ext)
     // OptionalNonZeroPubkey：全 0 表示没有
     const configAuthority = r.pubkey()
     const withdrawAuthority = r.pubkey()
@@ -238,14 +164,69 @@ export interface TokenAccountInfo {
   amount: bigint
 }
 
+function isTokenAccountData(data: Uint8Array): boolean {
+  return data.length === ACCOUNT_SIZE || (data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_ACCOUNT)
+}
+
 /** 解析代币账户（SPL Token / Token-2022 前 72 字节相同） */
 export function parseTokenAccount(data: Uint8Array): TokenAccountInfo {
-  if (data.length !== ACCOUNT_SIZE && !(data.length > ACCOUNT_TYPE_OFFSET && data[ACCOUNT_TYPE_OFFSET] === ACCOUNT_TYPE_ACCOUNT)) {
+  if (!isTokenAccountData(data)) {
     throw new RangeError('Not a token account')
   }
-  const r = new Reader(data)
+  const r = new Bytes(data)
   return { mint: r.pubkey(), owner: r.pubkey(), amount: r.u64() }
 }
+
+/** 代币账户的完整基础布局（前 165 字节，SPL Token / Token-2022 相同） */
+export interface TokenAccountState extends TokenAccountInfo {
+  delegate: string | null
+  /** 0 未初始化、1 正常、2 冻结 */
+  state: number
+  frozen: boolean
+  /** Wrapped SOL 账户（is_native 有值） */
+  native: boolean
+  delegatedAmount: bigint
+  closeAuthority: string | null
+}
+
+/** 解析代币账户的完整基础布局；不是代币账户或未初始化时为 null（包内使用：/approvals、/simulate） */
+export function parseTokenAccountState(data: Uint8Array): TokenAccountState | null {
+  if (!isTokenAccountData(data)) {
+    return null
+  }
+  const b = new Bytes(data)
+  const state = b.u8(108)
+  if (state === 0) {
+    return null
+  }
+  // COption：u32 标记（1 有、0 没有）+ 值
+  return {
+    mint: b.key(0),
+    owner: b.key(32),
+    amount: b.u64(64),
+    delegate: b.u32(72) === 1 ? b.key(76) : null,
+    state,
+    frozen: state === 2,
+    native: b.u32(109) === 1,
+    delegatedAmount: b.u64(121),
+    closeAuthority: b.u32(129) === 1 ? b.key(133) : null,
+  }
+}
+
+/** 计算预算指令里的计算单元上限（SetComputeUnitLimit）和单价（SetComputeUnitPrice，micro-lamports）；没有时 limit 为 null、price 为 0 */
+export function computeBudgetOf(instructions: Iterable<{ programId: string; data: Uint8Array }>): { limit: number | null; price: bigint } {
+  let limit: number | null = null
+  let price = 0n
+  for (const ix of instructions) {
+    if (ix.programId !== COMPUTE_BUDGET_PROGRAM) continue
+    const b = new Bytes(ix.data)
+    if (ix.data[0] === 2 && ix.data.length >= 5) limit = b.u32(1)
+    if (ix.data[0] === 3 && ix.data.length >= 9) price = b.u64(1)
+  }
+  return { limit, price }
+}
+
+const COMPUTE_BUDGET_PROGRAM = 'ComputeBudget111111111111111111111111111111'
 
 export interface MetaplexMetadata extends TokenMetadata {
   updateAuthority: string
@@ -261,7 +242,7 @@ export interface MetaplexMetadata extends TokenMetadata {
 
 /** 解析 Metaplex Token Metadata 账户；老版本账户缺少后面的字段时，缺的部分为默认值 */
 export function parseMetaplexMetadata(data: Uint8Array): MetaplexMetadata {
-  const r = new Reader(data)
+  const r = new Bytes(data)
   if (r.u8() !== 4) {
     throw new RangeError('Not a Metaplex metadata account') // Key::MetadataV1 = 4
   }

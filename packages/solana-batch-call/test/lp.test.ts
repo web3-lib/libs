@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 
 import { SolanaClient, decodeAddress, findProgramAddress, type RpcTransport } from '../src/index.js'
 import { resetTokenMetaCache } from '../src/client.js'
-import { lpPositions, type SolanaLpClmmPosition, type SolanaLpPosition, type SolanaPriceSource } from '../src/lp.js'
+import { lpPositions, resetLpPoolCache, type SolanaLpClmmPosition, type SolanaLpPosition, type SolanaPriceSource } from '../src/lp.js'
 import { MAX_TICK, MIN_TICK, getFeeGrowthInside, getFeesOwed, orcaSqrtPriceAtTick, raydiumSqrtPriceAtTick } from '../src/lpMath.js'
 import { resetClientCache } from '../src/shortcuts.js'
 import { getLpPositions } from '../src/subpaths/lp.js'
@@ -66,6 +66,7 @@ function numbers(p: SolanaLpPosition) {
 beforeEach(() => {
   resetTokenMetaCache()
   resetClientCache()
+  resetLpPoolCache()
 })
 
 describe('lpMath', () => {
@@ -170,6 +171,16 @@ describe('lpPositions（主网快照回放）', () => {
     const list = await lpPositions(client, AMM.owner, { mints: AMM.mints, pools: [AMM_POOL] })
     expect(list.map(numbers)).toEqual([AMM.expected])
     expect(calls).not.toContain('getProgramAccounts')
+  })
+
+  it('LP mint → 池子地址缓存：第二次不再 getProgramAccounts，读池子账户核对后结果相同', async () => {
+    const first = replay()
+    const a = await lpPositions(first.client, AMM.owner, { mints: AMM.mints })
+    expect(first.calls.filter((m) => m === 'getProgramAccounts').length).toBeGreaterThan(0)
+    const second = replay()
+    const b = await lpPositions(second.client, AMM.owner, { mints: AMM.mints })
+    expect(second.calls).not.toContain('getProgramAccounts')
+    expect(b.map(numbers)).toEqual(a.map(numbers))
   })
 
   it('节点不支持 getProgramAccounts：报错里说明怎么绕过', async () => {

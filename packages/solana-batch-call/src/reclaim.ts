@@ -7,7 +7,7 @@
  * - Wrapped SOL 账户：关闭 = 解包，余额和租金一起退回
  * - 已清空的集中流动性仓位（Orca Whirlpool、Raydium CLMM：流动性、手续费、奖励都是 0）：关闭仓位账户并销毁 NFT。还有没领的手续费 / 奖励时列在 blocked，先用 /claim 领取
  */
-import { decodeAddress, findProgramAddress, isAddress } from './address.js'
+import { decodeAddress, findProgramAddress, InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { TOKEN_2022_PROGRAM_ID } from './constants.js'
 import { approvals, parseTokenAccountState, type TokenAccountApproval } from './approvals.js'
@@ -90,7 +90,7 @@ export interface JunkContext {
   risk: SolanaTokenRisk | null
 }
 
-export interface ReclaimQuery extends RequestOptions {
+export interface ReclaimableOptions extends RequestOptions {
   /** 只看这些 mint 的关联代币账户（免费公共节点也能用）；不传时列出全部代币账户（getTokenAccountsByOwner，需要支持它的节点） */
   mints?: readonly string[]
   /** 找垃圾币（有余额的代币），默认 true；false 只找空账户、Wrapped SOL 和空仓位 */
@@ -110,6 +110,9 @@ export interface ReclaimQuery extends RequestOptions {
   isJunk?: (context: JunkContext) => boolean | undefined
   fetch?: typeof fetch
 }
+
+/** @deprecated 改名为 ReclaimableOptions（与其他查询的 options 命名统一），旧名保留 */
+export type ReclaimQuery = ReclaimableOptions
 
 /** 垃圾特征里足以自动勾选的风险标记（只有这些：legit 的 RWA / 稳定币常有 permanent-delegate、transfer-hook，不能据此判断） */
 const JUNK_RISK_FLAGS = ['non-transferable', 'high-transfer-fee', 'paused']
@@ -160,16 +163,16 @@ function tokenItem(a: TokenAccountApproval, kind: ReclaimKind, extra: { selected
  * r.items.filter((i) => i.selected)                // 建议勾选的
  * ```
  */
-export async function reclaimable(client: SolanaClient, owner: string, query: ReclaimQuery = {}): Promise<Reclaimable> {
+export async function reclaimable(client: SolanaClient, owner: string, options: ReclaimableOptions = {}): Promise<Reclaimable> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
-  const { signal } = query
-  const maxJunkUsd = query.maxJunkUsd ?? 0.01
+  const { signal } = options
+  const maxJunkUsd = options.maxJunkUsd ?? 0.01
   if (!(maxJunkUsd >= 0)) {
     throw new RangeError(`maxJunkUsd must be >= 0: ${maxJunkUsd}`)
   }
-  const accounts = (await approvals(client, owner, { mints: query.mints, all: true, signal })).filter((a) => ownedBy(a, owner))
+  const accounts = (await approvals(client, owner, { mints: options.mints, all: true, signal })).filter((a) => ownedBy(a, owner))
   const items: ReclaimItem[] = []
   const blocked: ReclaimItem[] = []
   const warnings: string[] = []
@@ -190,11 +193,11 @@ export async function reclaimable(client: SolanaClient, owner: string, query: Re
     }
   }
 
-  if (query.positions ?? true) {
+  if (options.positions ?? true) {
     await scanPositions(client, accounts.filter(nft), push, signal)
   }
-  if ((query.junk ?? true) && rest.length) {
-    await scanJunk(client, rest, query, maxJunkUsd, push, warnings)
+  if ((options.junk ?? true) && rest.length) {
+    await scanJunk(client, rest, options, maxJunkUsd, push, warnings)
   }
 
   const byKind: Reclaimable['byKind'] = {}
@@ -245,20 +248,20 @@ async function scanPositions(client: SolanaClient, nfts: readonly TokenAccountAp
 async function scanJunk(
   client: SolanaClient,
   list: readonly TokenAccountApproval[],
-  query: ReclaimQuery,
+  options: ReclaimableOptions,
   maxJunkUsd: number,
   push: (item: ReclaimItem, blocker?: ReclaimBlocker) => void,
   warnings: string[],
 ): Promise<void> {
-  const { signal } = query
+  const { signal } = options
   const mints = [...new Set(list.map((a) => a.mint))]
-  const source = query.prices === false ? null : query.prices && query.prices !== true ? query.prices : defillamaPrices()
+  const source = options.prices === false ? null : options.prices && options.prices !== true ? options.prices : defillamaPrices()
   // 价格没查到（关闭 / 服务出错）时不知道哪些值钱：不自动勾选任何垃圾币
   let pricesOk = source !== null
   let priceMap = new Map<string, number>()
   if (source) {
     try {
-      const fetchFn = query.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
+      const fetchFn = options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
       priceMap = await source.prices({ mints, fetch: fetchFn, signal, client })
     } catch (err) {
       if (signal?.aborted) throw err
@@ -269,7 +272,7 @@ async function scanJunk(
     warnings.push('Prices are off: junk tokens are not auto-selected')
   }
   const risks = new Map<string, SolanaTokenRisk>()
-  if (query.risk ?? true) {
+  if (options.risk ?? true) {
     try {
       const found = await tokenRisks(client, mints, { signal })
       found.forEach((r, i) => risks.set(mints[i] as string, r))
@@ -282,7 +285,7 @@ async function scanJunk(
     const price = priceMap.get(a.mint) ?? null
     const usd = price !== null && a.formatted !== null ? Number(a.formatted) * price : null
     const risk = risks.get(a.mint) ?? null
-    const custom = query.isJunk?.({ account: a, price, usd, risk })
+    const custom = options.isJunk?.({ account: a, price, usd, risk })
     const valuable = usd !== null && usd > maxJunkUsd
     if (custom === false || (valuable && custom !== true)) continue
     const reasons: string[] = []
@@ -354,7 +357,7 @@ export interface ReclaimPlan {
  */
 export async function buildReclaim(client: SolanaClient, owner: string, items: readonly ReclaimItem[], options: BuildReclaimOptions = {}): Promise<ReclaimPlan> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
   const destination = options.destination ?? owner
   if (!isAddress(destination)) {

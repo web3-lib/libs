@@ -3,13 +3,13 @@
  * 打包规则同 batchCall（相邻的调用放进同一笔交易，不超过 1232 字节和 64 个账户）
  */
 import type { SolanaClient } from './client.js'
-import { isAddress } from './address.js'
+import { InvalidAddressError, isAddress } from './address.js'
 import type { SimulationResult } from './simulate.js'
 import type { BatchCallOptions } from './write/batch.js'
-import { MAX_COMPUTE_UNITS, setComputeUnitLimit, setComputeUnitPrice } from './write/instructions.js'
+import { packUnits } from './write/pack.js'
 import type { WriteResult } from './write/send.js'
 import type { SignerInput } from './write/signer.js'
-import { MAX_ACCOUNT_LOCKS, PACKET_DATA_SIZE, compileMessage, transactionSize, type Instruction } from './write/transaction.js'
+import type { Instruction } from './write/transaction.js'
 
 /** 一个调用：要签名的地址（代币账户 / 仓位的 owner）和原子执行的指令 */
 export interface PlannedCall {
@@ -17,29 +17,9 @@ export interface PlannedCall {
   instructions: Instruction[]
 }
 
-/** 把调用按顺序打包成交易，返回每笔交易包含的调用下标。单个调用放不进一笔交易时自己成一笔（发送时会报“transaction too large”） */
+/** 把调用按顺序打包成交易，返回每笔交易包含的调用下标。单个调用放不进一笔交易时自己成一笔（发送时会报“transaction too large”）；规则同 batchCall（packUnits） */
 export function packCalls(payer: string, calls: readonly PlannedCall[], batchSize = Number.POSITIVE_INFINITY): number[][] {
-  const packs: number[][] = []
-  let current: number[] = []
-  let instructions: Instruction[] = []
-  const fits = (list: readonly Instruction[]) => {
-    const probe = compileMessage(payer, [setComputeUnitLimit(MAX_COMPUTE_UNITS), setComputeUnitPrice(1n), ...list], '11111111111111111111111111111111')
-    return transactionSize(probe) <= PACKET_DATA_SIZE && probe.accountKeys.length <= MAX_ACCOUNT_LOCKS
-  }
-  calls.forEach((call, i) => {
-    const next = [...instructions, ...call.instructions]
-    if (current.length && (current.length >= batchSize || !fits(next))) {
-      packs.push(current)
-      current = []
-      instructions = []
-    }
-    current.push(i)
-    instructions.push(...call.instructions)
-  })
-  if (current.length) {
-    packs.push(current)
-  }
-  return packs
+  return packUnits(payer, calls, { batchSize }).map((pack) => pack.indices)
 }
 
 export interface PlanSimulationOptions {
@@ -76,7 +56,7 @@ export async function simulatePlan(client: SolanaClient, calls: readonly Planned
   }
   const payer = options.feePayer ?? first.owner
   if (!isAddress(payer)) {
-    throw new Error(`Invalid fee payer: ${payer}`)
+    throw new InvalidAddressError(`Invalid fee payer: ${payer}`, payer)
   }
   const { simulate } = await import('./simulate.js')
   const run = (list: readonly PlannedCall[]) =>

@@ -18,7 +18,7 @@ export function isAddress(value: unknown): value is string {
 export function decodeAddress(address: string): Uint8Array {
   const bytes = base58.decode(address)
   if (bytes.length !== 32) {
-    throw new Error(`Invalid Solana address: ${address}`)
+    throw new InvalidAddressError(`Invalid Solana address: ${address}`, address)
   }
   return bytes
 }
@@ -95,8 +95,28 @@ function concat(parts: Uint8Array[]): Uint8Array {
 const MAX_SEED_LENGTH = 32
 const MAX_SEEDS = 16
 
-// PDA 推导是纯计算但要做多次 sha256 + 曲线判断，结果缓存
+// PDA 推导是纯计算但要做多次 sha256 + 曲线判断，结果缓存（LRU：命中时移到最后，满了删最久没用的）
 const pdaCache = new Map<string, string>()
+const MAX_PDA_CACHE = 10_000
+
+const HEX = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'))
+
+/** 缓存键：程序地址 + 各种子的十六进制（比 base58 编码快得多；用 ',' 分隔，不同的种子划分不会撞键） */
+function pdaKey(seeds: readonly Uint8Array[], programId: string): string {
+  let key = programId
+  for (const seed of seeds) {
+    key += ','
+    for (let i = 0; i < seed.length; i++) {
+      key += HEX[seed[i] as number]
+    }
+  }
+  return key
+}
+
+/** 测试用：这组种子的 PDA 是否在缓存里 */
+export function isPdaCached(seeds: readonly Uint8Array[], programId: string): boolean {
+  return pdaCache.has(pdaKey(seeds, programId))
+}
 
 /**
  * 推导 PDA（与 web3.js PublicKey.findProgramAddressSync 相同），返回地址。
@@ -110,9 +130,11 @@ export function findProgramAddress(seeds: Uint8Array[], programId: string): stri
   if (seeds.length + 1 > MAX_SEEDS) {
     throw new TypeError('Max seeds exceeded')
   }
-  const key = `${programId}:${seeds.map((s) => encodeAddress(s)).join(',')}`
+  const key = pdaKey(seeds, programId)
   const cached = pdaCache.get(key)
   if (cached) {
+    pdaCache.delete(key)
+    pdaCache.set(key, cached)
     return cached
   }
   const program = decodeAddress(programId)
@@ -120,10 +142,10 @@ export function findProgramAddress(seeds: Uint8Array[], programId: string): stri
     const hash = sha256(concat([...seeds, new Uint8Array([bump]), program, PDA_MARKER]))
     if (!isOnCurve(hash)) {
       const address = encodeAddress(hash)
-      if (pdaCache.size > 10_000) {
-        pdaCache.clear()
-      }
       pdaCache.set(key, address)
+      if (pdaCache.size > MAX_PDA_CACHE) {
+        pdaCache.delete(pdaCache.keys().next().value as string)
+      }
       return address
     }
   }
@@ -150,4 +172,17 @@ export function getMetadataAddress(mint: string): string {
     [new TextEncoder().encode('metadata'), decodeAddress(METADATA_PROGRAM_ID), decodeAddress(mint)],
     METADATA_PROGRAM_ID,
   )
+}
+
+/** 地址不合法时抛出（继承 Error，message 与之前的普通 Error 相同；用 code / address 判断） */
+export class InvalidAddressError extends Error {
+  readonly code = 'INVALID_ADDRESS'
+  /** 不合法的那个值 */
+  readonly address: string
+
+  constructor(message: string, address: string) {
+    super(message)
+    this.name = 'InvalidAddressError'
+    this.address = address
+  }
 }

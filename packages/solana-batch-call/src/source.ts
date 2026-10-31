@@ -1,11 +1,11 @@
 import { DEFAULT_RPC_URLS, GENESIS_HASHES, type Cluster } from './constants.js'
-import { FallbackRpc, HttpRpc, type FallbackOptions, type HttpRpcOptions, type RpcTransport } from './rpc.js'
+import { FallbackRpc, HttpRpc, type FallbackOptions, type HttpRpcOptions, type RpcRequestOptions, type RpcTransport } from './rpc.js'
 
 /**
  * 节点来源（也可以传数组：主节点 + 备用节点）：
  * - RPC URL 字符串
  * - @solana/web3.js 的 Connection（使用其 rpcEndpoint）
- * - 自定义传输：实现 `request(method, params)` 的对象（如包一层 @solana/kit 的 rpc）
+ * - 自定义传输：实现 `request(method, params)` 的对象（如包一层 @solana/kit 的 rpc）；可选的第三个参数 `{ signal }` 用于取消
  */
 export type RpcSource = string | RpcTransport | { rpcEndpoint: string }
 
@@ -84,8 +84,8 @@ export class NetworkCheckedRpc implements RpcTransport {
     }
   }
 
-  async request<T = unknown>(method: string, params?: readonly unknown[]): Promise<T> {
-    const [checked, result] = await Promise.allSettled([this.#check(), this.inner.request<T>(method, params)])
+  async request<T = unknown>(method: string, params?: readonly unknown[], options?: RpcRequestOptions): Promise<T> {
+    const [checked, result] = await Promise.allSettled([this.#check(), options ? this.inner.request<T>(method, params, options) : this.inner.request<T>(method, params)])
     if (checked.status === 'rejected') {
       throw checked.reason
     }
@@ -102,10 +102,16 @@ export interface ResolvedSource {
   genesis: () => Promise<string>
 }
 
+export { clientSourceConfigs, type ClientSourceConfig } from './clientConfig.js'
+
+/**
+ * @param expectedGenesis 期望的创世哈希（如 sendRpc 要和 client 在同一个网络）：传了时总是校验节点所在网络，不一致时报 NetworkMismatchError
+ */
 export function resolveSource(
   source: RpcSource | readonly RpcSource[] | undefined,
   cluster: Cluster | undefined,
   options: SourceOptions = {},
+  expectedGenesis?: () => Promise<string>,
 ): ResolvedSource {
   const isDefault = source === undefined
   const list: readonly RpcSource[] = isDefault ? DEFAULT_RPC_URLS[cluster ?? 'mainnet'] : Array.isArray(source) ? source : [source as RpcSource]
@@ -118,6 +124,9 @@ export function resolveSource(
 
   let detecting: Promise<string> | null = null
   const genesis = (): Promise<string> => {
+    if (expectedGenesis) {
+      return expectedGenesis()
+    }
     if (cluster) {
       return Promise.resolve(GENESIS_HASHES[cluster])
     }
@@ -142,7 +151,7 @@ export function resolveSource(
   }
 
   // 内置节点本来就是按 cluster 选的，不校验；单个节点且没指定 cluster 时，期望值就是它自己，也不需要校验
-  const check = !isDefault && (multiple || cluster !== undefined)
+  const check = !isDefault && (multiple || cluster !== undefined || expectedGenesis !== undefined)
   const nodes = check ? raw.map((node) => new NetworkCheckedRpc(node, genesis)) : raw
   // 单个节点也包一层 FallbackRpc：统一 onRequest 事件和健康状态（单节点失败时抛原始错误）
   return { transport: new FallbackRpc(nodes, options), genesis }

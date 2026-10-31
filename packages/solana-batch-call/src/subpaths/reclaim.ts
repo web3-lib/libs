@@ -11,7 +11,7 @@
  * const { simulation, results } = await reclaim(client, key, r.items.filter((i) => i.selected))
  * ```
  */
-import { reclaimable, type Reclaimable, type ReclaimQuery } from '../reclaim.js'
+import { reclaimable, type Reclaimable, type ReclaimableOptions } from '../reclaim.js'
 import { resolve, type ShortcutOptions } from '../shortcuts.js'
 
 export {
@@ -28,6 +28,7 @@ export {
   type ReclaimKind,
   type ReclaimOptions,
   type ReclaimPlan,
+  type ReclaimableOptions,
   type ReclaimQuery,
   type ReclaimResult,
   type ReclaimSimulation,
@@ -37,7 +38,7 @@ export {
 export type { PlanSimulation } from '../batchPlan.js'
 export { burnChecked, closeAccount, harvestWithheldTokensToMint } from '../write/instructions.js'
 
-export interface GetReclaimableOptions extends ReclaimQuery, ShortcutOptions {}
+export interface GetReclaimableOptions extends ReclaimableOptions, ShortcutOptions {}
 
 /**
  * 扫描钱包里能回收租金的账户，节点参数与 getBalances 相同。默认列出全部代币账户（需要支持 getTokenAccountsByOwner 的节点），

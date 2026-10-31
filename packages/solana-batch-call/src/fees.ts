@@ -7,7 +7,7 @@ import { base64 } from '@scure/base'
 import { encodeAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { SOL_DECIMALS, SYSTEM_PROGRAM_ID } from './constants.js'
-import { formatUnits } from './layout.js'
+import { computeBudgetOf, formatUnits } from './layout.js'
 import type { InstructionInput } from './write/transaction.js'
 
 export type FeeLevel = 'slow' | 'normal' | 'fast'
@@ -156,14 +156,7 @@ export async function estimateCost(client: SolanaClient, input: CostInput, optio
     raw = base64.encode(bytes)
     signatures = message.signatures
     writable = [...message.writable, ...(await lookupWritable(client, message.lookups, signal))]
-    let limit: number | null = null
-    let price = 0n
-    for (const ix of message.instructions) {
-      if (ix.programId !== COMPUTE_BUDGET_PROGRAM_ID) continue
-      const view = new DataView(ix.data.buffer, ix.data.byteOffset, ix.data.byteLength)
-      if (ix.data[0] === 2 && ix.data.length >= 5) limit = view.getUint32(1, true)
-      if (ix.data[0] === 3 && ix.data.length >= 9) price = view.getBigUint64(1, true)
-    }
+    const { limit, price } = computeBudgetOf(message.instructions)
     const others = message.instructions.filter((ix) => ix.programId !== COMPUTE_BUDGET_PROGRAM_ID).length
     budget = { limit: Math.min(MAX_COMPUTE_UNITS, limit ?? DEFAULT_UNITS_PER_INSTRUCTION * others), price }
   } else {

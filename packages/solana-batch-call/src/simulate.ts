@@ -9,7 +9,7 @@ import type { RequestOptions, SolanaClient } from './client.js'
 import { NATIVE_MINT, SOL_DECIMALS, SYSTEM_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './constants.js'
 import { decodeInstruction, type DecodedInstruction } from './decode.js'
 import { classify, describe, type AssetDelta, type TxKind } from './describe.js'
-import { formatUnits, parseMint, type AccountInfo } from './layout.js'
+import { computeBudgetOf, formatUnits, parseMint, parseTokenAccountState, type AccountInfo } from './layout.js'
 import { BPF_LOADER_UPGRADEABLE, COMPUTE_BUDGET, PROGRAMS, programErrorName } from './programs.js'
 import type { SolanaPriceSource } from './price.js'
 import {
@@ -222,18 +222,7 @@ interface TokenState {
 function tokenState(snap: Snap | null): TokenState | null {
   const d = snap?.data
   if (!snap || !d || (snap.owner !== TOKEN_PROGRAM_ID && snap.owner !== TOKEN_2022_PROGRAM_ID)) return null
-  if (d.length !== 165 && !(d.length > 165 && d[165] === 2)) return null
-  const view = new DataView(d.buffer, d.byteOffset, d.byteLength)
-  const key = (o: number) => encodeAddress(d.slice(o, o + 32))
-  if (d[108] === 0) return null
-  return {
-    mint: key(0),
-    owner: key(32),
-    amount: view.getBigUint64(64, true),
-    delegate: view.getUint32(72, true) === 1 ? key(76) : null,
-    delegatedAmount: view.getBigUint64(121, true),
-    closeAuthority: view.getUint32(129, true) === 1 ? key(133) : null,
-  }
+  return parseTokenAccountState(d)
 }
 
 function mintAuthorities(snap: Snap | null): { mintAuthority: string | null; freezeAuthority: string | null } | null {
@@ -338,14 +327,7 @@ export async function simulate(client: SolanaClient, input: SimulateInput, optio
   }
 
   // 手续费：签名费 + 计算单元上限 × 单价
-  let limit: bigint | null = null
-  let price = 0n
-  for (const ix of tx.instructions) {
-    if (ix.programId !== COMPUTE_BUDGET) continue
-    const view = new DataView(ix.data.buffer, ix.data.byteOffset, ix.data.byteLength)
-    if (ix.data[0] === 2 && ix.data.length >= 5) limit = BigInt(view.getUint32(1, true))
-    if (ix.data[0] === 3 && ix.data.length >= 9) price = view.getBigUint64(1, true)
-  }
+  const { limit, price } = computeBudgetOf(tx.instructions)
   const nonBudget = tx.instructions.filter((ix) => ix.programId !== COMPUTE_BUDGET).length
   const units = BigInt(Math.min(1_400_000, limit !== null ? Number(limit) : 200_000 * nonBudget))
   const fee = 5000n * BigInt(tx.signers.length) + (price * units + 999_999n) / 1_000_000n

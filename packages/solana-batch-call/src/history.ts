@@ -5,12 +5,13 @@
  */
 import { base58 } from '@scure/base'
 
-import { isAddress } from './address.js'
+import { InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { NATIVE_MINT, SOL_DECIMALS, SYSTEM_PROGRAM_ID } from './constants.js'
 import { decodeInstruction, type DecodedInstruction } from './decode.js'
 import { classify, describe, type AssetDelta, type Classified } from './describe.js'
 import { formatUnits } from './layout.js'
+import { mapPool } from './util.js'
 
 export type ActivityType = 'transfer' | 'swap' | 'approve' | 'liquidity' | 'mint' | 'contract' | 'other'
 
@@ -95,7 +96,7 @@ const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`
  * ```
  */
 export async function history(client: SolanaClient, address: string, options: HistoryOptions = {}): Promise<HistoryPage> {
-  if (!isAddress(address)) throw new Error(`Invalid address: ${address}`)
+  if (!isAddress(address)) throw new InvalidAddressError(`Invalid address: ${address}`, address)
   const limit = options.limit ?? 20
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) throw new RangeError(`limit must be an integer between 1 and ${MAX_HISTORY_LIMIT}`)
   const sources = options.source === undefined ? [rpcHistory()] : Array.isArray(options.source) ? options.source : [options.source as HistorySource]
@@ -185,18 +186,6 @@ interface SignatureInfo {
   blockTime: number | null
 }
 
-async function pool<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i] as T)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
-  return results
-}
 
 /**
  * 默认数据源：getSignaturesForAddress（用 before 翻页）+ getTransaction（逐笔，json 编码、支持 v0）。
@@ -228,7 +217,7 @@ export function rpcHistory(options: RpcHistoryOptions = {}): HistorySource {
         let i = 0
         while (i < rows.length && items.length < limit && scanned < maxScan) {
           const chunk = rows.slice(i, i + Math.max(1, Math.min(limit - items.length, maxScan - scanned)))
-          const txs = await pool(chunk, concurrency, (row) => client.request<RawTransaction | null>('getTransaction', [row.signature, { encoding: 'json', maxSupportedTransactionVersion: MAX_TX_VERSION, commitment }], { signal }))
+          const txs = await mapPool(chunk, concurrency, (row) => client.request<RawTransaction | null>('getTransaction', [row.signature, { encoding: 'json', maxSupportedTransactionVersion: MAX_TX_VERSION, commitment }], { signal }))
           for (const [j, tx] of txs.entries()) {
             i++
             scanned++

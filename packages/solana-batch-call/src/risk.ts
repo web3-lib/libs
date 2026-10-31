@@ -3,7 +3,7 @@
  * 影响持有人的设置（转账手续费、永久授权、转账 hook、不可转让、新账户默认冻结、可暂停、保密转账、mint 可关闭等），一次 getMultipleAccounts 读完。
  * 可选：持币集中度（getTokenLargestAccounts，免费公共节点大多不支持）；能不能买、能不能卖用 tradeChecks（在主网模拟“买入 → 卖出”）
  */
-import { isAddress } from './address.js'
+import { InvalidAddressError, isAddress } from './address.js'
 import type { RequestOptions, SolanaClient } from './client.js'
 import { NATIVE_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from './constants.js'
 import { findExtension, parseMint, parseTransferFeeConfig, type AccountInfo } from './layout.js'
@@ -89,7 +89,7 @@ export interface TokenRisksOptions extends RequestOptions {
 export async function tokenRisks(client: SolanaClient, mints: readonly string[], options: TokenRisksOptions = {}): Promise<SolanaTokenRisk[]> {
   const keys = mints.map((m) => (client.isNativeMint(m) ? NATIVE_MINT : m))
   for (const m of keys) {
-    if (!isAddress(m)) throw new Error(`Invalid mint address: ${m}`)
+    if (!isAddress(m)) throw new InvalidAddressError(`Invalid mint address: ${m}`, m)
   }
   const unique = [...new Set(keys)]
   const accounts = await client.accounts([CLOCK_SYSVAR_ID, ...unique], { signal: options.signal })

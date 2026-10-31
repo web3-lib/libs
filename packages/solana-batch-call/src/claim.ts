@@ -4,7 +4,7 @@
  * 领取的指令就是 /liquidity 的 collectFees（手续费 + 全部奖励，SOL 自动解包、缺少的代币账户自动创建），这里只做批量和打包
  */
 import type { RequestOptions, SolanaClient } from './client.js'
-import { isAddress } from './address.js'
+import { InvalidAddressError, isAddress } from './address.js'
 import { buildCollectFees } from './liquidity/index.js'
 import type { SolanaLiquidityPlan } from './liquidity/types.js'
 import { lpPositions, type SolanaLpClmmPosition, type SolanaLpProtocol, type SolanaLpToken } from './lp.js'
@@ -13,7 +13,8 @@ import { simulatePlan, sendCalls, type PlanSimulation, type PlanSimulationOption
 import { formatUnits } from './layout.js'
 import type { SimulatedBalanceChange } from './simulate.js'
 import type { BatchCallOptions } from './write/batch.js'
-import { mapPool, type WriteResult } from './write/send.js'
+import { mapPool } from './util.js'
+import type { WriteResult } from './write/send.js'
 import type { SignerInput } from './write/signer.js'
 
 export type ClaimProtocol = Extract<SolanaLpProtocol, 'orca-whirlpool' | 'raydium-clmm'>
@@ -67,7 +68,7 @@ export interface Claimable {
   warnings: string[]
 }
 
-export interface ClaimQuery extends RequestOptions {
+export interface ClaimableOptions extends RequestOptions {
   /** 只看这些仓位 NFT 的 mint（读 ATA，免费公共节点也能用）；不传时列出全部代币账户（getTokenAccountsByOwner，需要支持它的节点） */
   mints?: readonly string[]
   /** 协议，默认两个都查 */
@@ -78,6 +79,9 @@ export interface ClaimQuery extends RequestOptions {
   now?: number
   fetch?: typeof fetch
 }
+
+/** @deprecated 改名为 ClaimableOptions（与其他查询的 options 命名统一），旧名保留 */
+export type ClaimQuery = ClaimableOptions
 
 const MAX_ERROR = 200
 
@@ -91,23 +95,23 @@ const MAX_ERROR = 200
  * c.positions[0].rewards              // [{ index: 0, symbol: 'RAY', formatted: '0.042698', usd: 0.083 }]
  * ```
  */
-export async function claimable(client: SolanaClient, owner: string, query: ClaimQuery = {}): Promise<Claimable> {
+export async function claimable(client: SolanaClient, owner: string, options: ClaimableOptions = {}): Promise<Claimable> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
-  const { signal } = query
-  const protocols: ClaimProtocol[] = query.protocols ? [...query.protocols] : ['orca-whirlpool', 'raydium-clmm']
+  const { signal } = options
+  const protocols: ClaimProtocol[] = options.protocols ? [...options.protocols] : ['orca-whirlpool', 'raydium-clmm']
   const list = (
-    await lpPositions(client, owner, { protocols, mints: query.mints, rewards: true, now: query.now, signal })
+    await lpPositions(client, owner, { protocols, mints: options.mints, rewards: true, now: options.now, signal })
   ).filter((p): p is SolanaLpClmmPosition => p.type === 'clmm')
 
   const warnings: string[] = []
   const mints = [...new Set(list.flatMap((p) => [p.token0.mint, p.token1.mint, ...(p.rewards ?? []).map((r) => r.mint)]))]
-  const source = query.prices === false ? null : query.prices && query.prices !== true ? query.prices : defillamaPrices()
+  const source = options.prices === false ? null : options.prices && options.prices !== true ? options.prices : defillamaPrices()
   let priceMap = new Map<string, number>()
   if (source && mints.length) {
     try {
-      priceMap = await source.prices({ mints, fetch: query.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args)), signal, client })
+      priceMap = await source.prices({ mints, fetch: options.fetch ?? ((...args: Parameters<typeof fetch>) => fetch(...args)), signal, client })
     } catch (err) {
       if (signal?.aborted) throw err
       warnings.push(`Price lookup failed (${(err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR)}): usd values are null`)
@@ -215,7 +219,7 @@ export interface ClaimPlan {
  */
 export async function buildClaimAll(client: SolanaClient, owner: string, positions: readonly ClaimTarget[], options: BuildClaimOptions = {}): Promise<ClaimPlan> {
   if (!isAddress(owner)) {
-    throw new Error(`Invalid owner address: ${owner}`)
+    throw new InvalidAddressError(`Invalid owner address: ${owner}`, owner)
   }
   const unique = [...new Map(positions.map((p) => [p.positionMint, p])).values()]
   const calls: ClaimCall[] = []
