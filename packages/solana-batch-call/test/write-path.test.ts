@@ -310,7 +310,7 @@ describe('packUnits 与旧实现分组一致', () => {
         expect(packCalls(payer, units.map((u) => ({ owner: payer, instructions: u.instructions })), batchSize)).toEqual(oldPackCalls(payer, units, batchSize))
       }
     }
-  })
+  }, 30_000) // 80 组 × 4 种 batchSize 反复编译消息，CI 上和其他包并行跑时超过默认的 5 秒
 
   it('审查复现：已有的非签名账户在后面的调用里以签名者出现两次，三个调用正好放进一笔', () => {
     const payer = keypair(62).address

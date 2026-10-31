@@ -24,7 +24,7 @@ describe('PDA 缓存', () => {
     expect(isPdaCached(hot, PROGRAM)).toBe(true)
     expect(isPdaCached(seed(9_999), PROGRAM)).toBe(true)
     expect(isPdaCached(seed(0), PROGRAM)).toBe(false) // 最久没用的被淘汰
-  })
+  }, 30_000) // 1 万次 PDA 推导（每次多轮 sha256 + 曲线判断），CI 上和其他包并行跑时超过默认的 5 秒
 })
 
 describe('InvalidAddressError', () => {
