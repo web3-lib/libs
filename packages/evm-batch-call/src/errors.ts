@@ -2,7 +2,7 @@ import { Interface, isError } from 'ethers'
 
 import type { Call } from './call.js'
 
-const errorInterface = new Interface(['error Error(string)', 'error Panic(uint256)'])
+const errorInterface = /*#__PURE__*/ new Interface(['error Error(string)', 'error Panic(uint256)'])
 
 /** 自动合并模式下，单条调用失败时 reject 的错误 */
 export class CallFailedError extends Error {

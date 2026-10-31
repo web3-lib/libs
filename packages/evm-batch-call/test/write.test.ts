@@ -372,6 +372,18 @@ describe('batchCollect', () => {
     expect(results[3]?.formatted).toBe('0.000858')
   })
 
+  it('不传 tokens（options 有默认值）时只扫空主币', async () => {
+    const { chain, multi } = setup()
+    chain.setNative(C, 10n ** 15n)
+    const { results, topUps } = await batchCollect(multi, [KEY_C], HOT, { ...fast })
+    expect(topUps).toEqual([])
+    expect(results.map((r) => [r.from, r.token, r.native, r.status])).toEqual([[C, NATIVE_TOKEN, true, 'confirmed']])
+    expect(chain.native(C)).toBe(0n)
+    expect(chain.native(HOT)).toBe(BigInt(results[0]!.amount))
+    // 三个参数的写法能通过类型检查
+    void (() => batchCollect(multi, [KEY_C], HOT))
+  })
+
   it('多个钱包需要补 gas 时用 Disperse 一笔补齐', async () => {
     const { chain, multi } = setup()
     const { results, topUps } = await batchCollect(multi, [KEY_B, KEY_C], HOT, { ...fast, tokens: [TOKEN], gasWallet: KEY_GAS })

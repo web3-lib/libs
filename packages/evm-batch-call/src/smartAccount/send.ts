@@ -1,9 +1,10 @@
 import { Interface, getAddress, getBytes, type Authorization } from 'ethers'
 
 import { decodeRevertReason } from '../errors.js'
+import { mapPool } from '../util.js'
 import { SIMPLE_7702_ACCOUNT, delegationOf, failedIndex, type BatchCallOptions, type NormalizedCall } from '../write/batch.js'
 import { WriteRpc, failureText } from '../write/rpc.js'
-import { FeeSource, emptyOutcome, mapPool, sendJobs, toWriteResult, type TxJob, type TxOutcome, type WriteResult } from '../write/send.js'
+import { FeeSource, emptyOutcome, sendJobs, toWriteResult, type TxJob, type TxOutcome, type WriteResult } from '../write/send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from '../write/signer.js'
 import { encodeExecuteBatch, resolveSimpleAccount, type SmartAccountKind } from './account.js'
 import { BundlerClient, PaymasterClient, type GasEstimate, type PaymasterHook } from './clients.js'
@@ -316,11 +317,13 @@ async function sendOp(ctx: Ctx, signer: ResolvedSigner, items: readonly Normaliz
   return result
 }
 
-const logInterface = new Interface(entryPointInterface.fragments)
+/** 解析 EntryPoint 日志的 Interface：用到时才建（`new Interface(x.fragments)` 带属性读取，PURE 注解摇不掉） */
+let logIface: Interface | undefined
+const logInterface = () => (logIface ??= new Interface(entryPointInterface.fragments))
 
 function parseLog(log: { topics: readonly string[]; data: string }) {
   try {
-    return logInterface.parseLog({ topics: [...log.topics], data: log.data })
+    return logInterface().parseLog({ topics: [...log.topics], data: log.data })
   } catch {
     return null
   }

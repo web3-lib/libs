@@ -1,6 +1,7 @@
 import { errorText, GetLogsError } from './fallback.js'
 import type { DiscoveredToken, TokenSource } from './owner.js'
 import { isTronChain } from './source.js'
+import { sleep } from './util.js'
 
 /** ERC20 / ERC721 的 Transfer(address,address,uint256) 事件 */
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
@@ -116,7 +117,6 @@ function errorTexts(err: unknown): string[] {
   return [errorText(err)]
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 从错误信息里找区块范围上限，如 “log query range must not exceed 25 blocks”“maximum block range: 5000” */
 function parseRangeLimit(texts: string[]): number | null {

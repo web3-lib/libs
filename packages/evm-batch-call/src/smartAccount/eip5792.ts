@@ -3,6 +3,7 @@ import { sendEach } from '../write/batch.js'
 import { WriteRpc, failureText } from '../write/rpc.js'
 import { quantity } from './userOp.js'
 import { emptyOutcome, toWriteResult, type TxOutcome, type WriteResult } from '../write/send.js'
+import { sleep } from '../util.js'
 
 /**
  * 浏览器钱包的提供者，三种都可以：EIP-1193 provider（`window.ethereum`，有 request）、
@@ -113,7 +114,7 @@ export async function waitForCalls(provider: Eip1193Like, id: string, options: {
       // 钱包暂时没有这个 id 的状态：下次再查
     }
     if (Date.now() >= deadline) break
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollInterval, Math.max(0, deadline - Date.now()))))
+    await sleep(Math.min(pollInterval, Math.max(0, deadline - Date.now())))
   }
   return last
 }

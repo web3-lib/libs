@@ -65,6 +65,7 @@ function fakeProvider(send: (method: string, params: unknown[]) => unknown): Pro
   return {
     rpc: { send: async (m: string, p: unknown[]) => send(m, p), getCode: async (a: string) => (a.toLowerCase() === A ? '0x' : '0x60') },
     getChainId: async () => 1,
+    nativeCurrency: async () => ({ decimals: 18, symbol: 'ETH', name: 'Ether' }),
     tokens: async (list: string[]) => list.map((t) => ({ ...meta[t.toLowerCase()], success: true })),
     balances: async () => [{ balance: '1000000000000000000' }],
   } as unknown as Provider

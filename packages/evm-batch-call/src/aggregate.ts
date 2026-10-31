@@ -1,11 +1,13 @@
-import { AbiCoder, Interface, concat, dataSlice, id, isError, type Provider as EthersProvider } from 'ethers'
+import { Interface, concat, dataSlice, id, isError, type Provider as EthersProvider } from 'ethers'
 
+import { decodeResult3Array, encodeCall3Array } from './abi3.js'
 import { encodeUint256, type CallRequest, type RawResult } from './call.js'
 import { DEPLOYLESS_MULTICALL3_BYTECODE } from './deployless.js'
 import { isExecutionError } from './errors.js'
-import { AllNodesFailedError, FallbackRpc, InvalidResultError, NodeBehindError, isBehind } from './fallback.js'
+import { AllNodesFailedError, FallbackRpc, InvalidResultError, NodeBehindError, isBehind, isRateLimited } from './fallback.js'
 import { MULTICALL3_ADDRESS, type Multicall } from './multicall.js'
 import { isTronChain } from './tron.js'
+import { anySignal, balanceOfNode, callNode, createLimiter, sleep } from './util.js'
 
 /**
  * 只用到 ethers Provider 的这几个方法：必需 call / getBalance；getLogs / getBlockNumber 可选（只有增量扫描 Transfer 事件时用到）。
@@ -24,7 +26,11 @@ export interface CallOverrides {
    * 只对最新状态的查询生效（指定了 blockTag 时忽略）
    */
   minBlock?: number
-  /** 取消查询：已取消时不发请求；执行中取消时立即 reject（合并在一起的底层请求继续完成，结果丢弃） */
+  /**
+   * 取消查询：已取消时不发请求；执行中取消时立即 reject（reason 为 signal.reason），还没发出的分片、节点切换、
+   * Tron 排队中的请求不再发出，Tron 的在途 fetch 直接中断（ethers 节点的在途请求无法中断，结果丢弃）。
+   * 与其他调用合并在同一个请求里时，只有所有调用方都取消才中止共享的请求
+   */
   signal?: AbortSignal
 }
 
@@ -36,9 +42,9 @@ export interface CallOverrides {
  */
 export type NativeBalanceMode = 'contract' | 'rpc' | { erc20: string }
 
-const balanceOfInterface = new Interface(['function balanceOf(address owner) view returns (uint256)'])
+const balanceOfInterface = /*#__PURE__*/ new Interface(['function balanceOf(address owner) view returns (uint256)'])
 
-export const multicall3Interface = new Interface([
+export const multicall3Interface = /*#__PURE__*/ new Interface([
   'function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)',
   'function getEthBalance(address addr) view returns (uint256 balance)',
   'function getBlockNumber() view returns (uint256 blockNumber)',
@@ -63,12 +69,18 @@ const ARB_BLOCK_NUMBER_REQUEST: CallRequest = {
   callData: '0xa3b1b31d', // arbBlockNumber()
 }
 
+/** 分片同时在途的 eth_call 默认上限（ProviderConfig.maxConcurrentChunks） */
+export const DEFAULT_MAX_CONCURRENT_CHUNKS = 4
+/** 拆成多片时，单片遇到限频 / 超时的重试次数和退避基数（毫秒，指数退避 + 随机抖动） */
+const CHUNK_RETRIES = 2
+const CHUNK_RETRY_BASE = 250
+
 /** minBlock：所有节点都落后时的重试间隔和总时长 */
 const MIN_BLOCK_RETRY_INTERVAL = 1000
 const MIN_BLOCK_DEADLINE = 10_000
 
-const CALL3_TUPLE = 'tuple(address target, bool allowFailure, bytes callData)[]'
-const RESULT_TUPLE = 'tuple(bool success, bytes returnData)[]'
+/** aggregate3((address,bool,bytes)[]) 的函数选择器 */
+export const AGGREGATE3_SELECTOR = '0x82ad56cb'
 /** error Aggregate3Result((bool,bytes)[]) */
 const AGGREGATE3_RESULT_SELECTOR = id('Aggregate3Result((bool,bytes)[])').slice(0, 10)
 
@@ -98,6 +110,7 @@ async function callAggregate3(
   tx: Parameters<EthersLikeProvider['call']>[0],
   requests: readonly CallRequest[],
   atLeast?: bigint,
+  signal?: AbortSignal,
 ): Promise<RawResult[]> {
   const decoded = new Map<string, RawResult[]>()
   // deployless 结果超过 24KB 时通过 revert Aggregate3Result 带回：同样校验区块号，落后时换成 NodeBehindError（FallbackRpc 换节点）
@@ -121,11 +134,11 @@ async function callAggregate3(
   }
   let data: string
   if (provider instanceof FallbackRpc) {
-    data = await provider.call(tx, { accept, inspectError })
+    data = await provider.call(tx, { accept, inspectError, signal })
   } else {
     // 其他 Provider 不支持校验参数：取到结果后自己校验（同样包括区块号）
     try {
-      data = await provider.call(tx)
+      data = await callNode(provider, tx, signal)
     } catch (err) {
       inspectError(err)
       throw err
@@ -156,7 +169,7 @@ function revertedResults(err: unknown): RawResult[] | null {
   }
   let results: RawResult[] | null
   try {
-    results = decodeAggregate3(AbiCoder.defaultAbiCoder().decode([RESULT_TUPLE], dataSlice(revertData, 4))[0])
+    results = decodeResult3Array(dataSlice(revertData, 4))
   } catch {
     results = null
   }
@@ -194,8 +207,12 @@ function decodeAggregate3Data(data: string): RawResult[] | null {
   if (!data || data === '0x') {
     return null
   }
+  // 与 Interface.decodeFunctionResult 一致：长度不是 32 的整数倍的视为无法解码
+  if ((data.length - 2) % 64 !== 0) {
+    return null
+  }
   try {
-    return decodeAggregate3(multicall3Interface.decodeFunctionResult('aggregate3', data)[0])
+    return decodeResult3Array(data)
   } catch {
     return null
   }
@@ -209,12 +226,88 @@ export interface AggregateContext {
   chunkSize: number
   /** 主币余额的读取方式，默认 'contract' */
   nativeBalance?: NativeBalanceMode
+  /** multicall 的 eth_call 同时在途上限，默认 DEFAULT_MAX_CONCURRENT_CHUNKS（4）；只在没传 gate 时用来创建闸门 */
+  maxConcurrentChunks?: number
+  /**
+   * multicall 的 eth_call（合约分片、deployless 切片、对半拆分）共用的并发闸门。Provider 创建上下文时建一次，
+   * 同一个 Provider 上的所有查询合计在途 ≤ maxConcurrentChunks；直接调 aggregate() 没传时每次查询各建一个
+   */
+  gate?: Gate
+  /** 逐条 eth_call 兜底（callPlain）的并发闸门，同样按 Provider 共用，默认上限 PLAIN_CONCURRENCY（50） */
+  plainGate?: Gate
+  /** 内部：拆成了多片，单片遇到限频时只重试这一片 */
+  retryChunks?: boolean
+}
+
+export type Gate = <T>(task: () => Promise<T>, signal?: AbortSignal) => Promise<T>
+
+/** Provider 级的并发闸门（AggregateContext 创建时调用一次） */
+export function createGates(maxConcurrentChunks?: number): Pick<AggregateContext, 'gate' | 'plainGate'> {
+  return { gate: createLimiter(maxConcurrentChunks ?? DEFAULT_MAX_CONCURRENT_CHUNKS), plainGate: createLimiter(PLAIN_CONCURRENCY) }
+}
+
+/**
+ * 发出一次 eth_call（一片）：经过并发闸门；拆成多片时遇到限频只重试这一片
+ * （最多 CHUNK_RETRIES 次，指数退避加随机抖动），仍失败按原样抛出。取消后不再重试。
+ * 超时不重试：ethers 已超时的 eth_call 无法中断，节点上还在算，再发只会叠加负载（FallbackRpc 已经会换节点）
+ */
+async function sendChunk<T>(ctx: AggregateContext, signal: AbortSignal | undefined, send: () => Promise<T>): Promise<T> {
+  const gate = ctx.gate ?? ((task: () => Promise<T>) => task())
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await gate(send, signal)
+    } catch (err) {
+      if (!ctx.retryChunks || attempt >= CHUNK_RETRIES || signal?.aborted || !isRateLimitedFailure(err)) {
+        throw err
+      }
+    }
+    const delay = CHUNK_RETRY_BASE * 2 ** attempt
+    await sleep(delay + Math.floor(Math.random() * delay), signal)
+  }
+}
+
+/** 限频（多节点时所有节点都是限频）：过一会儿重试可能成功 */
+function isRateLimitedFailure(err: unknown): boolean {
+  if (err instanceof AllNodesFailedError) {
+    return err.errors.length > 0 && err.errors.every((e) => isRateLimitedFailure(e.error))
+  }
+  return isRateLimited(err)
+}
+
+/** 闸门（Provider 创建的上下文里已有；直接调 aggregate() 时补上，递归 / 拆出去的部分沿用同一个） */
+function withGate(ctx: AggregateContext): AggregateContext {
+  return ctx.gate && ctx.plainGate ? ctx : { ...ctx, ...createGates(ctx.maxConcurrentChunks), ...(ctx.gate ? { gate: ctx.gate } : {}), ...(ctx.plainGate ? { plainGate: ctx.plainGate } : {}) }
+}
+
+/**
+ * 同时开始多个分片，限流交给闸门（ctx.gate / plainGate）。一片失败后，还在闸门排队的分片不再发出
+ * （传给分片的 signal 随之取消，在途的支持取消的请求也中断）；调用方取消时同样
+ */
+async function mapChunks<I, T>(items: readonly I[], signal: AbortSignal | undefined, run: (item: I, signal: AbortSignal) => Promise<T>): Promise<T[]> {
+  signal?.throwIfAborted()
+  const stop = new AbortController()
+  const scoped = anySignal([signal, stop.signal])
+  try {
+    return await Promise.all(
+      items.map((item) =>
+        run(item, scoped.signal as AbortSignal).catch((err: unknown) => {
+          if (!stop.signal.aborted) {
+            stop.abort(err)
+          }
+          throw err
+        }),
+      ),
+    )
+  } finally {
+    scoped.dispose()
+  }
 }
 
 /**
  * 执行一批请求，结果与 requests 一一对应。
  * 有 multicall 合约就调合约的 aggregate3，否则（或合约不可用时）走 deployless。
- * 超过 chunkSize 的请求会拆成多次 eth_call 并发执行（JsonRpcProvider 会把它们合到一个 HTTP batch 里）。
+ * 超过 chunkSize 的请求会拆成多次 eth_call 并发执行（JsonRpcProvider 会把它们合到一个 HTTP batch 里），
+ * 同时在途最多 maxConcurrentChunks 片；单片遇到限频 / 超时只重试这一片。overrides.signal 取消后不再发出新的分片。
  */
 export async function aggregate(
   ctx: AggregateContext,
@@ -228,16 +321,21 @@ export async function aggregate(
   if (mode !== 'contract' && requests.some((req) => req.ethBalanceOf !== undefined)) {
     return typeof mode === 'object' ? aggregate(ctx, requests.map((req) => toErc20Balance(req, mode.erc20)), overrides) : aggregateWithRpcBalances(ctx, requests, overrides)
   }
+  overrides.signal?.throwIfAborted()
+  const gated = withGate(ctx)
   const size = Math.max(1, ctx.chunkSize)
-  const run = overrides.minBlock !== undefined && isLatest(overrides.blockTag) ? aggregateChunkAtLeast : aggregateChunk
+  const atLeast = overrides.minBlock !== undefined && isLatest(overrides.blockTag)
+  const run = atLeast ? aggregateChunkAtLeast : aggregateChunk
   if (requests.length <= size) {
-    return run(ctx, requests, overrides)
+    return run(gated, requests, overrides)
   }
   const chunks: CallRequest[][] = []
   for (let i = 0; i < requests.length; i += size) {
     chunks.push(requests.slice(i, i + size))
   }
-  const results = await Promise.all(chunks.map((chunk) => run(ctx, chunk, overrides)))
+  // minBlock 有自己的等待重试（retryUntilCaughtUp），不再叠加单片重试
+  const chunkCtx = atLeast ? gated : { ...gated, retryChunks: true }
+  const results = await mapChunks(chunks, overrides.signal, (chunk, signal) => run(chunkCtx, chunk, { ...overrides, signal }))
   return results.flat()
 }
 
@@ -315,20 +413,6 @@ async function retryUntilCaughtUp<T>(overrides: CallOverrides, run: () => Promis
   }
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    const onAbort = () => {
-      clearTimeout(timer)
-      reject(signal?.reason)
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
 /** 区块号查询的结果；失败时为 null */
 function blockOf(result: RawResult | undefined): bigint | null {
   return result?.success && result.returnData !== '0x' ? BigInt(result.returnData) : null
@@ -361,13 +445,13 @@ async function aggregateWithRpcBalances(ctx: AggregateContext, requests: CallReq
     const blockTag = block === null ? overrides.blockTag : Number(block)
     // 已知限制：eth_getBalance 不返回区块号，没法校验。读余额的节点如果忽略区块参数、又比给出 blockTag 的节点落后，
     // 主币余额可能比代币余额早几个块（仍不早于 minBlock 的节点才会给出 blockTag 之后的区块）
-    const read = () => Promise.all(owners.map((owner) => ctx.provider.getBalance(owner, blockTag)))
+    const read = () => Promise.all(owners.map((owner) => balanceOfNode(ctx.provider, owner, blockTag, overrides.signal)))
     // 只有 minBlock 才等待重试（读的区块可能来自比当前节点更新的节点）；只要 withBlock 时出错照常抛出
     balances = await (overrides.minBlock !== undefined ? retryUntilCaughtUp(overrides, read) : read())
   } else {
     ;[otherResults, balances] = await Promise.all([
       aggregate(contractCtx, others, overrides),
-      Promise.all(owners.map((owner) => ctx.provider.getBalance(owner, overrides.blockTag))),
+      Promise.all(owners.map((owner) => balanceOfNode(ctx.provider, owner, overrides.blockTag, overrides.signal))),
     ])
   }
   let i = 0
@@ -445,12 +529,8 @@ async function callContract(
   }))
   try {
     // 地址上没有代码时 eth_call 返回 0x；空数据 / 无法解码的结果换下一个节点（节点偶发出错时别的节点能给出正确结果）
-    return await callAggregate3(
-      ctx.provider,
-      { to: multicall.address, data: multicall3Interface.encodeFunctionData('aggregate3', [calls]), blockTag: overrides.blockTag, from: overrides.from },
-      requests,
-      atLeast,
-    )
+    const tx = { to: multicall.address, data: `${AGGREGATE3_SELECTOR}${encodeCall3Array(calls)}`, blockTag: overrides.blockTag, from: overrides.from }
+    return await sendChunk(ctx, overrides.signal, () => callAggregate3(ctx.provider, tx, requests, atLeast, overrides.signal))
   } catch (err) {
     if (err instanceof InvalidResultError) {
       return 'invalid'
@@ -498,7 +578,13 @@ async function callDeployless(
   }
   try {
     const chunks = splitByInitcodeSize(requests)
-    const results = await Promise.all(chunks.map((chunk) => callDeploylessChunk(ctx, chunk, overrides, atLeast)))
+    let results: RawResult[][]
+    if (chunks.length === 1) {
+      results = [await callDeploylessChunk(ctx, requests, overrides, atLeast)]
+    } else {
+      const chunkCtx = atLeast === undefined ? { ...ctx, retryChunks: true } : ctx
+      results = await mapChunks(chunks, overrides.signal, (chunk, signal) => callDeploylessChunk(chunkCtx, chunk, { ...overrides, signal }, atLeast))
+    }
     invalidStrikes.delete(deploylessKey(ctx.chainId))
     return results.flat()
   } catch (err) {
@@ -541,7 +627,7 @@ const PLAIN_CONCURRENCY = 50
 
 /**
  * 最后的兜底：每条请求单独 eth_call（主币余额用 eth_getBalance），不需要链上有合约、也不要求节点支持合约创建。
- * 同时最多 PLAIN_CONCURRENCY 条在途，JsonRpcProvider / FallbackRpc 会把同一时刻的请求合到 HTTP batch 里。
+ * 同一个 Provider 上合计最多 PLAIN_CONCURRENCY 条在途（plainGate），JsonRpcProvider / FallbackRpc 会把同一时刻的请求合到 HTTP batch 里。
  * 区块号查询：blockTag 是数字（或 earliest）时就是它，最新状态时用 getBlockNumber 并把所有读取固定在这个区块上
  * （minBlock 时先校验再读，保证各条一致）；finalized / safe 这类标签没法换算成区块号，带区块号查询时报错
  */
@@ -567,31 +653,26 @@ async function callPlain(ctx: AggregateContext, requests: CallRequest[], overrid
       throw new Error(`Block number queries are not supported with blockTag '${String(blockTag)}' on a chain without deployless calls; pass a block number`)
     }
   }
-  const results: RawResult[] = new Array(requests.length)
-  let next = 0
-  const worker = async () => {
-    for (let i = next++; i < requests.length; i = next++) {
-      const req = requests[i] as CallRequest
-      if (req.blockNumber && block !== null) {
-        results[i] = { success: true, returnData: encodeUint256(block) }
-      } else if (req.ethBalanceOf !== undefined) {
-        results[i] = { success: true, returnData: encodeUint256(await provider.getBalance(req.ethBalanceOf, blockTag)) }
-      } else {
-        try {
-          results[i] = { success: true, returnData: await provider.call({ to: req.target, data: req.callData, blockTag, from: overrides.from }) }
-        } catch (err) {
-          // 合约自己 revert 才算这一条失败（allowFailure 为 false 时和 Multicall3 一样整批失败）；限频、超时等节点错误照常抛出
-          if (req.allowFailure && isExecutionError(err)) {
-            results[i] = { success: false, returnData: (err as { data?: string | null }).data ?? '0x' }
-          } else {
-            throw err
-          }
-        }
-      }
+  const gate = withGate(ctx).plainGate as Gate
+  // 并发由 Provider 级的 plainGate 限制；取消后、或一条出错（节点错误 / 不允许失败的 revert）整批失败后，排队中的不再发出
+  return mapChunks(requests, overrides.signal, async (req, signal): Promise<RawResult> => {
+    if (req.blockNumber && block !== null) {
+      return { success: true, returnData: encodeUint256(block) }
     }
-  }
-  await Promise.all(Array.from({ length: Math.min(PLAIN_CONCURRENCY, requests.length) }, worker))
-  return results
+    if (req.ethBalanceOf !== undefined) {
+      const owner = req.ethBalanceOf
+      return { success: true, returnData: encodeUint256(await gate(() => balanceOfNode(provider, owner, blockTag, signal), signal)) }
+    }
+    try {
+      return { success: true, returnData: await gate(() => callNode(provider, { to: req.target, data: req.callData, blockTag, from: overrides.from }, signal), signal) }
+    } catch (err) {
+      // 合约自己 revert 才算这一条失败（allowFailure 为 false 时和 Multicall3 一样整批失败）；限频、超时等节点错误照常抛出
+      if (req.allowFailure && isExecutionError(err)) {
+        return { success: false, returnData: (err as { data?: string | null }).data ?? '0x' }
+      }
+      throw err
+    }
+  })
 }
 
 async function callDeploylessChunk(
@@ -609,19 +690,17 @@ async function callDeploylessChunk(
           ...(requests.includes(BLOCK_NUMBER_REQUEST) ? [] : [BLOCK_NUMBER_REQUEST]),
           ...(requests.includes(ARB_BLOCK_NUMBER_REQUEST) ? [] : [ARB_BLOCK_NUMBER_REQUEST]),
         ]
-  const args = AbiCoder.defaultAbiCoder().encode(
-    [CALL3_TUPLE],
-    [
-      sent.map(({ target, allowFailure, callData, ethBalanceOf, blockNumber }) => ({
-        target: ethBalanceOf || blockNumber ? MULTICALL3_ADDRESS : target,
-        allowFailure,
-        callData,
-      })),
-    ],
-  )
+  const args = `0x${encodeCall3Array(
+    sent.map(({ target, allowFailure, callData, ethBalanceOf, blockNumber }) => ({
+      target: ethBalanceOf || blockNumber ? MULTICALL3_ADDRESS : target,
+      allowFailure,
+      callData,
+    })),
+  )}`
   try {
     // 返回空数据 / 无法解码（节点不支持合约创建式 eth_call，或偶发出错）时换下一个节点
-    const results = await callAggregate3(ctx.provider, { data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]), blockTag: overrides.blockTag, from: overrides.from }, sent, atLeast)
+    const tx = { data: concat([DEPLOYLESS_MULTICALL3_BYTECODE, args]), blockTag: overrides.blockTag, from: overrides.from }
+    const results = await sendChunk(ctx, overrides.signal, () => callAggregate3(ctx.provider, tx, sent, atLeast, overrides.signal))
     return results.slice(0, requests.length)
   } catch (err) {
     // 结果超过 24KB，合约通过 revert Aggregate3Result(...) 带回（区块号已在 callAggregate3 里校验）
@@ -631,6 +710,8 @@ async function callDeploylessChunk(
     }
     // 有的钱包 / 中间层会丢掉 revert 数据，大结果拿不回来：对半拆开重试，小批量能正常 return
     if (requests.length > 1 && isExecutionError(err) && !hasRevertData(err)) {
+      // 已取消就不再拆开重发
+      overrides.signal?.throwIfAborted()
       const mid = Math.ceil(requests.length / 2)
       const [a, b] = await Promise.all([
         callDeploylessChunk(ctx, requests.slice(0, mid), overrides, atLeast),
@@ -674,9 +755,6 @@ function hasRevertData(err: unknown): boolean {
   return Boolean(data && data !== '0x')
 }
 
-function decodeAggregate3(raw: ReadonlyArray<readonly [boolean, string]>): RawResult[] {
-  return raw.map(([success, returnData]) => ({ success, returnData }))
-}
 
 function isUsable(chainId: number, multicall: Multicall, blockTag?: BlockTag): boolean {
   const key = cacheKey(chainId, multicall.address)

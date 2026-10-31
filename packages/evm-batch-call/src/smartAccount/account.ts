@@ -14,11 +14,11 @@ export const SIMPLE_ACCOUNT_FACTORY_V08 = '0x13E9ed32155810FDbd067D4522C492D6f68
  */
 export type SmartAccountKind = 'simple' | 'simple7702'
 
-const factoryInterface = new Interface(['function createAccount(address owner, uint256 salt) returns (address)', 'function getAddress(address owner, uint256 salt) view returns (address)'])
+const factoryInterface = /*#__PURE__*/ new Interface(['function createAccount(address owner, uint256 salt) returns (address)', 'function getAddress(address owner, uint256 salt) view returns (address)'])
 
 const callTuple = '(address target, uint256 value, bytes data)[]'
-const batchV08 = new Interface([`function executeBatch(${callTuple} calls)`])
-const batchV07 = new Interface(['function executeBatch(address[] dest, uint256[] value, bytes[] func)'])
+const batchV08 = /*#__PURE__*/ new Interface([`function executeBatch(${callTuple} calls)`])
+const batchV07 = /*#__PURE__*/ new Interface(['function executeBatch(address[] dest, uint256[] value, bytes[] func)'])
 
 export interface BatchItem {
   to: string

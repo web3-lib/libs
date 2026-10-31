@@ -280,7 +280,7 @@ function innerCalls(method: string, parsed: ReadonlyArray<any>, chainId: number 
 // revert 原因
 // ---------------------------------------------------------------------------
 
-const customErrors = new Interface([
+const customErrors = /*#__PURE__*/ new Interface([
   // Universal Router
   'error ExecutionFailed(uint256 commandIndex, bytes message)',
   'error InvalidCommandType(uint256 commandType)',

@@ -48,8 +48,7 @@ const DIVIDEND_ABI = [
   'function withdrawableDividends(address) view returns (uint256)',
   'function withdrawnDividends(address) view returns (uint256)',
 ]
-const ERC20_META_ABI = ['function symbol() view returns (string)', 'function decimals() view returns (uint8)']
-const claimInterface = new Interface(['function withdrawDividendsFor(address user)'])
+const claimInterface = /*#__PURE__*/ new Interface(['function withdrawDividendsFor(address user)'])
 const ZERO = '0x0000000000000000000000000000000000000000'
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
@@ -192,10 +191,16 @@ export async function dividends(provider: Provider, owner: string, options: Divi
   if (!tokens.length) return result
 
   // 第一步：代币本身（余额、精度、Dividend 合约地址）
-  const stage1 = await provider.tryAll(tokens.flatMap((t) => [provider.contract(t, TOKEN_ABI).dividendContract(), provider.contract(t, TOKEN_ABI).balanceOf(holder), provider.contract(t, TOKEN_ABI).symbol(), provider.contract(t, TOKEN_ABI).decimals()]))
+  // symbol / decimals 走 tokens()（共用元数据缓存、兼容 bytes32），与 tryAll 同一 tick 发起，合成一次 multicall
+  const [stage1, tokenMeta, nativeCurrency] = await Promise.all([
+    provider.tryAll(tokens.flatMap((t) => [provider.contract(t, TOKEN_ABI).dividendContract(), provider.contract(t, TOKEN_ABI).balanceOf(holder)])),
+    provider.tokens(tokens, { fields: ['symbol', 'decimals'] }),
+    provider.nativeCurrency(),
+  ])
   const valid: Array<{ token: string; dividend: string; balance: bigint; symbol: string | null; decimals: number }> = []
   tokens.forEach((token, i) => {
-    const [dividend, balance, symbol, decimals] = stage1.slice(i * 4, i * 4 + 4) as [string | null, bigint | null, string | null, bigint | null]
+    const [dividend, balance] = stage1.slice(i * 2, i * 2 + 2) as [string | null, bigint | null]
+    const { symbol = null, decimals = null } = tokenMeta[i] ?? {}
     if (dividend === null || dividend === ZERO) {
       // 发现来的代币大多不是分红代币（普通 8888 代币等），只报告用户明确传入的
       if (explicit.has(token.toLowerCase())) result.unsupported.push({ token, reason: dividend === null ? 'no dividendContract() (not a Flap tax token V2/V3)' : 'token has no dividend contract' })
@@ -228,10 +233,14 @@ export async function dividends(provider: Provider, owner: string, options: Divi
   const assetTokens = [...new Set(rows.filter((r) => !isNative(r)).map((r) => r.dividendToken))]
   const meta = new Map<string, { symbol: string | null; decimals: number; known: boolean }>()
   if (assetTokens.length) {
-    const res = await provider.tryAll(assetTokens.flatMap((a) => [provider.contract(a, ERC20_META_ABI).symbol(), provider.contract(a, ERC20_META_ABI).decimals()]))
-    assetTokens.forEach((a, i) => meta.set(a, { symbol: typeof res[i * 2] === 'string' ? (res[i * 2] as string) : null, decimals: res[i * 2 + 1] === null ? 18 : Number(res[i * 2 + 1]), known: res[i * 2 + 1] !== null }))
+    const res = await provider.tokens(assetTokens, { fields: ['symbol', 'decimals'] })
+    assetTokens.forEach((a, i) => {
+      const d = res[i]
+      meta.set(a, { symbol: d?.symbol ?? null, decimals: d?.decimals ?? 18, known: d?.decimals !== null && d?.decimals !== undefined })
+    })
   }
-  const nativeMeta = { symbol: 'BNB', decimals: 18, known: true }
+  // 主币信息取 Provider（nativeSymbol 等配置 > 内置链信息表）
+  const nativeMeta = { symbol: nativeCurrency.symbol, decimals: nativeCurrency.decimals, known: true }
 
   const items: DividendItem[] = rows.map((r) => {
     const native = isNative(r)

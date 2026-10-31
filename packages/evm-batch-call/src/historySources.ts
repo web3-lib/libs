@@ -15,6 +15,7 @@ import { HttpStatusError, fetchJson } from './http.js'
 import type { HistoryAdapter, HistoryQuery, RawMove, RawPage, RawTx } from './history.js'
 import { errorText } from './fallback.js'
 import { isTronChain, toTronAddress } from './tron.js'
+import { sleep } from './util.js'
 
 export type HistorySource = 'blockscout' | 'etherscan' | 'rpc' | 'trongrid' | HistoryAdapter
 
@@ -45,7 +46,6 @@ const big = (v: unknown) => {
     return 0n
   }
 }
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 type Row = Record<string, string>
 

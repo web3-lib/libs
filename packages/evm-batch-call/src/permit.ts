@@ -116,7 +116,7 @@ const DAI_TYPES: Record<string, TypedDataField[]> = {
   ],
 }
 
-const tokenInterface = new Interface([
+const tokenInterface = /*#__PURE__*/ new Interface([
   'function name() view returns (string)',
   'function version() view returns (string)',
   'function DOMAIN_SEPARATOR() view returns (bytes32)',
@@ -233,7 +233,7 @@ export function permitCalldata(signed: SignedPermit): string {
 // Permit2
 // ---------------------------------------------------------------------------------------------
 
-const permit2Interface = new Interface([
+const permit2Interface = /*#__PURE__*/ new Interface([
   'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
   'function permit(address owner, ((address token, uint160 amount, uint48 expiration, uint48 nonce) details, address spender, uint256 sigDeadline) permitSingle, bytes signature)',
   'function permit(address owner, ((address token, uint160 amount, uint48 expiration, uint48 nonce)[] details, address spender, uint256 sigDeadline) permitBatch, bytes signature)',
@@ -270,7 +270,7 @@ async function allowanceNonce(provider: Provider, owner: string, token: string, 
 
 /** 构建 Permit2 AllowanceTransfer 的 PermitSingle（owner 签名后任何人可调 permit2.permit，之后 spender 可通过 Permit2 转走额度内的代币） */
 export async function buildPermit2Single(provider: Provider, params: Permit2AllowanceParams, options: PermitOptions = {}): Promise<Permit> {
-  return buildPermit2Batch(provider, { owner: params.owner, spender: params.spender, items: [{ token: params.token, amount: params.amount }], expirationAt: params.expirationAt }, options, true)
+  return buildPermit2(provider, { owner: params.owner, spender: params.spender, items: [{ token: params.token, amount: params.amount }], expirationAt: params.expirationAt }, options, 'permit2-single')
 }
 
 export interface Permit2BatchParams {
@@ -280,8 +280,22 @@ export interface Permit2BatchParams {
   expirationAt?: number
 }
 
-/** 构建 Permit2 的 PermitBatch（多个代币一个签名）；items 只有一个且 single 时为 PermitSingle */
-export async function buildPermit2Batch(provider: Provider, params: Permit2BatchParams, options: PermitOptions = {}, single = false): Promise<Permit> {
+/**
+ * 构建 Permit2 的 PermitBatch（多个代币一个签名）。
+ * @param single 已废弃：要 PermitSingle 请用 buildPermit2Single。为兼容保留：传 true 时按 PermitSingle 构建（只用 items[0]）
+ */
+export function buildPermit2Batch(
+  provider: Provider,
+  params: Permit2BatchParams,
+  options: PermitOptions = {},
+  /** @deprecated 用 buildPermit2Single */
+  single = false,
+): Promise<Permit> {
+  return buildPermit2(provider, params, options, single ? 'permit2-single' : 'permit2-batch')
+}
+
+/** PermitSingle / PermitBatch 共用的构建（内部） */
+async function buildPermit2(provider: Provider, params: Permit2BatchParams, options: PermitOptions, kind: 'permit2-single' | 'permit2-batch'): Promise<Permit> {
   const [owner, spender] = checkParty(params.owner, params.spender)
   if (!params.items.length) throw new Error('items must not be empty')
   if (new Set(params.items.map((i) => getAddress(i.token))).size !== params.items.length) throw new Error('duplicate tokens in items')
@@ -301,7 +315,7 @@ export async function buildPermit2Batch(provider: Provider, params: Permit2Batch
   const nonces = await Promise.all(tokens.map((t) => allowanceNonce(provider, owner, t, spender)))
   const details = tokens.map((token, k) => ({ token, amount: amounts[k] as bigint, expiration, nonce: nonces[k] as bigint }))
   const base = { chainId, owner, spender, tokens, amounts: amounts.map(String), deadline, expiration, nonces: nonces.map(String) }
-  if (single) {
+  if (kind === 'permit2-single') {
     return {
       ...base,
       kind: 'permit2-single',

@@ -282,7 +282,9 @@ describe('deployless 大批量', () => {
     })
     const multi = new Provider(UNKNOWN_CHAIN, mock)
     const a = new Contract(TOKEN_A, ERC20ABI)
-    expect(await multi.tryAll(Array.from({ length: 8 }, () => a.balanceOf(USER)))).toEqual(Array(8).fill(1n))
+    // tryAll 走自动合并队列，相同调用会去重：用不同的 owner 凑出 8 条不同的请求
+    const owners = Array.from({ length: 8 }, (_, i) => (i === 0 ? USER : `0x${(i + 1).toString(16).padStart(40, '0')}`))
+    expect(await multi.tryAll(owners.map((o) => a.balanceOf(o)))).toEqual([1n, ...Array(7).fill(0n)])
     expect(mock.calls.length).toBeGreaterThan(1)
   })
 
@@ -291,9 +293,12 @@ describe('deployless 大批量', () => {
     const mock = setup({ multicall: false })
     const multi = new Provider(UNKNOWN_CHAIN, mock)
     const a = new Contract(TOKEN_A, ERC20ABI)
-    const res = await multi.tryAll(Array.from({ length: 400 }, () => a.balanceOf(USER)))
+    // tryAll 走自动合并队列，相同调用会去重：用不同的 owner 凑出 400 条不同的请求
+    const owners = Array.from({ length: 400 }, (_, i) => (i === 0 ? USER : `0x${(i + 1).toString(16).padStart(40, '0')}`))
+    const res = await multi.tryAll(owners.map((o) => a.balanceOf(o)))
     expect(res).toHaveLength(400)
-    expect(res.every((r) => r === 10n ** 18n)).toBe(true)
+    expect(res[0]).toBe(10n ** 18n)
+    expect(res.slice(1).every((r) => r === 0n)).toBe(true)
     expect(mock.calls.length).toBeGreaterThan(1)
     for (const call of mock.calls) {
       expect((String(call.data).length - 2) / 2).toBeLessThanOrEqual(49152)

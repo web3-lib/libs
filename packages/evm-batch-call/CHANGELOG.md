@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+### 改进（读取链路，无破坏性变更）
+
+- `signal` 传到底层：还没发出的分片 / deployless 切片 / 逐条 eth_call 不再发出，`FallbackRpc` 取消后不再换节点（`stallTimeout` 的提前请求也不发，取消后的失败不计入节点健康状态），`TronProvider` 排队中的请求出队、429 退避停止、内置 fetch 直接中断。合并在一起的请求仍是所有调用方都取消才中止；取消后 reject 的仍是 `signal.reason`
+- 并发上限：同一个 Provider 上所有查询的 multicall eth_call（合约分片、deployless 按 48KB 的切片）合计同时在途最多 4 个，新增配置 `maxConcurrentChunks`；不支持 deployless 的链上逐条 eth_call 的兜底另有 Provider 级上限 50。某一片被限频只重试这一片（最多 2 次，指数退避加随机抖动），其他片的结果保留；超时不重发。一片失败后，还在排队的分片不再发出
+- `tryAll` 和全部允许失败的 `tryEach`（条数小于 `batch.maxSize` 和 `chunkSize` 时）改走自动合并队列：与同一时刻的 `call()` / `balances()` 等合成一次 multicall、相同调用去重；返回值和失败语义不变（有不允许失败的条目时仍直接请求）
+- approvals / dividends / 链上报价（`onchainPrices`）读代币 decimals / symbol 改走 `tokens()`：读写共用的元数据缓存、只查缺的字段、symbol 兼容 bytes32，并和同一步的其他调用合成一次 multicall
+- 新增 `provider.nativeCurrency()`（`{ decimals, symbol, name }`，配置 > 内置表 > Tron 6 位 / 其他 18 位）；simulate、history、`estimateCost`、dividends 改用它（之前不认 `nativeSymbol` 等配置，dividends 写死 BNB）；内置链信息表补上 Tron Shasta / Nile 测试网（TRX，6 位）
+- 新增导出类型 `NativeCurrencyInfo`、`TronCallOptions`；`TronProvider.call` / `getBalance` / `request` 和 `FallbackRpc.getBalance` 新增可选的 `{ signal }` 参数
+- 内部：并发池 `mapPool`、信号量、可取消的 `sleep` 统一放到 `util.ts`
+
+### 体积与性能
+
+- `/rewards`、`/liquidity` 发交易的代码（write/batch、签名、发送、智能账户）改为发送时才 `import()`，只查询 / 构建时不进首屏：/rewards 首屏约 119KB → 104KB，/liquidity 约 75KB → 50KB（esbuild splitting + minify，ethers 外置）
+- 模块级的 `new Interface([...])` 加 `/*#__PURE__*/`，没用到时可被树摇；链式调用 / 带属性读取的两处摇不掉，改成写死的 topic 常量和用到时再建
+- aggregate3 的编解码改为手写（只处理规范编码，其余退回 ethers，结果逐字节一致），`encodeCall` 缓存合约地址的 checksum：5000 / 10000 条 balanceOf 的主线程编码 + 解码约 1.4s / 3.0s → 0.29s / 0.54s（假节点）
+
+### API（新增，旧写法保留）
+
+- `batchCollect` 的 options 可以不传，`tokens` 不传时只扫空主币
+- `nftOwners` / `nftBalances` / `erc1155Balances` 的第三个参数改为 options（`NftOwnersOptions` / `NftBalancesOptions`，继承 CallOverrides），原来直接传 overrides 的写法不变
+- `buildPermit2Batch` 的第四个参数 `single` 标为 @deprecated（用 `buildPermit2Single`），仍然可用
+- Tron 的手续费估算新增 `type` / `total` / `totalFormatted` / `symbol`，与 `estimateCost` 的返回对齐
+- `tokenPrices` 取主币 symbol 改用 `provider.nativeCurrency()`（`nativeSymbol` 配置优先于内置链信息表）；`estimateCost` 的 Tron 分支按主币精度换算
+
+### 内部
+
+- `write/tron.ts` 拆成 `write/tron/` 下的 codec（protobuf 编码与签名）/ rpc（节点与资源计费）/ send（发送与确认）/ batch（批量操作），原文件保留为再导出入口
+- EVM 与 Tron 的批量转账 / 归集规划合并为 `write/plan.ts` 的 `planTransfers` / `planCollect` / `toCollectResult`，链差异（地址规范化、收款地址校验、数量解析、TRX 不能转 0）通过规则注入
+- `sleep` / 等待、ERC20 `Interface`、「支持取消的节点才传 `{ signal }`」的调用 helper、地址 checksum 缓存（LRU）各只留一份；`TronProvider` 的 `minInterval` 改为出队时分配时间点，排队中取消的请求不占时间槽；`isRejection` 改名为 `isNodeRejection`（节点拒绝）/ `isUserRejection`（用户拒签）
+
 ## 0.8.0
 
 ### 新功能

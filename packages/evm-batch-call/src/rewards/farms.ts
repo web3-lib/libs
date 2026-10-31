@@ -5,8 +5,7 @@ import type { Call } from '../call.js'
 import { evm, fmt, same, tokenInfo, type Ctx } from '../liquidity/common.js'
 import { lpPositionsByIds, type LpConcentratedPosition, type LpProtocol } from '../lp.js'
 import type { Provider, StaticCallItem, StaticCallResult } from '../provider.js'
-import { withSignal } from '../util.js'
-import { mapPool } from '../write/send.js'
+import { mapPool, withSignal } from '../util.js'
 import type { ClaimAmount, ClaimItem, FarmProtocol } from './types.js'
 
 const masterChef = (chainId: number, address: string): FarmProtocol => ({
@@ -46,7 +45,7 @@ export const FARM_PROTOCOLS: readonly FarmProtocol[] = [
   },
 ]
 
-export const masterChefInterface = new Interface([
+export const masterChefInterface = /*#__PURE__*/ new Interface([
   'function CAKE() view returns (address)',
   'function balanceOf(address user) view returns (uint256)',
   'function tokenOfOwnerByIndex(address user, uint256 index) view returns (uint256)',
@@ -55,7 +54,7 @@ export const masterChefInterface = new Interface([
   'function collectTo((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max) params, address to) returns (uint256 amount0, uint256 amount1)',
   'function multicall(bytes[] data) payable returns (bytes[] results)',
 ])
-export const gaugeInterface = new Interface(['function getReward(uint256 tokenId)'])
+export const gaugeInterface = /*#__PURE__*/ new Interface(['function getReward(uint256 tokenId)'])
 
 const voterAbi = ['function length() view returns (uint256)', 'function pools(uint256 index) view returns (address)', 'function gauges(address pool) view returns (address)']
 const gaugeAbi = ['function stakedValues(address depositor) view returns (uint256[])', 'function earned(address account, uint256 tokenId) view returns (uint256)', 'function rewardToken() view returns (address)']

@@ -1,3 +1,5 @@
+import { Interface } from 'ethers'
+
 import type { BoundCall, FailureReason } from './call.js'
 import type { BoundMethod, Contract } from './contract.js'
 
@@ -12,6 +14,9 @@ export const ERC20_ABI = [
   'function transfer(address to, uint256 amount) returns (bool)',
   'function transferFrom(address from, address to, uint256 amount) returns (bool)',
 ] as const
+
+/** ERC20_ABI 的 Interface（写模块编码 transfer / approve 共用一份；没用到时可被树摇） */
+export const erc20Interface = /*#__PURE__*/ new Interface(ERC20_ABI as unknown as string[])
 
 type Method<Args extends unknown[], T> = ((...params: Args) => BoundCall<T>) & Pick<BoundMethod<T>, 'staticCall'>
 

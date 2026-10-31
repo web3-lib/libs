@@ -21,7 +21,7 @@ import {
 } from './common.js'
 import type { IncreaseLiquidityParams, LiquidityPlan, LiquidityTx, NewPositionParams, PositionRef, RemoveLiquidityParams } from './types.js'
 
-export const npmInterface = new Interface([
+export const npmInterface = /*#__PURE__*/ new Interface([
   'function WETH9() view returns (address)',
   'function factory() view returns (address)',
   'function ownerOf(uint256 tokenId) view returns (address)',
@@ -38,12 +38,12 @@ export const npmInterface = new Interface([
   'function sweepToken(address token, uint256 amountMinimum, address recipient) payable',
   'function createAndInitializePoolIfNecessary(address token0, address token1, uint24 fee, uint160 sqrtPriceX96) payable returns (address pool)',
 ])
-const factoryInterface = new Interface([
+const factoryInterface = /*#__PURE__*/ new Interface([
   'function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)',
   'function feeAmountTickSpacing(uint24 fee) view returns (int24)',
 ])
 // 只声明前两个返回值：各分叉 slot0 后面的字段类型不同
-const poolInterface = new Interface([
+const poolInterface = /*#__PURE__*/ new Interface([
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick)',
   'function tickSpacing() view returns (int24)',
   'function feeGrowthGlobal0X128() view returns (uint256)',

@@ -64,6 +64,18 @@ export interface NftTokenUri {
   success: boolean
 }
 
+/** nftOwners 的选项（目前只有 CallOverrides 的字段；与 nftTokenUris / nftCollections 一样用 options 对象，之后加选项不改签名） */
+export interface NftOwnersOptions extends CallOverrides {}
+
+/** nftBalances / erc1155Balances 的选项（同 NftOwnersOptions） */
+export interface NftBalancesOptions extends CallOverrides {}
+
+/** 只取 CallOverrides 的字段传给 multicall（options 里将来新增的选项不混进去） */
+function overridesOf(options: CallOverrides = {}): CallOverrides {
+  const { blockTag, from, minBlock, signal } = options
+  return { blockTag, from, minBlock, signal }
+}
+
 export interface NftTokenUriOptions extends CallOverrides {
   /** 把 ipfs://xxx 转成 `${ipfsGateway}xxx`，如 'https://ipfs.io/ipfs/'。默认不转换 */
   ipfsGateway?: string
@@ -119,7 +131,8 @@ function expandUri(uri: string, tokenId: bigint, gateway?: string): string {
 }
 
 /** 批量查 ERC721 持有人（ownerOf），可混合多个集合：`await nftOwners(multi, [{ contract: BAYC, tokenId: 1 }])` */
-export async function nftOwners(provider: Provider, items: readonly NftItem[], overrides?: CallOverrides): Promise<NftOwner[]> {
+export async function nftOwners(provider: Provider, items: readonly NftItem[], options: NftOwnersOptions = {}): Promise<NftOwner[]> {
+  const overrides = overridesOf(options)
   // Tron 上返回 T 开头的地址，方便与 tronWeb.defaultAddress.base58 等直接比较
   const tron = isTronChain(await provider.getChainId())
   const ids = items.map((item) => parseTokenId(item.tokenId))
@@ -138,8 +151,9 @@ export async function nftBalances(
   provider: Provider,
   owner: string,
   collections: readonly string[],
-  overrides?: CallOverrides,
+  options: NftBalancesOptions = {},
 ): Promise<NftBalance[]> {
+  const overrides = overridesOf(options)
   const calls = collections.map((contract) => provider.contract(contract, ERC721_ABI as unknown as string[]).balanceOf(owner))
   const results = calls.length ? await provider.tryAll<bigint>(calls, overrides) : []
   return collections.map((contract, i) => {
@@ -153,8 +167,9 @@ export async function erc1155Balances(
   provider: Provider,
   owner: string,
   items: readonly NftItem[],
-  overrides?: CallOverrides,
+  options: NftBalancesOptions = {},
 ): Promise<Erc1155Balance[]> {
+  const overrides = overridesOf(options)
   const ids = items.map((item) => parseTokenId(item.tokenId))
   const calls = items.flatMap((item, i) =>
     ids[i] === null ? [] : [provider.contract(item.contract, ERC1155_ABI as unknown as string[]).balanceOf(owner, ids[i])],

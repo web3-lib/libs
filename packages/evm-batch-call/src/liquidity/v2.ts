@@ -5,15 +5,15 @@ import { sqrtBigInt } from '../lpMath.js'
 import { ZERO_ADDRESS, approvals, evm, isNative, makePlan, minus, out, parseAmount, protocolById, removeAmount, same, tokenInfo, type Ctx } from './common.js'
 import type { IncreaseLiquidityParams, LiquidityPlan, LiquidityTx, NewPositionParams, PositionRef, RemoveLiquidityParams } from './types.js'
 
-const routerInterface = new Interface([
+const routerInterface = /*#__PURE__*/ new Interface([
   'function WETH() view returns (address)',
   'function addLiquidity(address tokenA, address tokenB, uint256 amountADesired, uint256 amountBDesired, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB, uint256 liquidity)',
   'function addLiquidityETH(address token, uint256 amountTokenDesired, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) payable returns (uint256 amountToken, uint256 amountETH, uint256 liquidity)',
   'function removeLiquidity(address tokenA, address tokenB, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)',
   'function removeLiquidityETH(address token, uint256 liquidity, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) returns (uint256 amountToken, uint256 amountETH)',
 ])
-const factoryInterface = new Interface(['function getPair(address tokenA, address tokenB) view returns (address)', 'function feeTo() view returns (address)'])
-const pairInterface = new Interface([
+const factoryInterface = /*#__PURE__*/ new Interface(['function getPair(address tokenA, address tokenB) view returns (address)', 'function feeTo() view returns (address)'])
+const pairInterface = /*#__PURE__*/ new Interface([
   'function token0() view returns (address)',
   'function token1() view returns (address)',
   'function factory() view returns (address)',

@@ -4,7 +4,7 @@ import type { EthersLikeProvider } from './aggregate.js'
 import { detectChainIdOf } from './detect.js'
 import { isExecutionError } from './errors.js'
 import { emitRequest } from './events.js'
-import { TimeoutError, withTimeout } from './util.js'
+import { TimeoutError, balanceOfNode, callNode, markSignalAware, withTimeout } from './util.js'
 
 export interface FallbackOptions {
   /** 单个节点单次请求超时（毫秒），超时视为该节点故障并换下一个。默认 10000；<= 0 表示不限制 */
@@ -42,6 +42,17 @@ export interface CallValidation {
    * 校验出节点落后时抛 NodeBehindError，这样也能换节点，而不是当成确定性的合约错误直接返回）
    */
   inspectError?: (err: unknown) => void
+  /**
+   * 取消：不再换下一个节点（stallTimeout 的提前请求也不再发出），立即 reject signal.reason；
+   * 支持取消的节点（TronProvider）在途请求也会中断。取消后的失败不计入节点健康状态
+   */
+  signal?: AbortSignal
+}
+
+/** getBalance 的可选参数 */
+export interface FallbackRequestOptions {
+  /** 取消，同 CallValidation.signal */
+  signal?: AbortSignal
 }
 
 /** 节点的结果早于要求的区块（minBlock）：节点落后，换下一个节点，不冷却（节点是健康的，只是慢几个块） */
@@ -159,6 +170,8 @@ export class FallbackRpc implements EthersLikeProvider {
     this.#healthKeys = nodes.map((node, i) => info?.[i]?.key ?? node)
     this.#healthScopes = nodes.map((_, i) => info?.[i]?.chainId)
     this.#logsFailedAt = nodes.map(() => 0)
+    // call(tx, { signal }) / getBalance(address, blockTag, { signal }) 认取消参数：嵌套或被包装时 signal 也能传进来
+    markSignalAware(this)
   }
 
   get nodes(): readonly EthersLikeProvider[] {
@@ -168,10 +181,11 @@ export class FallbackRpc implements EthersLikeProvider {
   /** eth_call；validation.accept 返回 false 的结果视为这个节点不可用，换下一个节点（不冷却） */
   call(tx: TransactionRequest, validation?: CallValidation): Promise<string> {
     const accept = validation?.accept
+    const signal = validation?.signal
     return this.#run(
       'call',
       (node) =>
-        node.call(tx).then(
+        callNode(node, tx, signal).then(
           (result) => {
             if (accept && !accept(result)) {
               throw new InvalidResultError(result)
@@ -184,6 +198,7 @@ export class FallbackRpc implements EthersLikeProvider {
           },
         ),
       accept ? (validation?.maxInvalid ?? 2) : Number.POSITIVE_INFINITY,
+      signal,
     )
   }
 
@@ -199,8 +214,13 @@ export class FallbackRpc implements EthersLikeProvider {
     return healthOf(this.#healthKeys[index] as string | object, this.#healthScopes[index])
   }
 
-  getBalance(address: Parameters<EthersLikeProvider['getBalance']>[0], blockTag?: Parameters<EthersLikeProvider['getBalance']>[1]): Promise<bigint> {
-    return this.#run('getBalance', (node) => node.getBalance(address, blockTag))
+  getBalance(
+    address: Parameters<EthersLikeProvider['getBalance']>[0],
+    blockTag?: Parameters<EthersLikeProvider['getBalance']>[1],
+    options: FallbackRequestOptions = {},
+  ): Promise<bigint> {
+    const { signal } = options
+    return this.#run('getBalance', (node) => balanceOfNode(node, address, blockTag, signal), Number.POSITIVE_INFINITY, signal)
   }
 
   /** 按节点顺序探测 chainId（节点需实现 getChainId，见 detect.ts） */
@@ -318,8 +338,12 @@ export class FallbackRpc implements EthersLikeProvider {
    * 出错的节点进入冷却；超时只换节点，同一节点连续 3 次超时才冷却（冷启动的大批量查询偶尔慢，不应把健康的节点踢到后面）；
    * 节点还没有请求的区块（minBlock 重查时落后的节点）也只换节点、不冷却。
    * 确定性错误（revert、参数错误等）直接抛出；所有节点都失败时抛 AllNodesFailedError（单节点时抛原始错误）。
+   * signal 取消后不再请求下一个节点，立即 reject signal.reason；之后返回的失败不计入节点健康状态。
    */
-  #run<T>(method: string, fn: (node: EthersLikeProvider) => Promise<T>, maxInvalid = Number.POSITIVE_INFINITY): Promise<T> {
+  #run<T>(method: string, fn: (node: EthersLikeProvider) => Promise<T>, maxInvalid = Number.POSITIVE_INFINITY, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason)
+    }
     const order = this.#order()
     let invalid = 0
     return new Promise<T>((resolve, reject) => {
@@ -331,9 +355,15 @@ export class FallbackRpc implements EthersLikeProvider {
       const done = (index: number) => inFlight.splice(inFlight.findIndex((f) => f.index === index), 1)
       const errors: Array<{ node: string; error: unknown }> = []
       let stallTimer: ReturnType<typeof setTimeout> | undefined
+      const onAbort = () => {
+        if (!settled) {
+          finish(() => reject(signal?.reason))
+        }
+      }
       const finish = (done: () => void) => {
         settled = true
         clearTimeout(stallTimer)
+        signal?.removeEventListener('abort', onAbort)
         done()
       }
       const fail = () => {
@@ -341,7 +371,7 @@ export class FallbackRpc implements EthersLikeProvider {
         finish(() => reject(only ? errors[0]?.error : new AllNodesFailedError(errors)))
       }
       const launch = (): boolean => {
-        if (settled || next >= order.length) {
+        if (settled || next >= order.length || signal?.aborted) {
           return false
         }
         const attempt = next++
@@ -370,6 +400,10 @@ export class FallbackRpc implements EthersLikeProvider {
           (err: unknown) => {
             running--
             done(index)
+            // 调用方已取消：这次失败（多半就是取消本身）不代表节点有问题，不计入健康状态
+            if (signal?.aborted) {
+              return
+            }
             const deterministic = isDeterministic(err)
             if (err instanceof TimeoutError) {
               if (++health.timeouts >= TIMEOUTS_BEFORE_COOLDOWN) {
@@ -400,6 +434,7 @@ export class FallbackRpc implements EthersLikeProvider {
         )
         return true
       }
+      signal?.addEventListener('abort', onAbort, { once: true })
       launch()
     })
   }
@@ -470,7 +505,8 @@ function isAlive(err: unknown): boolean {
   return typeof (e?.error?.message ?? e?.info?.error?.message) === 'string' || isRateLimited(err)
 }
 
-function isRateLimited(err: unknown): boolean {
+/** 节点限频（429 / rate limit / too many requests） */
+export function isRateLimited(err: unknown): boolean {
   return /too many requests|rate.?limit|\b429\b/i.test(errorText(err))
 }
 
@@ -500,3 +536,4 @@ function isDeterministic(err: unknown): boolean {
   }
   return isExecutionError(err) || isError(err, 'ACTION_REJECTED') || isError(err, 'NUMERIC_FAULT')
 }
+

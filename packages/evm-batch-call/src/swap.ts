@@ -37,24 +37,24 @@ const V3_FEES = [100, 500, 2500, 3000, 10000] as const
 /** SwapRouter02 的特殊收款地址：留在 Router 里（之后 unwrapWETH9 换成主币） */
 const ADDRESS_THIS = '0x0000000000000000000000000000000000000002'
 
-const v2RouterInterface = new Interface([
+const v2RouterInterface = /*#__PURE__*/ new Interface([
   'function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[] amounts)',
   'function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)',
   'function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable',
   'function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline)',
 ])
-const permitInterface = new Interface(['function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)'])
-const v3FactoryInterface = new Interface(['function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)'])
-const v3PoolInterface = new Interface(['function liquidity() view returns (uint128)'])
+const permitInterface = /*#__PURE__*/ new Interface(['function permit(address owner, address spender, uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s)'])
+const v3FactoryInterface = /*#__PURE__*/ new Interface(['function getPool(address tokenA, address tokenB, uint24 fee) view returns (address)'])
+const v3PoolInterface = /*#__PURE__*/ new Interface(['function liquidity() view returns (uint128)'])
 /** QuoterV2 很费 gas（池子很薄时一次可达上千万）：每次 eth_call 只放几个报价，多个 eth_call 并发，避免超过节点的 gas 上限后被悄悄截掉 */
 const QUOTES_PER_CALL = 3
 /** 两跳时每一跳最多用几个手续费档位（按当前流动性取最大的） */
 const TIERS_PER_LEG = 2
-const quoterInterface = new Interface([
+const quoterInterface = /*#__PURE__*/ new Interface([
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
   'function quoteExactInput(bytes path, uint256 amountIn) returns (uint256 amountOut, uint160[] sqrtPriceX96AfterList, uint32[] initializedTicksCrossedList, uint256 gasEstimate)',
 ])
-const swapRouterInterface = new Interface([
+const swapRouterInterface = /*#__PURE__*/ new Interface([
   'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
   'function exactInput((bytes path, address recipient, uint256 amountIn, uint256 amountOutMinimum) params) payable returns (uint256 amountOut)',
   'function unwrapWETH9(uint256 amountMinimum, address recipient) payable',

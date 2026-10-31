@@ -8,7 +8,6 @@ import { formatUnits } from './erc20.js'
 import { fetchJson } from './http.js'
 import { LP_PROTOCOLS, LP_QUOTE_TOKENS, type LpProtocol } from './lp.js'
 import { sqrtPriceToPrice } from './lpMath.js'
-import { getNativeCurrency } from './chains.js'
 import type { Provider } from './provider.js'
 import { TRON_CHAIN_ID, isTronChain, toTronAddress } from './tron.js'
 
@@ -308,10 +307,14 @@ async function bestQuotes(
   // 2. 读池子（token0 和价格 / 储备、计价币在池子里的余额）和精度
   const decimalsOf = [...new Set([...tokens, ...anchors].map(key))]
   const original = new Map([...tokens, ...anchors].map((t) => [key(t), t]))
-  const state = await provider.tryAll(
-    [
-      ...decimalsOf.map((k) => provider.contract(original.get(k) as string, ERC20_ABI).decimals()),
-      ...pools.flatMap((p) =>
+  // 精度走 tokens()（共用元数据缓存，只查缓存里没有的）；与读池子的 tryAll 同一 tick 发起，合成一次 multicall
+  const [details, state] = await Promise.all([
+    provider.tokens(
+      decimalsOf.map((k) => original.get(k) as string),
+      { ...overrides, fields: ['decimals'] },
+    ),
+    provider.tryAll(
+      pools.flatMap((p) =>
         p.v3
           ? [
               provider.contract(p.address, V3_POOL_ABI).token0(),
@@ -321,12 +324,12 @@ async function bestQuotes(
             ]
           : [provider.contract(p.address, V2_PAIR_ABI).token0(), provider.contract(p.address, V2_PAIR_ABI).getReserves()],
       ),
-    ],
-    overrides,
-  )
-  const decimals = new Map(decimalsOf.map((k, i) => [k, state[i] === null || state[i] === undefined ? null : Number(state[i])]))
+      overrides,
+    ),
+  ])
+  const decimals = new Map(decimalsOf.map((k, i) => [k, details[i]?.decimals ?? null]))
   const best: Array<{ usd: number; depthUsd: number } | null> = tokens.map(() => null)
-  let offset = decimalsOf.length
+  let offset = 0
   for (const p of pools) {
     const size = p.v3 ? 4 : 2
     const [token0, second, third, liquidity] = state.slice(offset, offset + size) as [string | null, { 0: bigint; 1: bigint } | null, bigint | null, bigint | null]
@@ -404,9 +407,8 @@ export async function tokenPrices(provider: Provider, tokens: readonly string[],
   const fetchFn = fetchOption ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   const native = tokens.map((t) => provider.isNativeToken(t))
   const erc20 = [...new Set(tokens.filter((_, i) => !native[i]).map((t) => (isTronChain(chainId) ? toTronAddress(t) : t)))]
-  // 主币 symbol：内置链信息表，或 Provider 的 nativeSymbol 配置（不在表里的链）
-  const nativeIndex = native.indexOf(true)
-  const nativeSymbol = nativeIndex < 0 ? null : (getNativeCurrency(chainId)?.symbol ?? (await provider.tokens([tokens[nativeIndex] as string], { fields: ['symbol'] }))[0]?.symbol ?? null)
+  // 主币 symbol：Provider 的主币信息（nativeSymbol 配置 > 内置链信息表）
+  const nativeSymbol = native.includes(true) ? (await provider.nativeCurrency()).symbol : null
   const found = await runSources(sources, { chainId, tokens: erc20, nativeSymbol, fetch: fetchFn, provider }, onError)
   return tokens.map((token, i) => {
     const hit = found.get(native[i] ? 'native' : priceKeyOf(chainId, token))

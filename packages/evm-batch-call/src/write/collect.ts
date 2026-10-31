@@ -1,15 +1,15 @@
-import { Interface, getAddress, getBigInt, type BigNumberish } from 'ethers'
+import { getAddress, type BigNumberish } from 'ethers'
 
-import { ERC20_ABI, NATIVE_TOKEN, formatUnits, type TokenBalance } from '../erc20.js'
+import { NATIVE_TOKEN, erc20Interface, type TokenBalance } from '../erc20.js'
 import type { Provider } from '../provider.js'
 import { isExecutionError } from '../errors.js'
 import { WriteRpc, failureText, l1Fee } from './rpc.js'
-import { FeeSource, applyGasMultiplier, emptyOutcome, mapPool, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxFees, type TxJob, type TxOutcome, type WriteResult } from './send.js'
+import { mapPool } from '../util.js'
+import { EVM_RULES, collectTokens, planCollect, toCollectResult, type CollectItem } from './plan.js'
+import { FeeSource, applyGasMultiplier, emptyOutcome, sendJobs, type SendOptions, type TronSendOptions, type TxFees, type TxJob, type TxOutcome, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
 import { sendByMode, tronModule, type NormalizedCall } from './batch.js'
 import { batchTransfer, type TransferResult } from './transfer.js'
-
-const erc20Interface = new Interface(ERC20_ABI as unknown as string[])
 
 /** 预估代币转账 gas 失败（有的节点对没有主币的地址预估时报余额不足）时用的 gasLimit */
 const FALLBACK_TOKEN_GAS = 120_000n
@@ -17,9 +17,10 @@ const FALLBACK_TOKEN_GAS = 120_000n
 export interface BatchCollectOptions extends SendOptions, TronSendOptions {
   /**
    * 要归集的代币。包含主币（NATIVE_TOKEN）时，在代币归集确认后把剩余主币扣掉手续费全部转走
-   * （OP Stack / Scroll 链上同时预留 L1 数据费；EIP-1559 链上按 maxFeePerGas 预留，实际手续费更低，会留下少量零头）
+   * （OP Stack / Scroll 链上同时预留 L1 数据费；EIP-1559 链上按 maxFeePerGas 预留，实际手续费更低，会留下少量零头）。
+   * 不传时为 `[NATIVE_TOKEN]`：只扫空主币
    */
-  tokens: readonly string[]
+  tokens?: readonly string[]
   /**
    * 补 gas 的钱包：子钱包主币不够付归集手续费时，先从它转入刚好够用的主币（按 gasLimit × maxFeePerGas 计算，已含余量），确认后再归集。
    * 不传时，主币不够的子钱包对应的项 status 为 'failed'
@@ -58,16 +59,7 @@ export interface CollectResult {
   topUps: TransferResult[]
 }
 
-interface Item {
-  index: number
-  signer: ResolvedSigner
-  token: string
-  native: boolean
-  amount: bigint
-  decimals: number | null
-  gasLimit: bigint | null
-  result: CollectItemResult
-}
+type Item = CollectItem<ResolvedSigner>
 
 /**
  * 归集：多个钱包的代币 / 主币转到同一个地址。每个钱包内按代币顺序逐笔发送，钱包之间并发。
@@ -83,7 +75,7 @@ interface Item {
  * → 发代币归集 → （包含主币时）等代币归集确认、按最新余额扫空主币。
  * dryRun 时只做到预估，返回计划（补多少 gas、每笔 gasLimit），不发任何交易
  */
-export async function batchCollect(provider: Provider, wallets: readonly SignerInput[], to: string, options: BatchCollectOptions): Promise<CollectResult> {
+export async function batchCollect(provider: Provider, wallets: readonly SignerInput[], to: string, options: BatchCollectOptions = {}): Promise<CollectResult> {
   const tron = await tronModule(provider)
   if (tron) {
     return tron.tronBatchCollect(provider, wallets, to, options)
@@ -92,58 +84,10 @@ export async function batchCollect(provider: Provider, wallets: readonly SignerI
   const target = getAddress(to)
   const cache = new Map()
   const signers = await Promise.all(wallets.map((w) => resolveSigner(w, cache)))
-  const tokens = options.tokens
-  const nativeIndex = tokens.findIndex((t) => provider.isNativeToken(t))
-  const sweep = nativeIndex >= 0
   const multiplier = options.gasMultiplier
 
-  // 一次 multicall 读出所有钱包的代币余额 + 主币余额（算手续费要用）
-  const queryTokens = sweep ? [...tokens] : [...tokens, NATIVE_TOKEN]
-  const nativeAt = sweep ? nativeIndex : tokens.length
-  const balances = await provider.multiBalances(signers.map((s) => ({ owner: s.address, tokens: queryTokens })))
-  const minAmount = new Map(Object.entries(options.minAmount ?? {}).map(([k, v]) => [k.toLowerCase(), getBigInt(v)]))
-
-  const items: Item[] = []
-  const seen = new Set<string>()
-  signers.forEach((signer, w) => {
-    const duplicate = seen.has(signer.address.toLowerCase())
-    seen.add(signer.address.toLowerCase())
-    tokens.forEach((token, t) => {
-      const balance = balances[w]?.[t] as TokenBalance
-      const native = t === nativeIndex
-      const decimals = balance.success ? balance.decimals : null
-      const item: Item = {
-        index: w * tokens.length + t,
-        signer,
-        token: native ? token : getAddress(token),
-        native,
-        amount: native ? 0n : balance.success ? BigInt(balance.balance) : 0n,
-        decimals,
-        gasLimit: null,
-        result: null as unknown as CollectItemResult,
-      }
-      const skip = !balance.success
-        ? `cannot read balance: ${balance.error ?? 'unknown error'}`
-        : signer.address === target
-          ? 'skipped: wallet is the collect address'
-          : duplicate
-            ? 'skipped: duplicate wallet'
-            : !native && item.amount === 0n
-              ? 'skipped: zero balance'
-              : !native && item.amount < (minAmount.get(token.toLowerCase()) ?? 0n)
-                ? 'skipped: below minAmount'
-                : null
-      item.result = toCollectResult(item, target, emptyOutcome(skip ? (balance.success ? 'skipped' : 'failed') : 'skipped', skip))
-      items.push(item)
-    })
-  })
-  const results = items.map((i) => i.result)
-  const report = (item: Item, outcome: TxOutcome) => {
-    item.result = toCollectResult(item, target, outcome)
-    results[item.index] = item.result
-    options.onUpdate?.(item.result)
-  }
-  const active = (item: Item) => item.result.error === null
+  // 一次 multicall 读出所有钱包的代币余额 + 主币余额（算手续费要用），生成归集项和跳过原因（与 Tron 共用）
+  const { items, results, balances, nativeAt, sweep, report, active } = await planCollect(provider, signers, target, { ...options, tokens: collectTokens(options, provider) }, EVM_RULES)
 
   if (options.sponsor) {
     await collectSponsored(rpc, items, target, options, balances, nativeAt, results)
@@ -319,7 +263,7 @@ async function collectSponsored(
   for (const item of list) {
     if (item.native) {
       // 没有手续费要留：全部主币
-      const balance = balances[Math.floor(item.index / options.tokens.length)]?.[nativeAt] as TokenBalance
+      const balance = balances[item.wallet]?.[nativeAt] as TokenBalance
       item.amount = balance.success ? BigInt(balance.balance) : 0n
     }
   }
@@ -360,12 +304,3 @@ function feeFields(fee: TxFees) {
   return fee.type === 2 ? { type: 2, maxFeePerGas: fee.maxFeePerGas, maxPriorityFeePerGas: fee.maxPriorityFeePerGas } : { type: 0, gasPrice: fee.gasPrice }
 }
 
-function toCollectResult(item: Item, to: string, outcome: TxOutcome): CollectItemResult {
-  return {
-    ...toWriteResult(item.index, item.signer.address, to, outcome),
-    token: item.token,
-    native: item.native,
-    amount: item.amount.toString(),
-    formatted: item.decimals === null ? null : formatUnits(item.amount, item.decimals),
-  }
-}

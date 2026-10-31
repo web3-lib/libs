@@ -47,6 +47,8 @@ export {
   type NftOwner,
   type NftStandard,
   type NftTokenUri,
+  type NftBalancesOptions,
+  type NftOwnersOptions,
   type NftTokenUriOptions,
 } from '../nft.js'
 

@@ -45,9 +45,9 @@ export interface TokenRiskOptions {
 }
 
 const coder = AbiCoder.defaultAbiCoder()
-const factoryInterface = new Interface(['function getPair(address tokenA, address tokenB) view returns (address)'])
-const pairInterface = new Interface(['function token0() view returns (address)', 'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)'])
-const ownerInterface = new Interface(['function owner() view returns (address)'])
+const factoryInterface = /*#__PURE__*/ new Interface(['function getPair(address tokenA, address tokenB) view returns (address)'])
+const pairInterface = /*#__PURE__*/ new Interface(['function token0() view returns (address)', 'function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)'])
+const ownerInterface = /*#__PURE__*/ new Interface(['function owner() view returns (address)'])
 /** EIP-1967 的实现合约槽位：bytes32(uint256(keccak256('eip1967.proxy.implementation')) - 1) */
 const IMPLEMENTATION_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
 const STAGES: readonly ProbeStage[] = ['ok', 'buy-failed', 'transfer-failed', 'approve-failed', 'sell-failed']

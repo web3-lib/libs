@@ -45,6 +45,8 @@ export const NATIVE_CURRENCIES: Readonly<Record<number, NativeCurrency>> = {
   6666665: { name: 'SAFE(AnWang)', symbol: 'SAFE', decimals: 18 }, // Safe(AnWang) Mainnet
   20260131: { name: 'MetaAssets', symbol: 'MA', decimals: 18 }, // Meta Assets Chain
   728126428: { name: 'TRON', symbol: 'TRX', decimals: 6 }, // Tron
+  2494104990: { name: 'TRON', symbol: 'TRX', decimals: 6 }, // Tron Shasta 测试网
+  3448148188: { name: 'TRON', symbol: 'TRX', decimals: 6 }, // Tron Nile 测试网
 }
 
 export function getNativeCurrency(chainId: number): NativeCurrency | undefined {

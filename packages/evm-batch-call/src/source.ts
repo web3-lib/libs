@@ -4,7 +4,8 @@ import type { EthersLikeProvider } from './aggregate.js'
 import { canDetectChainId, detectChainId, detectChainIdCached } from './detect.js'
 import { FallbackRpc, type FallbackNodeInfo, type FallbackOptions } from './fallback.js'
 import { DEFAULT_RPC_URLS, DEFAULT_TRON_HOSTS } from './rpcNodes.js'
-import { TRON_CHAIN_ID, TronProvider, isTronChain, type TronProviderOptions, type TronWebLike } from './tron.js'
+import { TRON_CHAIN_ID, TronProvider, isTronChain, type TronCallOptions, type TronProviderOptions, type TronWebLike } from './tron.js'
+import { balanceOfNode, callNode, isSignalAware, markSignalAware } from './util.js'
 
 /**
  * 可传给 Provider 的底层连接（也可以传数组，按顺序作为主节点 + 备用节点）：
@@ -107,7 +108,12 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     readonly chainId: number,
     readonly source: ProviderSource,
     readonly timeout: number,
-  ) {}
+  ) {
+    // 内层节点支持取消（TronProvider）时，FallbackRpc 传来的 signal 原样转给它
+    if (isSignalAware(inner)) {
+      markSignalAware(this)
+    }
+  }
 
   async #check(): Promise<void> {
     if (this.#checkFailedAt && Date.now() - this.#checkFailedAt < CHECK_RETRY_INTERVAL) {
@@ -139,8 +145,8 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     return result.value
   }
 
-  call(tx: TransactionRequest): Promise<string> {
-    return this.#run(() => this.inner.call(tx))
+  call(tx: TransactionRequest, options?: TronCallOptions): Promise<string> {
+    return this.#run(() => callNode(this.inner, tx, options?.signal))
   }
 
   /** 对内层节点做任意请求，同样先校验链（写操作模块用） */
@@ -148,8 +154,8 @@ export class ChainCheckedProvider implements EthersLikeProvider {
     return this.#run(() => fn(this.inner))
   }
 
-  getBalance(...args: Parameters<EthersLikeProvider['getBalance']>): Promise<bigint> {
-    return this.#run(() => this.inner.getBalance(...args))
+  getBalance(address: Parameters<EthersLikeProvider['getBalance']>[0], blockTag?: Parameters<EthersLikeProvider['getBalance']>[1], options?: TronCallOptions): Promise<bigint> {
+    return this.#run(() => balanceOfNode(this.inner, address, blockTag, options?.signal))
   }
 
   getBlockNumber(): Promise<number> {

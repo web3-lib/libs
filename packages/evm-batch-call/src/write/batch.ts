@@ -16,7 +16,7 @@ import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.j
  */
 export const SIMPLE_7702_ACCOUNT = '0x4Cd241E8d1510e30b2076397afc7508Ae59C66c9'
 
-const accountInterface = new Interface([
+const accountInterface = /*#__PURE__*/ new Interface([
   'function executeBatch((address target, uint256 value, bytes data)[] calls)',
   'error ExecuteError(uint256 index, bytes reason)',
 ])

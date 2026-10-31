@@ -4,7 +4,6 @@
  */
 import type { BigNumberish } from 'ethers'
 
-import { getNativeCurrency } from './chains.js'
 import { formatUnits } from './erc20.js'
 import type { Provider } from './provider.js'
 import { isTronChain } from './tron.js'
@@ -160,7 +159,6 @@ export async function estimateCost(provider: Provider, call: CostCall, options: 
   if (isTronChain(chainId)) {
     const { tronEstimateCost } = await import('./write/tron.js')
     const c = await tronEstimateCost(provider, { from: call.from, to: call.to, ...(call.data ? { data: call.data } : {}), value })
-    const total = c.energyBurn + c.bandwidthBurn
     return {
       type: 'tron',
       energy: c.energy,
@@ -170,9 +168,10 @@ export async function estimateCost(provider: Provider, call: CostCall, options: 
       activates: c.activates,
       energyPrice: c.energyPrice.toString(),
       bandwidthPrice: c.bandwidthPrice.toString(),
-      total: total.toString(),
-      totalFormatted: formatUnits(total, 6),
-      symbol: 'TRX',
+      total: c.total.toString(),
+      // 精度取 Provider 的主币信息（Tron 主网 / 测试网都是 6 位）；symbol 是公开类型里的字面量 'TRX'，手续费也总是烧 TRX
+      totalFormatted: c.totalFormatted,
+      symbol: c.symbol,
     }
   }
   const { WriteRpc, l1Fee } = await import('./write/rpc.js')
@@ -186,7 +185,7 @@ export async function estimateCost(provider: Provider, call: CostCall, options: 
   const l1 = await l1Fee(rpc, { ...tx, from: undefined, gasLimit, ...feeFields })
   const fee = gasLimit * perGas
   const total = fee + l1
-  const native = getNativeCurrency(chainId)
+  const native = await provider.nativeCurrency()
   return {
     type: 'evm',
     gasLimit: gasLimit.toString(),
@@ -195,7 +194,7 @@ export async function estimateCost(provider: Provider, call: CostCall, options: 
     maxFee: (gasLimit * maxPerGas).toString(),
     l1Fee: l1.toString(),
     total: total.toString(),
-    totalFormatted: formatUnits(total, native?.decimals ?? 18),
-    symbol: native?.symbol ?? null,
+    totalFormatted: formatUnits(total, native.decimals),
+    symbol: native.symbol,
   }
 }

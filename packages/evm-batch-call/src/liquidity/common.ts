@@ -1,6 +1,6 @@
 import { Interface, MaxUint256, ZeroAddress, getAddress, getBigInt, parseUnits, type BigNumberish } from 'ethers'
 
-import { formatUnits } from '../erc20.js'
+import { erc20Interface, formatUnits } from '../erc20.js'
 import { LP_PROTOCOLS, type LpPosition, type LpProtocol, type LpToken, type LpVersion } from '../lp.js'
 import { sqrtPriceToPrice, tickToPrice } from '../lpMath.js'
 import type { Provider } from '../provider.js'
@@ -15,11 +15,9 @@ export const PERMIT2_ADDRESS = '0x000000000022D473030F116dDEE9F6B43aC78BA3'
 /** Permit2 授权的有效期：30 天（与 Uniswap 网页一致） */
 const PERMIT2_EXPIRATION = 30 * 24 * 3600
 
-export const erc20Interface = new Interface([
-  'function allowance(address owner, address spender) view returns (uint256)',
-  'function approve(address spender, uint256 amount) returns (bool)',
-])
-const permit2Interface = new Interface([
+/** ERC20 的 allowance / approve 编码：用 erc20.ts 共享的那份 Interface */
+export { erc20Interface }
+const permit2Interface = /*#__PURE__*/ new Interface([
   'function allowance(address owner, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)',
   'function approve(address token, address spender, uint160 amount, uint48 expiration)',
 ])

@@ -5,10 +5,8 @@ import { Actions, Planner, pmInterface } from '../liquidity/v4.js'
 import { LP_PROTOCOLS, lpPositions, type LpConcentratedPosition, type LpProtocol } from '../lp.js'
 import { tokenPrices } from '../price.js'
 import type { Provider } from '../provider.js'
-import { withSignal } from '../util.js'
-import { batchCall, tronModule } from '../write/batch.js'
-import { resolveSigner } from '../write/signer.js'
-import { mapPool } from '../write/send.js'
+import { mapPool, withSignal } from '../util.js'
+import { loadBatch, signerAddressOf } from '../write/lazy.js'
 import { FARM_PROTOCOLS, gaugeInterface, masterChefInterface, readGauges, readMasterChef } from './farms.js'
 import type {
   ClaimAllOptions,
@@ -395,8 +393,7 @@ async function preflight(provider: Provider, ctx: Ctx, items: ClaimItem[], trans
  * ```
  */
 export async function claimAll(provider: Provider, from: SignerInput, options: ClaimAllSendOptions = {}): Promise<ClaimResult> {
-  const tron = await tronModule(provider)
-  const owner = tron ? await tron.tronSignerAddress(from) : (await resolveSigner(from)).address
+  const owner = await signerAddressOf(provider, from)
   const plan = await buildClaimAll(provider, owner, options)
   if (!plan.transactions.length) {
     return { plan, results: [], status: 'skipped', claimed: [], failed: [] }
@@ -405,6 +402,8 @@ export async function claimAll(provider: Provider, from: SignerInput, options: C
     items: _items, protocols: _protocols, fees: _fees, rewards: _rewards, v4: _v4, farms: _farms, gauges: _gauges, maxPositions: _max, prices: _prices, onPriceError: _onPriceError,
     fetch: _fetch, recipient: _recipient, hookData: _hookData, minUsd: _minUsd, batchSize: _batchSize, simulate: _simulate, blockTag: _blockTag, from: _from, minBlock: _minBlock, ...send
   } = options
+  // 发送代码按需加载（只查询 / 构建时不进首屏）
+  const { batchCall } = await loadBatch()
   const written = await batchCall(
     provider,
     plan.transactions.map((tx) => ({ from, to: tx.to, data: tx.data, value: 0n })),

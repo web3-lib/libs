@@ -40,7 +40,7 @@ export function isFinalBroadcastError(err: unknown): boolean {
 }
 
 /** 节点明确拒绝了这笔交易（给出了 JSON-RPC 错误，或限频）：交易肯定没进这个节点的交易池 */
-function isRejection(err: unknown): boolean {
+function isNodeRejection(err: unknown): boolean {
   const e = err as { error?: { message?: unknown }; info?: { error?: { message?: unknown } } } | null
   const message = e?.error?.message ?? e?.info?.error?.message
   if (isFinalBroadcastError(err) || /too many requests|rate.?limit|\b429\b/i.test(errorText(err))) return true
@@ -197,7 +197,7 @@ export class WriteRpc {
             if (isError(err, 'NONCE_EXPIRED') || NONCE_USED_RE.test(text)) {
               return 'nonce-used' as const
             }
-            if (isRejection(err)) rejections++
+            if (isNodeRejection(err)) rejections++
             throw err
           } finally {
             pending--
@@ -227,7 +227,7 @@ export function signedHash(signed: string): string {
 // OP Stack（GasPriceOracle）与 Scroll（L1GasPriceOracle）的 L1 数据费：不包含在 gasLimit × gasPrice 里，单独从余额里扣。
 // 扫空主币余额时要预留，否则交易因余额不足失败
 const L1_ORACLES = ['0x420000000000000000000000000000000000000F', '0x5300000000000000000000000000000000000002'] as const
-const l1OracleInterface = new Interface(['function getL1Fee(bytes data) view returns (uint256)'])
+const l1OracleInterface = /*#__PURE__*/ new Interface(['function getL1Fee(bytes data) view returns (uint256)'])
 /** chainId → 这条链的 L1 费用预言机地址（null 表示不是这类链） */
 const l1OracleByChain = new Map<number, string | null>()
 

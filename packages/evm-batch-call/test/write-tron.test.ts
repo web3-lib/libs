@@ -172,6 +172,20 @@ describe('Tron batchCall', () => {
   })
 })
 
+describe('Tron 手续费估算', () => {
+  it('estimateCost 与 tronEstimateCost 返回形状对齐：合计、按主币精度换算的值、symbol', async () => {
+    const { multi } = setup()
+    const { estimateCost } = await import('../src/subpaths/fees.js')
+    const { tronEstimateCost } = await import('../src/write/tron.js')
+    const call = { from: A, to: R1, value: 1n }
+    const [cost, raw] = await Promise.all([estimateCost(multi, call), tronEstimateCost(multi, call)])
+    expect(raw).toMatchObject({ type: 'tron', symbol: 'TRX', total: raw.energyBurn + raw.bandwidthBurn })
+    expect(cost).toMatchObject({ type: 'tron', symbol: 'TRX', total: raw.total.toString(), totalFormatted: raw.totalFormatted })
+    expect(raw.activates).toBe(true)
+    expect(raw.totalFormatted).toBe((Number(raw.total) / 1e6).toString())
+  })
+})
+
 describe('Tron batchCollect', () => {
   it('没激活的钱包由补 gas 激活 → 归集代币 → 扫空 TRX', async () => {
     const { chain, multi } = setup()

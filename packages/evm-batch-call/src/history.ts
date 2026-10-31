@@ -5,7 +5,6 @@
  */
 import { getAddress } from 'ethers'
 
-import { getNativeCurrency } from './chains.js'
 import { formatUnits } from './erc20.js'
 import type { Provider } from './provider.js'
 import { decodeCalldata, type DecodedCall } from './simulateDecode.js'
@@ -322,8 +321,8 @@ export async function history(provider: Provider, address: string, options: Hist
   if (cursor !== undefined && !Number.isFinite(cursor)) throw new Error(`Invalid cursor: ${options.cursor}`)
   const adapters = historySourcesFor(chainId, options.source, options.apiKey)
   if (!adapters.length) throw new Error(`No history source for chain ${chainId}: pass options.source`)
-  const nativeCurrency = getNativeCurrency(chainId)
-  const ctx: BuildCtx = { chainId, tron, me: tron ? toEvmAddress(me).toLowerCase() : me, native: { symbol: nativeCurrency?.symbol ?? null, decimals: nativeCurrency?.decimals ?? 18 } }
+  const nativeCurrency = await provider.nativeCurrency()
+  const ctx: BuildCtx = { chainId, tron, me: tron ? toEvmAddress(me).toLowerCase() : me, native: { symbol: nativeCurrency.symbol, decimals: nativeCurrency.decimals } }
   const query = (endPos?: number): HistoryQuery => ({ address: me, chainId, limit: Math.max(limit, 10), ...(endPos === undefined ? {} : { endPos }), nft: options.nft ?? true, provider, fetch: options.fetch ?? fetch, ...(options.signal ? { signal: options.signal } : {}) })
 
   const items: Activity[] = []

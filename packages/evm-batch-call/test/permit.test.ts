@@ -142,6 +142,11 @@ describe('Permit2', () => {
     expect(decoded[1].details.amount).toBe(1000n)
 
     const batch = await buildPermit2Batch(p, { owner: OWNER, spender: SPENDER, items: [{ token: TOKEN, amount: 1n }, { token: DAI, amount: 2n }] })
+    // 已废弃的第四个参数 single 仍然可用：与 buildPermit2Single 的结果相同
+    const legacy = await buildPermit2Batch(p, { owner: OWNER, spender: SPENDER, items: [{ token: TOKEN, amount: 1000n }] }, {}, true)
+    expect(legacy.kind).toBe('permit2-single')
+    expect(legacy.typedData.primaryType).toBe(single.typedData.primaryType)
+    expect(legacy.typedData.message).toEqual(single.typedData.message)
     expect(verifyPermitSignature(batch, (await signPermit(wallet, batch)).signature)).toBe(true)
     await expect(buildPermit2Single(p, { token: TOKEN, owner: OWNER, spender: SPENDER, amount: MAX_UINT160 })).rejects.toThrow(/unlimited/)
     await expect(buildPermit2Single(p, { token: TOKEN, owner: OWNER, spender: SPENDER, amount: 0n })).rejects.toThrow(/blank/)

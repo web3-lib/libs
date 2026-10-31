@@ -1,5 +1,6 @@
 import { isError, type TransactionReceipt, type TransactionRequest } from 'ethers'
 
+import { mapPool, pause as sleep } from '../util.js'
 import { WriteRpc, failureText, revertData, signedHash, type FeeData } from './rpc.js'
 import type { ResolvedSigner } from './signer.js'
 
@@ -173,36 +174,6 @@ export function applyGasMultiplier(gas: bigint, multiplier = 1.2): bigint {
 
 export function emptyOutcome(status: WriteStatus, error: string | null = null): TxOutcome {
   return { status, hash: null, nonce: null, gasLimit: null, gasUsed: null, fee: null, blockNumber: null, error, revertData: null }
-}
-
-/** 并发数为 limit 的 map，结果按输入顺序 */
-export async function mapPool<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length)
-  let next = 0
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i] as T, i)
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker))
-  return results
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    const timer = setTimeout(done, ms)
-    function done() {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', done)
-      resolve()
-    }
-    signal?.addEventListener('abort', done, { once: true })
-  })
 }
 
 /** 已发出、等待确认的交易 */

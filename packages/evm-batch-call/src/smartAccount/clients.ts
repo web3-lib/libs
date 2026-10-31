@@ -1,5 +1,6 @@
 import { fetchJson } from '../http.js'
 import { DUMMY_SIGNATURE, hexToBigInt, userOpToRpc, type UserOperation } from './userOp.js'
+import { sleep } from '../util.js'
 
 export interface RpcClientOptions {
   /** 自定义 fetch（测试、代理） */
@@ -129,7 +130,7 @@ export class BundlerClient {
       if (Date.now() >= deadline) {
         break
       }
-      await new Promise((resolve) => setTimeout(resolve, Math.min(pollInterval, Math.max(0, deadline - Date.now()))))
+      await sleep(Math.min(pollInterval, Math.max(0, deadline - Date.now())))
     }
     return null
   }

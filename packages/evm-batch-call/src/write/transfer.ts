@@ -1,8 +1,9 @@
-import { Interface, getAddress, getBigInt, parseUnits, type BigNumberish } from 'ethers'
+import { Interface, getAddress, type BigNumberish } from 'ethers'
 
-import { ERC20_ABI, NATIVE_TOKEN, formatUnits } from '../erc20.js'
+import { erc20Interface, formatUnits } from '../erc20.js'
 import type { Provider } from '../provider.js'
 import { sendByMode, tronModule, type BatchCallOptions, type NormalizedCall } from './batch.js'
+import { EVM_RULES, planTransfers, type PlannedTransfer } from './plan.js'
 import { WriteRpc } from './rpc.js'
 import { emptyOutcome, sendJobs, toWriteResult, type SendOptions, type TronSendOptions, type TxJob, type TxOutcome, type WriteResult } from './send.js'
 import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.js'
@@ -13,11 +14,10 @@ import { resolveSigner, type ResolvedSigner, type SignerInput } from './signer.j
  */
 export const DISPERSE_ADDRESS = '0xD152f549545093347A162Dce210e7293f1452150'
 
-const disperseInterface = new Interface([
+const disperseInterface = /*#__PURE__*/ new Interface([
   'function disperseEther(address[] recipients, uint256[] values) payable',
   'function disperseToken(address token, address[] recipients, uint256[] values)',
 ])
-const erc20Interface = new Interface(ERC20_ABI as unknown as string[])
 
 /** 一个收款项：amount（最小单位）和 formatted（按精度换算后，如 '1.5'）二选一 */
 export interface TransferItem {
@@ -80,14 +80,7 @@ export interface ApproveResult extends Omit<WriteResult, 'index'> {
 }
 
 /** 解析后的收款项 */
-interface Planned {
-  index: number
-  to: string
-  token: string
-  native: boolean
-  amount: bigint
-  decimals: number | null
-}
+type Planned = PlannedTransfer
 
 /** 链上有没有 Disperse 合约（按 chainId + 地址缓存） */
 const disperseDeployed = new Map<string, boolean>()
@@ -138,55 +131,11 @@ export async function batchTransfer(provider: Provider, from: SignerInput, recip
     const { getSimpleAccountAddress } = await import('../smartAccount/account.js')
     holder = await getSimpleAccountAddress(rpc, signer.address, options.smartAccount?.entryPoint ?? '0.7', options.smartAccount?.salt, options.smartAccount?.factory)
   }
-  const planned = await plan(provider, holder, recipients, options)
+  const planned = await planTransfers(provider, holder, recipients, options, EVM_RULES)
   if (mode !== 'disperse') {
     return sendDirect(rpc, signer, planned, mode, options)
   }
   return sendDisperse(rpc, provider, signer, planned, options)
-}
-
-/** 解析数量（formatted 按精度换算）并检查余额 */
-async function plan(provider: Provider, owner: string, recipients: readonly TransferItem[], options: BatchTransferOptions): Promise<Planned[]> {
-  const defaultToken = options.token ?? NATIVE_TOKEN
-  const tokens = [...new Set(recipients.map((r) => (r.token ?? defaultToken).toLowerCase()))]
-  const balances = tokens.length ? await provider.balances(owner, tokens) : []
-  const info = new Map(balances.map((b, i) => [tokens[i] as string, b]))
-  const planned = recipients.map((item, index): Planned => {
-    const tokenKey = (item.token ?? defaultToken).toLowerCase()
-    const balance = info.get(tokenKey)
-    const native = provider.isNativeToken(tokenKey)
-    const decimals = balance?.success ? balance.decimals : null
-    if ((item.amount === undefined) === (item.formatted === undefined)) {
-      throw new Error(`recipients[${index}]: pass exactly one of amount / formatted`)
-    }
-    let amount: bigint
-    if (item.formatted !== undefined) {
-      if (decimals === null) {
-        throw new Error(`recipients[${index}]: cannot read decimals of ${item.token ?? defaultToken}, pass amount instead of formatted`)
-      }
-      amount = parseUnits(item.formatted, decimals)
-    } else {
-      amount = getBigInt(item.amount as BigNumberish)
-    }
-    if (amount < 0n) {
-      throw new Error(`recipients[${index}]: amount must not be negative`)
-    }
-    return { index, to: getAddress(item.to), token: native ? (item.token ?? defaultToken) : getAddress(tokenKey), native, amount, decimals }
-  })
-  if (options.checkBalance ?? true) {
-    const totals = new Map<string, bigint>()
-    planned.forEach((p) => totals.set(p.token.toLowerCase(), (totals.get(p.token.toLowerCase()) ?? 0n) + p.amount))
-    for (const [token, total] of totals) {
-      const balance = info.get(token)
-      if (!balance?.success) {
-        throw new Error(`Cannot read the balance of ${token} (${balance?.error ?? 'unknown error'}); pass checkBalance: false to skip the check`)
-      }
-      if (BigInt(balance.balance) < total) {
-        throw new Error(`Insufficient balance of ${token}: need ${total}, have ${balance.balance}`)
-      }
-    }
-  }
-  return planned
 }
 
 /** 收款项对应的调用：主币直接转，代币调 transfer */

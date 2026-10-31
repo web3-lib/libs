@@ -10,7 +10,6 @@ import { getBigInt, id, toBeHex, type BigNumberish } from 'ethers'
 
 import { knownSpenders } from './approvals.js'
 import type { BlockTag } from './aggregate.js'
-import { getNativeCurrency } from './chains.js'
 import { NATIVE_TOKEN, UNLIMITED_ALLOWANCE_THRESHOLD, formatUnits } from './erc20.js'
 import { isExecutionError } from './errors.js'
 import { errorText } from './fallback.js'
@@ -401,9 +400,12 @@ const outAddr = (ctx: Ctx, a: string) => (ctx.tron && a !== 'native' ? toTronAdd
 async function loadMeta(ctx: Ctx, assets: readonly string[]): Promise<void> {
   const want = [...new Set(assets)].filter((a) => !ctx.meta.has(a))
   if (!want.length) return
-  const native = getNativeCurrency(ctx.chainId)
   const tokens = want.filter((a) => a !== 'native')
-  if (want.includes('native')) ctx.meta.set('native', { symbol: native?.symbol ?? null, decimals: native?.decimals ?? 18 })
+  if (want.includes('native')) {
+    // 主币信息取 Provider（nativeSymbol 等配置 > 内置链信息表 > Tron 6 位 / 其他 18 位）
+    const native = await ctx.provider.nativeCurrency()
+    ctx.meta.set('native', { symbol: native.symbol, decimals: native.decimals })
+  }
   if (!tokens.length) return
   const details = await ctx.provider.tokens(tokens.map((a) => outAddr(ctx, a)), { fields: ['symbol', 'decimals'] }).catch(() => [])
   tokens.forEach((a, i) => {

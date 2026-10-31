@@ -4,7 +4,7 @@
  */
 import { Interface } from 'ethers'
 
-import { formatUnits } from './erc20.js'
+import { erc20Interface, formatUnits } from './erc20.js'
 import { LP_PROTOCOLS } from './lp.js'
 import type { Provider } from './provider.js'
 import { runLogScan, type LogScanProgress } from './scan.js'
@@ -220,19 +220,22 @@ export async function approvals(provider: Provider, owner: string, query: Approv
   const calls = [
     ...pairs.map((p) => provider.contract(p.token, ERC20_ABI).allowance(owner, p.spender)),
     ...permitPairs.map((p) => provider.contract(PERMIT2_ADDRESS, PERMIT2_ABI).allowance(owner, p.token, p.spender)),
-    ...tokens.flatMap((t) => [provider.contract(t, ERC20_ABI).decimals(), provider.contract(t, ERC20_ABI).symbol()]),
     ...nftPairs.map((p) => provider.contract(p.collection, NFT_ABI).isApprovedForAll(owner, p.operator)),
   ]
-  const results = calls.length ? await provider.tryAll(calls) : []
+  // 代币精度 / symbol 走 tokens()：读写共用的元数据缓存、只查缺的字段、兼容 bytes32 symbol；同一 tick 发起，与上面的调用合成一次 multicall
+  const [results, details] = await Promise.all([
+    calls.length ? provider.tryAll(calls) : Promise.resolve([]),
+    tokens.length ? provider.tokens(tokens, { fields: ['symbol', 'decimals'] }) : Promise.resolve([]),
+  ])
   let i = 0
   const allowances = results.slice(i, (i += pairs.length)) as Array<bigint | null>
   const permits = new Map(permitPairs.map((p, j) => [p, results[i + j] as { 0: bigint; 1: bigint; 2: bigint } | null]))
   i += permitPairs.length
   const meta = new Map<string, { decimals: number | null; symbol: string | null }>()
-  for (const t of tokens) {
-    const [decimals, symbol] = results.slice(i, (i += 2)) as [bigint | null, string | null]
-    meta.set(key(t), { decimals: decimals === null ? null : Number(decimals), symbol: typeof symbol === 'string' ? symbol : null })
-  }
+  tokens.forEach((t, j) => {
+    const d = details[j]
+    meta.set(key(t), { decimals: d?.decimals ?? null, symbol: d?.symbol ?? null })
+  })
   const nftStates = results.slice(i) as Array<boolean | null>
 
   const now = Math.floor(Date.now() / 1000)
@@ -404,9 +407,8 @@ export interface RevokeTx {
   approvals: Approval[]
 }
 
-const erc20Interface = new Interface(['function approve(address spender, uint256 amount) returns (bool)'])
-const permit2Interface = new Interface(['function lockdown((address token, address spender)[] approvals)'])
-const nftInterface = new Interface(['function setApprovalForAll(address operator, bool approved)'])
+const permit2Interface = /*#__PURE__*/ new Interface(['function lockdown((address token, address spender)[] approvals)'])
+const nftInterface = /*#__PURE__*/ new Interface(['function setApprovalForAll(address operator, bool approved)'])
 
 /**
  * 撤销授权要发的交易（不签名）：ERC20 每个一笔 approve(spender, 0)；Permit2 的全部合成一笔 lockdown；NFT 每个一笔 setApprovalForAll(false)。

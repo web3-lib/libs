@@ -48,7 +48,7 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 | `getAllowances(owner, spender, tokens, opts)` | `multi.allowances(...)` | 授权额度；`unlimited` 表示额度 ≥ uint96 最大值（覆盖 MaxUint256 及 UNI / COMP 这类截断为 uint96 的代币）；`decimals: false` 只查额度 |
 | `getNftCollections(contracts, opts)` | `nftCollections(multi, contracts, opts)` | **子路径 `/nft`**。NFT 集合 standard / name / symbol / totalSupply，`fields` 可选 |
 | `getNftBalances(owner, contracts, opts)` | `nftBalances(multi, owner, contracts)` | **`/nft`**。ERC721 持有数量 |
-| `getNftOwners(items, opts)` | `nftOwners(multi, items)` | **`/nft`**。ERC721 持有人，可混合多个集合；不存在的 tokenId 为 null；Tron 链上返回 T 开头的地址 |
+| `getNftOwners(items, opts)` | `nftOwners(multi, items)` | **`/nft`**。ERC721 持有人，可混合多个集合；不存在的 tokenId 为 null；Tron 链上返回 T 开头的地址。`nftOwners` / `nftBalances` / `erc1155Balances` 的第三个参数是 options（`NftOwnersOptions` / `NftBalancesOptions`，含 blockTag 等 CallOverrides 字段） |
 | `getNftTokenUris(items, opts)` | `nftTokenUris(multi, items, opts)` | **`/nft`**。元数据地址：自动兼容 ERC721 `tokenURI` 与 ERC1155 `uri`（`{id}` 按规范替换），`ipfsGateway` 转换 `ipfs://`；首次查询顺带识别集合标准并缓存，之后只发对应的调用 |
 | `getErc1155Balances(owner, items, opts)` | `erc1155Balances(multi, owner, items)` | **`/nft`**。ERC1155 余额 |
 | `getOwnerTokens(owner, opts)` | `ownerTokens(multi, owner, opts)` | **子路径 `/owner`**。资产列表：地址持有的代币（**不推荐使用**，结果不保证完整，见[资产列表](#资产列表)） |
@@ -59,12 +59,12 @@ await getErc1155Balances(user, [{ contract: ITEMS, tokenId: 7 }], { chainId: 137
 
 共同的规则：
 
-- **主币**：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）按主币处理，不发合约调用；name / symbol / 精度来自内置链信息表（`NATIVE_CURRENCIES`），可用 `nativeTokens` / `nativeName` / `nativeSymbol` / `nativeDecimals` 配置
+- **主币**：`0xeeee…eeee`（导出为 `NATIVE_TOKEN`，不区分大小写）按主币处理，不发合约调用；name / symbol / 精度来自内置链信息表（`NATIVE_CURRENCIES`），可用 `nativeTokens` / `nativeName` / `nativeSymbol` / `nativeDecimals` 配置；`await multi.nativeCurrency()` 返回生效的 `{ decimals, symbol, name }`（simulate / history / estimateCost / dividends 也用它）
 - **⚠ 零地址 `0x0000…0000` 默认也按主币处理**（返回主币余额，不会去调零地址上的 `balanceOf`）。如果你的数据里零地址代表别的含义，传 `nativeTokens: [NATIVE_TOKEN]` 只保留 `0xeeee…eeee`
 - **主币余额的读取方式**：默认和合约调用放在同一次 `eth_call` 里。有的链在合约里读主币余额恒为 0、不报错（如 Anubis），内置表 `NATIVE_BALANCE_MODES` 已为这类链改用 `eth_getBalance`；其他链可用 `nativeBalance: 'rpc'` 或 `{ erc20: '0x…' }` 配置，见[主币余额与 deployless](#主币余额与-deployless)
 - **缓存**：查过一次后按链缓存（各函数共用），之后只查会变的数据。decimals / NFT 标准永久缓存；name / symbol 在可升级合约上可能改，各自缓存 1 小时；最多 5 万个代币，超出淘汰最早的（与 solana-batch-call 一致）。已知精度可以直接传 `{ address, decimals }`（主币也适用，优先于内置配置）。缓存可以持久化，见[缓存持久化](#缓存持久化)
 - **失败**：单项失败（非合约地址、非法地址、不存在的 tokenId 等）不影响其他项，该项 `success: false`；整个请求失败（节点不可用等）才会抛错。`getBalances` / `getTokens` / `getAllowances` 的失败项还带 `error`（`invalid-address` 地址非法、`invalid-argument` 其他参数编码失败、`no-contract` 地址上没有合约、`reverted` 执行 revert、`decode-failed` 返回值无法解码、`not-configured` 没发请求的信息缺失，如主币不在内置链信息表里）和 `errorField`（哪一项没读到，如 `balance` / `decimals`），可以按原因分别处理（如地址非法报错、没有合约按 0）
-- **取消**：所有查询都可以传 `signal`（`AbortController`）：已取消时不发请求；查询中取消时立即 reject，合并在一起的底层请求继续完成、结果丢弃。切换代币时不必再手动比对、丢弃旧结果
+- **取消**：所有查询都可以传 `signal`（`AbortController`）：已取消时不发请求；查询中取消时立即 reject（`signal.reason`），还没发出的分片、备用节点切换、Tron 排队中的请求不再发出，Tron 的在途请求直接中断（ethers 节点的在途请求无法中断，结果丢弃）；和其他查询合并在一起的请求只有所有调用方都取消才中止。切换代币时不必再手动比对、丢弃旧结果
 - **只查余额**：`decimals: false` 时不查 decimals，结果不带 `decimals` / `formatted`（类型随之变化）。适合没有 `decimals` 的合约（ERC721 的 `balanceOf`）、或只需要原始数值的场景，冷启动时子调用数减半
 - **数值**：原始数值是最小单位的十进制字符串，需要计算时用 `BigInt(x)`；`formatted` 保留全部有效小数位、不四舍五入，整数不带小数点（单独格式化可用 `formatUnits(value, decimals)`；旧名 `formatAmount` 仍可用，已标记 deprecated）
 - **老代币**：symbol / name 返回 bytes32 的代币（MKR 等）也能解析
@@ -704,7 +704,7 @@ p.totalUsd // 代币 + LP 仓位的合计；p.tokens 按价值排序，p.lp 是 
 - **chainId 可选**：传了节点就能自动识别 chainId，结果缓存，钱包切链自动失效
 - **Tron**：走 Tron HTTP API，T 开头地址可以直接用
 - **浏览器插件钱包**：直接传 `window.ethereum`（EIP-1193）或 `window.tronWeb`
-- **大批量**：合约模式按 `chunkSize`（默认 500）分片；deployless 按 48KB initcode 上限自动分片，结果超过 24KB 也能拿回
+- **大批量**：合约模式按 `chunkSize`（默认 500）分片；deployless 按 48KB initcode 上限自动分片，结果超过 24KB 也能拿回。同一个 Provider 上所有查询的 multicall eth_call 合计同时在途最多 `maxConcurrentChunks`（默认 4），超出的排队；某一片被限频只重试这一片（最多 2 次，指数退避加随机抖动），超时不重发（已超时的请求节点上还在算，再发只会叠加负载）。不支持 deployless 的链上逐条 eth_call 的兜底另有 Provider 级上限 50。条数达到 `batch.maxSize` / `chunkSize` 的 `tryAll` 直接请求，不进合并队列
 
 ## 节点与备用节点
 
@@ -771,6 +771,7 @@ await multi.all(calls, { blockTag: 40_000_000 })                            // �
 - 单返回值的函数直接返回该值；多返回值返回 ethers `Result`（可按下标或名字取）；整数统一是 `bigint`
 - 结果类型按输入推断（元组保留各项类型）；ethcall 风格的 `all<T>(calls)` 返回 `T[]`，`all<any>(calls)` 返回 `any[]`
 - `tryAll` 中出现非法地址（如后端给的脏数据）只让该条为 `null`，不会拖垮整批
+- `tryAll`（以及全部允许失败的 `tryEach`）和 `call()` / `balances()` 一样进自动合并队列：同一时刻发起的查询合成一次 multicall、相同调用只请求一次；有不允许失败的条目时仍直接请求
 - `Contract` 暴露 ABI 里的**所有**函数（不只 view/pure），重载函数用完整签名访问：`c['getAmount(uint256,address)'](...)`
 
 ## 自动合并
@@ -836,6 +837,7 @@ const { results, topUps } = await batchCollect(multi, [key1, key2, key3], hotWal
   tokens: [USDT, NATIVE_TOKEN],   // 包含主币：代币归集确认后，扣掉手续费扫空剩余主币
   gasWallet: gasKey,
 })
+await batchCollect(multi, [key1, key2], hotWallet)  // 不传 tokens：只扫空主币
 
 // 通用批量调用合约
 const usdt = new Contract(USDT, ERC20_ABI)
@@ -1028,6 +1030,7 @@ new Provider(chainId, nodes?, { // 或 new Provider(nodes, { … })
   multicall: { address: '0x…', block: 0 }, // 自定义 Multicall3 地址（默认查内置表）
   deployless: false,                       // true：强制走 deployless
   chunkSize: 500,                          // 合约模式单次 eth_call 最多打包的调用数
+  maxConcurrentChunks: 4,                  // 本 Provider 上 multicall eth_call 合计同时在途上限；单片被限频只重试这一片
   batch: { wait: 0, maxSize: 500 },        // 自动合并参数
   fallback: { timeout: 10_000, cooldown: 30_000, stallTimeout: 0 }, // 节点超时 / 出错节点冷却时间（超时连续 3 次才冷却）/ 慢节点提前请求下一个
   tron: { apiKey, minInterval: 200 },      // 用 URL 创建 TronProvider 时的参数

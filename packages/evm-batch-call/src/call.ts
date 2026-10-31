@@ -1,6 +1,7 @@
 import { FunctionFragment, Interface, Utf8ErrorFuncs, getAddress, toBeHex, toUtf8String, zeroPadValue, type JsonFragmentType, type ParamType, type Result } from 'ethers'
 
 import { isTronAddress, toEvmAddress } from './tron.js'
+import { LruCache } from './util.js'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Params = any[]
@@ -130,12 +131,31 @@ function getInterface(call: Call): Interface {
   return iface
 }
 
+/**
+ * 地址 → checksum 地址（Tron 的 T 地址先转成 0x）。keccak 较贵，大批量时同一个合约地址会重复出现几千次：
+ * 按最近使用缓存 1 万条（encodeCall 的合约地址、aggregate3 编码时的地址校验共用这一份），结果本身也记一条，
+ * 再拿 checksum 地址来查时直接命中。非法地址不缓存，每次照常报错
+ */
+const checksumCache = new LruCache<string, string>(10_000)
+
+export function checksumAddress(address: string): string {
+  let checksummed = checksumCache.get(address)
+  if (checksummed === undefined) {
+    checksummed = getAddress(toEvmAddress(address))
+    checksumCache.set(address, checksummed)
+    if (checksummed !== address) {
+      checksumCache.set(checksummed, checksummed)
+    }
+  }
+  return checksummed
+}
+
 export function encodeCall(call: Call, allowFailure: boolean): CallRequest {
   const iface = getInterface(call)
   const fragment = iface.fragments[0] as FunctionFragment
   const params = normalizeAddresses(fragment, call.params)
   return {
-    target: getAddress(toEvmAddress(call.contract.address)),
+    target: checksumAddress(call.contract.address),
     allowFailure,
     callData: iface.encodeFunctionData(fragment, params),
     ethBalanceOf: call.kind === 'ethBalance' ? toEvmAddress(params[0] as string) : undefined,

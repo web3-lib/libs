@@ -10,7 +10,7 @@ const ROUTER = '0x7a250d5630b4cf539739df2c5dacb4c659f2488d' // Uniswap V2 Router
 const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
 const NFT = '0x3333333333333333333333333333333333333333'
 const ZERO = '0x0000000000000000000000000000000000000000'
-const provider = { getChainId: async () => 1 } as unknown as Provider
+const provider = { getChainId: async () => 1, nativeCurrency: async () => ({ decimals: 18, symbol: 'ETH', name: 'Ether' }) } as unknown as Provider
 
 const erc20 = new Interface(['function approve(address spender, uint256 amount)'])
 const v2 = new Interface(['function swapExactETHForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline)'])

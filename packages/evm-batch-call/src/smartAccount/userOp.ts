@@ -164,7 +164,7 @@ export function userOpToRpc(op: UserOperation): Record<string, unknown> {
 /** 估算 gas 时用的占位签名（65 字节、格式合法的 ECDSA 签名，账户校验时不会因为长度 / 格式直接 revert） */
 export const DUMMY_SIGNATURE = `0x${'f'.repeat(31)}0${'0'.repeat(32)}7${'a'.repeat(63)}1c`
 
-export const entryPointInterface = new Interface([
+export const entryPointInterface = /*#__PURE__*/ new Interface([
   'function handleOps((address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature)[] ops, address beneficiary)',
   'function getNonce(address sender, uint192 key) view returns (uint256)',
   'function getUserOpHash((address sender, uint256 nonce, bytes initCode, bytes callData, bytes32 accountGasLimits, uint256 preVerificationGas, bytes32 gasFees, bytes paymasterAndData, bytes signature) userOp) view returns (bytes32)',

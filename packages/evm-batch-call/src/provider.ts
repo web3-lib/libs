@@ -1,6 +1,6 @@
 import { type BigNumberish } from 'ethers'
 
-import { aggregate, type AggregateContext, type BlockTag, type CallOverrides, type EthersLikeProvider, type NativeBalanceMode } from './aggregate.js'
+import { aggregate, createGates, type AggregateContext, type BlockTag, type CallOverrides, type EthersLikeProvider, type NativeBalanceMode } from './aggregate.js'
 import { Batcher, type BatchOptions } from './batcher.js'
 import {
   asStringOrBytes32,
@@ -73,6 +73,12 @@ export interface ProviderConfig extends SourceOptions {
   deployless?: boolean
   /** 单次 eth_call 最多打包的调用数，超出自动拆分并发请求。默认 500 */
   chunkSize?: number
+  /**
+   * 同一个 Provider 上 multicall 的 eth_call（合约分片、deployless 按 48KB 的切片）合计同时在途的上限，默认 4，超出的排队。
+   * 拆成多片时，单片被限频只重试这一片（最多 2 次，指数退避加随机抖动）；超时不重试。
+   * 不支持 deployless 的链上逐条 eth_call 的兜底另有一个 Provider 级上限 50
+   */
+  maxConcurrentChunks?: number
   /** `provider.call()` 自动合并的参数 */
   batch?: BatchOptions
   /** `balances()` 里视为主币的地址，默认 0xeeee…eeee（NATIVE_TOKEN）和零地址 */
@@ -90,6 +96,13 @@ export interface ProviderConfig extends SourceOptions {
    * - `{ erc20: '0x…' }`：主币其实是一个 ERC20 合约，改调它的 balanceOf
    */
   nativeBalance?: NativeBalanceMode
+}
+
+/** Provider.nativeCurrency() 的结果；symbol / name 取不到时为 null */
+export interface NativeCurrencyInfo {
+  decimals: number
+  symbol: string | null
+  name: string | null
 }
 
 /** balances / allowances / tokens 共用：结果带读取时的区块号 */
@@ -245,6 +258,9 @@ export class Provider implements ContractRunner {
       chainId,
       multicall: config.deployless ? null : resolveMulticall(chainId, config.multicall),
       chunkSize: config.chunkSize ?? 500,
+      maxConcurrentChunks: config.maxConcurrentChunks,
+      // 闸门按 Provider 建一次：同一个 Provider 上所有查询的 multicall eth_call 合计在途 ≤ maxConcurrentChunks
+      ...createGates(config.maxConcurrentChunks),
       nativeBalance: config.nativeBalance ?? getNativeBalanceMode(chainId),
     }
   }
@@ -260,7 +276,19 @@ export class Provider implements ContractRunner {
     return this
   }
 
-  #nativeCurrency(chainId: number): { decimals: number; symbol: string | null; name: string | null } {
+  /**
+   * 当前链的主币信息：config.nativeDecimals / nativeSymbol / nativeName > 内置链信息表（NATIVE_CURRENCIES）>
+   * 默认（decimals：Tron 6、其他 18；symbol / name 为 null）。只传节点构造时会等 chainId 识别完成
+   *
+   * ```ts
+   * await multi.nativeCurrency() // { decimals: 18, symbol: 'BNB', name: 'BNB' }
+   * ```
+   */
+  async nativeCurrency(): Promise<NativeCurrencyInfo> {
+    return this.#nativeCurrency((await this.#ensureReady()).chainId)
+  }
+
+  #nativeCurrency(chainId: number): NativeCurrencyInfo {
     const known = getNativeCurrency(chainId)
     return {
       decimals: this.#config.nativeDecimals ?? known?.decimals ?? (isTronChain(chainId) ? 6 : 18),
@@ -454,6 +482,11 @@ export class Provider implements ContractRunner {
     return this.#batcher.loadSettled(calls, { blockTag: overrides.blockTag, from: overrides.from, minBlock: overrides.minBlock, signal: overrides.signal })
   }
 
+  /** 条数达到它（合并队列的 maxSize 和分片大小里较小的）时 tryAll 不进合并队列：自己就能凑满一批 */
+  #mergeLimit(): number {
+    return Math.max(1, Math.min(this.#config.batch?.maxSize ?? 500, this.#config.chunkSize ?? 500))
+  }
+
   /** withBlock / minBlock 时在同一批里加一条区块号查询，返回它的下标（不需要时为 -1） */
   #pushBlockNumber(calls: Call[], options: BlockOptions & CallOverrides): number {
     if (!options.withBlock && options.minBlock === undefined) {
@@ -634,6 +667,14 @@ export class Provider implements ContractRunner {
   }
 
   async #tryEach<T>(calls: readonly Call[], canFail: readonly boolean[], overrides?: CallOverrides): Promise<(T | null)[]> {
+    if (calls.length && calls.length < this.#mergeLimit() && canFail.length === calls.length && canFail.every((c) => c === true)) {
+      // 全部允许失败（tryAll 及多数 tryEach）的小查询：进自动合并队列，与同一时刻的其他查询合并成一次 multicall、相同调用去重。
+      // 编码失败只让该条为 null（Batcher 里按 settle 处理），节点错误照常抛出
+      const settled = await this.#settleAll(calls, overrides)
+      return settled.map((result) => valueOf<T>(result))
+    }
+    // 大查询（本身就够一批 / 一片）直接请求：不用等收集窗口、也不必逐条建 Promise；
+    // 有不允许失败的条目时也直接请求：它失败时整批 revert 并原样抛出（与合并队列里逐条 settle 的语义不同）
     // 允许失败的条目编码出错（如后端给的脏地址）只让该条为 null，不拖垮整批
     const requests: Array<CallRequest | null> = calls.map((call, i) => {
       const callCanFail = canFail[i]

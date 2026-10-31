@@ -1,9 +1,7 @@
-import { Interface } from 'ethers'
-
 import type { Provider } from '../provider.js'
-import { batchCall, tronModule } from '../write/batch.js'
-import { WriteRpc } from '../write/rpc.js'
-import { resolveSigner, type SignerInput } from '../write/signer.js'
+import { isTronChain } from '../tron.js'
+import { loadBatch, signerAddressOf } from '../write/lazy.js'
+import type { SignerInput } from '../write/signer.js'
 import { ZERO_ADDRESS, createCtx, evm, positionVersion, protocolById } from './common.js'
 import type {
   AddLiquidityParams,
@@ -97,9 +95,8 @@ export async function collectFees(provider: Provider, from: SignerInput, params:
 }
 
 /** 签名器的地址（Tron 上为 T 地址），不发交易 */
-async function signerAddress(provider: Provider, from: SignerInput): Promise<string> {
-  const tron = await tronModule(provider)
-  return tron ? tron.tronSignerAddress(from) : (await resolveSigner(from)).address
+function signerAddress(provider: Provider, from: SignerInput): Promise<string> {
+  return signerAddressOf(provider, from)
 }
 
 /** 添加前检查余额：代币按预计数量，主币按附带的 value（不含手续费） */
@@ -127,10 +124,13 @@ async function checkBalance(provider: Provider, plan: LiquidityPlan): Promise<vo
   })
 }
 
-const transferTopic = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']).getEvent('Transfer')?.topicHash as string
+/** Transfer(address,address,uint256) 的 topic（ERC721 与 ERC20 相同）；写成常量，模块级不再建 Interface */
+const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
 
 async function execute(provider: Provider, from: SignerInput, plan: LiquidityPlan, options: LiquiditySendOptions): Promise<LiquidityResult> {
   const { transactions } = plan
+  // 发送代码按需加载（只构建计划时不进首屏）
+  const { batchCall } = await loadBatch()
   const results = (
     await batchCall(
       provider,
@@ -155,9 +155,10 @@ async function execute(provider: Provider, from: SignerInput, plan: LiquidityPla
 /** 新建仓位的 tokenId：主交易回执里仓位合约从零地址转出的 NFT（Tron 上不读，为 null） */
 async function mintedTokenId(provider: Provider, plan: LiquidityPlan, hash: string): Promise<string | null> {
   try {
-    if (await tronModule(provider)) {
+    if (isTronChain(await provider.getChainId())) {
       return null
     }
+    const { WriteRpc } = await import('../write/rpc.js')
     const receipt = await (await WriteRpc.from(provider)).receipt(hash)
     const pm = evm((plan.transactions[plan.transactions.length - 1] as { to: string }).to)
     const log = receipt?.logs.find(

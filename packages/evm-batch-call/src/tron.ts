@@ -11,6 +11,7 @@ import {
 } from 'ethers'
 
 import type { EthersLikeProvider } from './aggregate.js'
+import { anySignal, createLimiter, markSignalAware, sleep } from './util.js'
 
 /** Tron 链 ID（与 TronGrid /jsonrpc 的 eth_chainId 一致） */
 export const TRON_CHAIN_ID = {
@@ -67,6 +68,15 @@ function toTronHex(address: string): string {
   return `41${toEvmAddress(address).slice(2).toLowerCase()}`
 }
 
+/** call / getBalance / request 的可选参数 */
+export interface TronCallOptions {
+  /**
+   * 取消：排队中的请求直接出队、不再发出，429 退避等待随之停止；内置 fetch 的在途请求直接中断
+   * （自定义 request 不接收 signal，在途请求照常完成、结果丢弃）。取消后 reject signal.reason
+   */
+  signal?: AbortSignal
+}
+
 /** 只用到 tronWeb 的这几个字段，兼容 tronweb v5/v6 及钱包注入的实例 */
 export interface TronWebLike {
   /** host 是当前连接的全节点地址，TronLink 切换网络时会变，用于区分 chainId 缓存 */
@@ -119,22 +129,27 @@ const ZERO_OWNER = '410000000000000000000000000000000000000000'
  * 注意：Tron HTTP API 只能查询最新状态，传历史 blockTag 会直接报错。
  */
 export class TronProvider implements EthersLikeProvider {
-  readonly #request: TronRequest
-  readonly #concurrency: number
+  /** 第三个参数 signal 只有内置 fetch 用到；自定义 request 原样只传 (path, body) */
+  readonly #request: (path: string, body: Record<string, unknown>, signal?: AbortSignal) => Promise<any>
   readonly #minInterval: number
   readonly #retries: number
   readonly #defaultFrom: TronProviderOptions['defaultFrom']
-  #active = 0
-  #nextStart = 0
-  readonly #waiting: Array<() => void> = []
+  readonly #slot: ReturnType<typeof createLimiter>
+  /** 上一次放行请求的时间（minInterval 限流） */
+  #lastStart = Number.NEGATIVE_INFINITY
+  readonly #throttleQueue: Array<() => void> = []
+  #throttleTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(options: TronProviderOptions = {}) {
-    this.#concurrency = Math.max(1, options.concurrency ?? 4)
+    this.#slot = createLimiter(Math.max(1, options.concurrency ?? 4))
     this.#minInterval = Math.max(0, options.minInterval ?? 0)
     this.#retries = Math.max(0, options.retries ?? 3)
     this.#defaultFrom = options.defaultFrom
+    // FallbackRpc 据此把调用方的 signal 传进来
+    markSignalAware(this)
     if (options.request) {
-      this.#request = options.request
+      const custom = options.request
+      this.#request = (path, body) => custom(path, body)
     } else {
       const host = (options.fullHost ?? 'https://api.trongrid.io').replace(/\/+$/, '')
       const headers: Record<string, string> = { 'content-type': 'application/json', ...options.headers }
@@ -142,17 +157,23 @@ export class TronProvider implements EthersLikeProvider {
         headers['TRON-PRO-API-KEY'] = options.apiKey
       }
       const timeout = options.timeout ?? 10_000
-      this.#request = async (path, body) => {
-        const res = await fetch(`${host}/${path}`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: timeout > 0 && Number.isFinite(timeout) ? AbortSignal.timeout(timeout) : undefined,
-        })
-        if (!res.ok) {
-          throw new HttpError(`Tron request ${path} failed: HTTP ${res.status}`, res.status)
+      this.#request = async (path, body, signal) => {
+        // 超时与调用方的取消合并：任一触发都中断 fetch
+        const combined = anySignal([timeout > 0 && Number.isFinite(timeout) ? AbortSignal.timeout(timeout) : undefined, signal])
+        try {
+          const res = await fetch(`${host}/${path}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: combined.signal,
+          })
+          if (!res.ok) {
+            throw new HttpError(`Tron request ${path} failed: HTTP ${res.status}`, res.status)
+          }
+          return await res.json()
+        } finally {
+          combined.dispose()
         }
-        return res.json()
       }
     }
   }
@@ -170,11 +191,11 @@ export class TronProvider implements EthersLikeProvider {
   }
 
   /** 直接请求 HTTP API（如 'wallet/getnowblock'），同样经过限流和 429 退避（写操作模块用） */
-  request(path: string, body: Record<string, unknown> = {}): Promise<any> {
-    return this.#limit(() => this.#request(path, body))
+  request(path: string, body: Record<string, unknown> = {}, options: TronCallOptions = {}): Promise<any> {
+    return this.#limit((signal) => this.#request(path, body, signal), options.signal)
   }
 
-  async call(tx: TransactionRequest): Promise<string> {
+  async call(tx: TransactionRequest, options: TronCallOptions = {}): Promise<string> {
     assertLatest(tx.blockTag)
     const body: Record<string, unknown> = {
       owner_address: tx.from ? toTronHex(String(tx.from)) : this.#getDefaultFrom(),
@@ -187,7 +208,7 @@ export class TronProvider implements EthersLikeProvider {
       body.call_value = Number(BigInt(tx.value))
     }
 
-    const res = await this.#limit(() => this.#request('wallet/triggerconstantcontract', body))
+    const res = await this.#limit((signal) => this.#request('wallet/triggerconstantcontract', body, signal), options.signal)
     const result = res?.result ?? {}
     const message = typeof result.message === 'string' ? decodeMessage(result.message) : ''
 
@@ -233,9 +254,9 @@ export class TronProvider implements EthersLikeProvider {
     return Number.parseInt(blockId.slice(-8), 16)
   }
 
-  async getBalance(address: unknown, blockTag?: unknown): Promise<bigint> {
+  async getBalance(address: unknown, blockTag?: unknown, options: TronCallOptions = {}): Promise<bigint> {
     assertLatest(blockTag)
-    const res = await this.#limit(() => this.#request('wallet/getaccount', { address: toTronHex(String(address)) }))
+    const res = await this.#limit((signal) => this.#request('wallet/getaccount', { address: toTronHex(String(address)) }, signal), options.signal)
     return BigInt(res?.balance ?? 0)
   }
 
@@ -244,46 +265,73 @@ export class TronProvider implements EthersLikeProvider {
     return from ? toTronHex(from) : ZERO_OWNER
   }
 
-  async #limit<T>(task: () => Promise<T>): Promise<T> {
-    if (this.#active >= this.#concurrency) {
-      // 名额由释放方直接转交（#active 不变），避免被唤醒前被新来的请求抢走而超出并发上限
-      await new Promise<void>((resolve) => this.#waiting.push(resolve))
-    } else {
-      this.#active++
-    }
-    try {
+  /**
+   * 限流：同时最多 concurrency 个在途（名额由释放方直接转交，不会超出上限），429 时指数退避重试。
+   * signal 取消后：排队中的直接出队，退避 / 间隔等待随之停止，不再发出新的请求
+   */
+  #limit<T>(task: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return this.#slot(async () => {
       for (let attempt = 0; ; attempt++) {
-        await this.#throttle()
+        await this.#throttle(signal)
+        signal?.throwIfAborted()
         try {
-          return await task()
+          return await task(signal)
         } catch (err) {
-          if (attempt >= this.#retries || !isRateLimited(err)) {
+          if (attempt >= this.#retries || !isRateLimited(err) || signal?.aborted) {
             throw err
           }
-          await sleep(1000 * 2 ** attempt)
+          await sleep(1000 * 2 ** attempt, signal)
         }
       }
-    } finally {
-      const next = this.#waiting.shift()
-      if (next) {
-        next()
-      } else {
-        this.#active--
-      }
-    }
+    }, signal)
   }
 
-  async #throttle(): Promise<void> {
+  /**
+   * 相邻两次请求发起的间隔 ≥ minInterval：排队等候，出队时才分配时间点。
+   * 排队中取消的直接出队，不占时间槽（后面的请求不会因为它白等）
+   */
+  #throttle(signal?: AbortSignal): Promise<void> {
     if (!this.#minInterval) {
+      return Promise.resolve()
+    }
+    signal?.throwIfAborted()
+    return new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        const i = this.#throttleQueue.indexOf(grant)
+        if (i !== -1) {
+          this.#throttleQueue.splice(i, 1)
+        }
+        reject(signal?.reason)
+      }
+      const grant = () => {
+        signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }
+      this.#throttleQueue.push(grant)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.#pumpThrottle()
+    })
+  }
+
+  /** 到点就放行队首的请求，并为下一个定时 */
+  #pumpThrottle(): void {
+    if (this.#throttleTimer || !this.#throttleQueue.length) {
       return
     }
-    const now = Date.now()
-    const start = Math.max(now, this.#nextStart)
-    this.#nextStart = start + this.#minInterval
-    if (start > now) {
-      await sleep(start - now)
+    const wait = this.#lastStart + this.#minInterval - Date.now()
+    if (wait > 0) {
+      this.#throttleTimer = setTimeout(() => {
+        this.#throttleTimer = null
+        this.#pumpThrottle()
+      }, wait)
+      return
     }
+    const grant = this.#throttleQueue.shift() as () => void
+    this.#lastStart = Date.now()
+    grant()
+    this.#pumpThrottle()
   }
+
 }
 
 function assertLatest(blockTag: unknown): void {
@@ -297,10 +345,6 @@ function isRateLimited(err: unknown): boolean {
   // fetch 实现抛 HttpError；tronWeb（axios）的错误带 response.status
   const e = err as { status?: number; response?: { status?: number } } | null
   return e?.status === 429 || e?.response?.status === 429
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function decodeMessage(hex: string): string {

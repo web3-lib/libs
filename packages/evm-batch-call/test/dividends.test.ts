@@ -3,6 +3,7 @@ import { Interface } from 'ethers'
 import { describe, expect, it, vi } from 'vitest'
 
 import { Provider } from '../src/index.js'
+import { resetDecimalsCache } from '../src/erc20.js'
 import { MULTICALL3_ADDRESS } from '../src/multicall.js'
 import { FLAP_TOKEN_SUFFIXES, buildClaimDividends, claimDividends, dividends, getDividends } from '../src/subpaths/dividends.js'
 import { createMockProvider, fakeToken } from './mockProvider.js'
@@ -143,9 +144,17 @@ describe('dividends', () => {
     expect(rev).toMatchObject({ status: 'skipped', error: 'reverted' })
   })
 
+  it('主币分红的 symbol / decimals 取 Provider 的主币信息（nativeSymbol 等配置优先）', async () => {
+    const p = new Provider(56, createMockProvider({ multicallAddresses: [MULTICALL3_ADDRESS], contracts: setupContracts() }), { nativeSymbol: 'XBNB' })
+    const { items } = await dividends(p, USER, { tokens: [TOKEN_WBNB], includeZero: true, prices: false })
+    expect(items[0]).toMatchObject({ asset: 'native', assetSymbol: 'XBNB', assetDecimals: 18 })
+  })
+
   it('分红资产的 decimals 读不到：标 decimalsUnknown', async () => {
     const contracts = setupContracts()
     contracts[REWARD] = answer(new Interface(['function symbol() view returns (string)']), { symbol: ['FXIon'] })
+    // decimals 现在走共用的元数据缓存：清掉前面测试里同一地址读到的精度
+    resetDecimalsCache()
     const p = new Provider(56, createMockProvider({ multicallAddresses: [MULTICALL3_ADDRESS], contracts }))
     const { items } = await dividends(p, USER, { tokens: [TOKEN_REWARD], includeZero: true, prices: false })
     expect(items[0]).toMatchObject({ asset: REWARD, decimalsUnknown: true, usd: null })

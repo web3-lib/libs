@@ -20,7 +20,7 @@ import {
 } from './common.js'
 import type { IncreaseLiquidityParams, LiquidityPlan, NewPositionParams, PositionRef, RemoveLiquidityParams } from './types.js'
 
-export const pmInterface = new Interface([
+export const pmInterface = /*#__PURE__*/ new Interface([
   'function ownerOf(uint256 tokenId) view returns (address)',
   'function getApproved(uint256 tokenId) view returns (address)',
   'function isApprovedForAll(address owner, address operator) view returns (bool)',
@@ -30,7 +30,7 @@ export const pmInterface = new Interface([
   'function initializePool((address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) key, uint160 sqrtPriceX96) payable returns (int24)',
   'function multicall(bytes[] data) payable returns (bytes[] results)',
 ])
-const stateViewInterface = new Interface([
+const stateViewInterface = /*#__PURE__*/ new Interface([
   'function getSlot0(bytes32 poolId) view returns (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee)',
   'function getFeeGrowthInside(bytes32 poolId, int24 tickLower, int24 tickUpper) view returns (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128)',
   'function getPositionInfo(bytes32 poolId, address owner, int24 tickLower, int24 tickUpper, bytes32 salt) view returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128)',
