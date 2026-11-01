@@ -3,11 +3,11 @@
  * 并与官方 TaxTokenHelper.getDividendInfo 交叉核对。默认跳过（上游节点要保留旧状态，如 blastapi）：
  *
  * ```sh
- * anvil --fork-url https://bsc-mainnet.public.blastapi.io --hardfork prague --port 18651
+ * anvil --fork-url https://bsc-mainnet.public.blastapi.io --hardfork prague --no-rate-limit --port 18651
  * FORK_RPC=http://127.0.0.1:18651 npx vitest run test/dividends-fork.test.ts
  * ```
  */
-import { Contract, JsonRpcProvider, Wallet, parseEther } from 'ethers'
+import { Contract, JsonRpcProvider, Wallet, getAddress, id, parseEther } from 'ethers'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { Provider } from '../src/index.js'
@@ -21,6 +21,7 @@ const TOKEN_ERC20 = '0xB169215e59E11C84aa794B124f5345d58b447777'
 const HOLDERS_ERC20 = ['0x4D8ed7Aa793D921E60cA5A007921cc27Bc6ff650', '0xEBbDfe1881F01b4355758E8F1e09f40A0D62dD8f', '0xb39e538193cc4426A950741372De7561fc5833dB', '0x45a6f15a5Ccac5F61C19196d0788C01f23bB85a9']
 const HELPER_ABI = ['function getDividendInfo(address token, address user) view returns (uint256 claimed, uint256 pending)']
 const ERC20_ABI = ['function balanceOf(address) view returns (uint256)']
+const TRANSFER_TOPIC = id('Transfer(address,address,uint256)')
 
 fork('Flap 分红（BSC 分叉）', { timeout: 180_000 }, () => {
   let rpc: JsonRpcProvider
@@ -28,13 +29,38 @@ fork('Flap 分红（BSC 分叉）', { timeout: 180_000 }, () => {
   let snapshot: string
   const fast = { pollInterval: 100 }
   const helper = () => new Contract(FLAP_DIVIDEND_CHAINS[56]?.taxTokenHelper as string, HELPER_ABI, rpc)
-  /** 找一个还有可领取分红的持有人 */
+  /** 固定名单里的持有人会陆续领完：再从最近的 Transfer 日志里补充收款方作候选（按代币缓存） */
+  const discovered = new Map<string, Promise<string[]>>()
+  function candidates(token: string, holders: string[]): Promise<string[]> {
+    let found = discovered.get(token)
+    if (!found) {
+      found = (async () => {
+        const latest = await rpc.getBlockNumber()
+        const seen = new Set<string>()
+        for (let to = latest; to > latest - 30_000 && seen.size < 100; to -= 1_000) {
+          // 上游不支持 / 限频时不再继续扫（公共节点上每次失败都要等很久，会拖到用例超时）
+          const logs = await rpc.getLogs({ address: token, topics: [TRANSFER_TOPIC], fromBlock: to - 999, toBlock: to }).catch(() => null)
+          if (!logs) break
+          for (const log of logs) if (log.topics[2]) seen.add(getAddress('0x' + log.topics[2].slice(26)))
+        }
+        return [...seen]
+      })()
+      discovered.set(token, found)
+    }
+    return found.then((more) => [...new Set([...holders.map((h) => getAddress(h)), ...more])])
+  }
+  /** 找一个还有可领取分红的持有人：先用官方 helper 一次批量筛出 pending > 0 的，再逐个用 dividends() 取完整的项 */
   async function pick(token: string, holders: string[]): Promise<DividendItem> {
-    for (const h of holders) {
+    const list = await candidates(token, holders)
+    const helperCall = multi.contract(FLAP_DIVIDEND_CHAINS[56]?.taxTokenHelper as string, HELPER_ABI)
+    const infos = await multi.tryAll(list.map((h) => helperCall.getDividendInfo(token, h)))
+    for (const [i, h] of list.entries()) {
+      const pending = (infos[i] as [bigint, bigint] | null)?.[1] ?? 0n
+      if (pending === 0n) continue
       const { items } = await dividends(multi, h, { tokens: [token], prices: false })
       if (items[0]) return items[0]
     }
-    throw new Error(`no holder with claimable dividends for ${token}`)
+    throw new Error(`no holder with claimable dividends for ${token} (checked ${list.length} candidates)`)
   }
   const sender = async () => {
     const w = Wallet.createRandom()

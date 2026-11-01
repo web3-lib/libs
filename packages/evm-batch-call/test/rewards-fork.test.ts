@@ -2,7 +2,7 @@
  * 一键领取手续费和挖矿奖励：在 BSC 主网分叉上核对，默认跳过。
  *
  * ```sh
- * anvil --fork-url https://bsc-rpc.publicnode.com --hardfork prague --port 18951
+ * anvil --fork-url https://bsc-rpc.publicnode.com --hardfork prague --no-rate-limit --port 18951
  * BSC_FORK_RPC=http://127.0.0.1:18951 npx vitest run test/rewards-fork.test.ts
  * ```
  *
