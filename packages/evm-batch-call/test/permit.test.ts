@@ -131,7 +131,9 @@ describe('EIP-2612 permit', () => {
 describe('Permit2', () => {
   it('PermitSingle / PermitBatch：读 Permit2 里的 nonce，精确额度，签名后能编码 permit() calldata', async () => {
     const p = setup()
-    const single = await buildPermit2Single(p, { token: TOKEN, owner: OWNER, spender: SPENDER, amount: 1000n })
+    // 固定签名截止时间：下面要比较两次构造的 message，各自取当前时间可能正好跨过秒的边界
+    const deadlineAt = Math.floor(Date.now() / 1000) + 1800
+    const single = await buildPermit2Single(p, { token: TOKEN, owner: OWNER, spender: SPENDER, amount: 1000n }, { deadlineAt })
     expect(single.nonces).toEqual(['4'])
     expect(single.typedData.domain).toMatchObject({ name: 'Permit2', chainId: 1, verifyingContract: PERMIT2_ADDRESS })
     const signed = await signPermit(wallet, single)
@@ -143,7 +145,7 @@ describe('Permit2', () => {
 
     const batch = await buildPermit2Batch(p, { owner: OWNER, spender: SPENDER, items: [{ token: TOKEN, amount: 1n }, { token: DAI, amount: 2n }] })
     // 已废弃的第四个参数 single 仍然可用：与 buildPermit2Single 的结果相同
-    const legacy = await buildPermit2Batch(p, { owner: OWNER, spender: SPENDER, items: [{ token: TOKEN, amount: 1000n }] }, {}, true)
+    const legacy = await buildPermit2Batch(p, { owner: OWNER, spender: SPENDER, items: [{ token: TOKEN, amount: 1000n }] }, { deadlineAt }, true)
     expect(legacy.kind).toBe('permit2-single')
     expect(legacy.typedData.primaryType).toBe(single.typedData.primaryType)
     expect(legacy.typedData.message).toEqual(single.typedData.message)
